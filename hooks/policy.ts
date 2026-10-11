@@ -1,7 +1,6 @@
-// Ported from pi-palantir extensions/foundry-role (policy.ts, branch-gate.ts,
-// approval-mode.ts). Pure functions: no `$`, so the test kit and the hooks
-// share them. One deliberate change: read/mutation comes from orthanc's own
-// agent-manifest `kind`, not the pfoundry manifest pi-palantir still used.
+// The approval ladder, the branch gate and the approval modes. Pure functions:
+// no `$`, so the test kit and the hooks share them. Read/mutation comes from
+// orthanc's own agent-manifest `kind`.
 
 export type ManifestCommand = { path: string; kind?: string; auth?: string; input?: string }
 

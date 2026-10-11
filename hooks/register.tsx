@@ -1,6 +1,6 @@
-// foundry: the pi-palantir governed lane as a Claude Code mod.
+// foundry: a governed Palantir Foundry lane as a Claude Code mod.
 // Orthanc tools, the approval ladder, Foundry context in the system prompt,
-// pi-palantir's slash commands, and /foundry, the visual view of what is in context.
+// one slash command per Foundry resource, and /foundry, the visual view of what is in context.
 // Orthanc is the only path to Foundry: what it cannot do waits on an orthanc bead.
 
 import { atom, read, update } from 'claude-code'
@@ -233,7 +233,7 @@ function contextText(scope: FoundryScope, mode: ApprovalMode): string {
   return lines.join('\n')
 }
 
-// The auto tier's classifier: pi-palantir asked Jev; here a Haiku call.
+// The auto tier's classifier: a Haiku call.
 // Anything but a clean JSON verdict is null, which the ladder turns into ask.
 async function guardVerdict(
   $: EngineInterface,

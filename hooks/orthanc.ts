@@ -1,4 +1,4 @@
-// Ported from pi-palantir extensions/foundry-context/orthanc-tools.ts.
+// The orthanc_help and orthanc_cli tools' pure half.
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 

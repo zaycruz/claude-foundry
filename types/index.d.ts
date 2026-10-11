@@ -2,7 +2,7 @@ export type FoundryNamed = { rid: string; name: string }
 
 export type FoundryObjectType = { apiName: string; displayName: string; rid?: string }
 
-/** The scope keys that hold selected Foundry resources, as pi-palantir names them. */
+/** The scope keys that hold selected Foundry resources. */
 export type FoundryResourceKind =
   | 'folders'
   | 'datasets'

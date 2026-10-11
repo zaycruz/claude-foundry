@@ -1,4 +1,4 @@
-// Pure: the slash-command table (pi-palantir parity), scope shape and edits,
+// Pure: the slash-command table (one name per resource), scope shape and edits,
 // resource rows, the prompt block and the /foundry context tree.
 // Everything that runs orthanc stays in register.tsx, where `$` lives.
 
