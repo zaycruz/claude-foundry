@@ -2,7 +2,8 @@
 
 A Claude Code mod that lets Claude work in Palantir Foundry through the
 [Orthanc](#orthanc) CLI, with the operator in control of every change.
-It is the Claude Code port of `pi-palantir`.
+Orthanc is the only path into Foundry: when it can't do something, the mod
+says so instead of falling back to REST.
 
 - **Two tools.** `orthanc_help` discovers Orthanc's command surface; `orthanc_cli`
   runs a command in agent mode and returns its `foundry-agent-v1` envelope.
