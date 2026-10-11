@@ -614,7 +614,7 @@ async function setupChecks($: EngineInterface): Promise<{ checks: Check[]; scope
     label: 'orthanc',
     ok: !isErrorEnvelope(version),
     detail: isErrorEnvelope(version) ? errorsOf(version) : `${await orthancBin($)} ${versionText}`,
-    fix: 'Install orthanc or set ORTHANC_BIN.',
+    fix: 'install Orthanc in your terminal, then run /onboard again:\n  curl -fsSL https://github.com/zaycruz/orthanc/releases/latest/download/install.sh | sh\n  orthanc onboarding\n(or set ORTHANC_BIN to an orthanc you already have)',
   })
   const profiles = await listProfiles($)
   checks.push({ label: 'profiles', ok: profiles.length > 0, detail: profiles.map(profile => `${profile.name} (${profile.status || '?'})`).join(', ') || 'none', fix: '/auth <name> to create one.' })
