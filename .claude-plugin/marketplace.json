@@ -1,0 +1,7 @@
+{
+  "name": "claude-foundry",
+  "owner": { "name": "Zay Cruz", "url": "https://github.com/zaycruz" },
+  "plugins": [
+    { "name": "foundry", "source": "./", "description": "Palantir Foundry for Claude Code through the Orthanc CLI" }
+  ]
+}
