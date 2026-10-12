@@ -4,7 +4,7 @@
 // Orthanc is the only path to Foundry: what it cannot do waits on an orthanc bead.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { Args, EngineInterface, EventResult, Next, Register } from 'claude-code'
 
 import type { FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
 import {
@@ -54,13 +54,32 @@ import {
   DEFAULT_APPROVAL_MODE,
   type GateClassification,
   type GuardVerdict,
+  FOUNDRY_GIT_PUSH_REASON,
+  gitPushDirectories,
+  gitPushNamesFoundry,
   ladderDecision,
   loopStep,
   modeGuidance,
   ORTHANC_CLI,
   ORTHANC_HELP,
   parseApprovalMode,
+  resolveOrthancCommand,
+  rulesWriteReason,
 } from './policy'
+import {
+  domainPatterns,
+  langfuseApiBase,
+  otlpBody,
+  parseEnvFile,
+  randomHex,
+  redactString,
+  resourceAttributes,
+  serializePayload,
+  type SpanRecord,
+  type TraceConfig,
+  type TraceEnv,
+  traceConfig,
+} from './telemetry'
 
 const SCOPE = { plugin: 'foundry', key: 'scope' } as const
 const PICKER = { plugin: 'foundry', key: 'picker' } as const
@@ -143,7 +162,9 @@ async function renderHelp($: EngineInterface, input: { group?: string; command?:
 
 async function executeCli($: EngineInterface, input: { command: string; args: string[]; profile?: string }): Promise<Envelope> {
   const commands = await loadManifest($)
-  const command = commands.find(entry => entry.path === input.command)
+  // The same resolution the guard classified, so what runs is what was judged.
+  const resolved = resolveOrthancCommand(input.command, input.args, commands)
+  const command = commands.find(entry => entry.path === resolved.path)
   if (command === undefined) {
     return failure('unknown-command', `Unknown Orthanc command '${input.command}'. Call orthanc_help first.`, input.command)
   }
@@ -154,7 +175,7 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
       command.path,
     )
   }
-  const envelope = await runOrthanc($, [...command.path.split(' '), ...input.args], input.profile)
+  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile)
   return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path) : null)
 }
 
@@ -233,13 +254,58 @@ function contextText(scope: FoundryScope, mode: ApprovalMode): string {
   return lines.join('\n')
 }
 
+const RULES_LIMIT = 4000
+
+// Operator rules for the Haiku guard: ~/.claude/foundry/rules.md (the
+// operator's), then the project's .claude/foundry-rules.md, which a cloned
+// repository can carry and so may only make the guard stricter. They steer the
+// guard only; the branch rule and the destructive rule run before it.
+type OperatorRule = { path: string; text: string; isProject: boolean }
+// Read once per session: an edit made mid-session (by anyone) waits for the next.
+let rulesSnapshot: OperatorRule[] | undefined
+
+async function operatorRules($: EngineInterface): Promise<OperatorRule[]> {
+  if (rulesSnapshot !== undefined) return rulesSnapshot
+  const home = (await $.env.get('HOME'))?.trim()
+  const paths = [...(home ? [{ path: `${home}/.claude/foundry/rules.md`, isProject: false }] : []), { path: '.claude/foundry-rules.md', isProject: true }]
+  const found: { path: string; text: string; isProject: boolean }[] = []
+  for (const { path, isProject } of paths) {
+    const text = await $.fs.read(path).then(String).catch(() => '')
+    if (text.trim() !== '') found.push({ path, text: text.trim().slice(0, RULES_LIMIT), isProject })
+  }
+  rulesSnapshot = found
+  return found
+}
+
 // The auto tier's classifier: a Haiku call.
 // Anything but a clean JSON verdict is null, which the ladder turns into ask.
+// Project rules can come with a cloned repository, so they only tighten: the
+// guard runs with and without them and the stricter verdict stands.
 async function guardVerdict(
   $: EngineInterface,
   tool: string,
   input: unknown,
   classification: GateClassification,
+): Promise<GuardVerdict | null> {
+  const rules = await operatorRules($)
+  const operator = rules.filter(rule => !rule.isProject).map(rule => rule.text).join('\n\n')
+  const project = rules.filter(rule => rule.isProject).map(rule => rule.text).join('\n\n')
+  const base = await guardOnce($, tool, input, classification, operator, '')
+  if (project === '' || base === null || base.action === 'deny') return base
+  const withProject = await guardOnce($, tool, input, classification, operator, project)
+  if (withProject === null) return null
+  return GUARD_RANK[withProject.action] > GUARD_RANK[base.action] ? withProject : base
+}
+
+const GUARD_RANK = { approve: 0, ask: 1, deny: 2 } as const
+
+async function guardOnce(
+  $: EngineInterface,
+  tool: string,
+  input: unknown,
+  classification: GateClassification,
+  operator: string,
+  project: string,
 ): Promise<GuardVerdict | null> {
   const answer = await $.model.complete({
     model: GUARD_MODEL,
@@ -249,7 +315,11 @@ async function guardVerdict(
       'You review one Palantir Foundry mutation an agent wants to run. Answer only JSON: ' +
       '{"action":"approve"|"ask"|"deny","reason":"<one sentence>"}. approve: routine, reversible, ' +
       'scoped work on an agent branch. ask: unclear blast radius, shared or production resources, ' +
-      'permissions, schema or ontology changes. deny: clearly destructive or targeting main/master or production.',
+      'permissions, schema or ontology changes. deny: clearly destructive or targeting main/master or production.' +
+      (operator === '' ? '' : `\nThe operator's rules, which take precedence over the defaults above:\n${operator}`) +
+      (project === ''
+        ? ''
+        : `\nThe project's rules, which may only make you more cautious:\n${project}`),
     prompt: JSON.stringify({ tool, input, classification }).slice(0, 8000),
   })
   if (!answer.isAnswered) return null
@@ -262,6 +332,245 @@ async function guardVerdict(
   } catch {
     return null
   }
+}
+
+// The session's directory; '/' where the host has none (the test kit).
+async function sessionCwd($: EngineInterface): Promise<string> {
+  try {
+    return await $.session.cwd()
+  } catch {
+    return '/'
+  }
+}
+
+async function homeDir($: EngineInterface): Promise<string> {
+  try {
+    return (await $.env.get('HOME'))?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+// Tracing: one OTLP trace per turn that touched Foundry, sent to Langfuse or
+// any OTLP/HTTP collector. Config comes from the environment, else from an env
+// file (~/.claude/foundry/otel.env, which Claude cannot write) sourced in a
+// subprocess; keys and headers stay in the mod's memory and are never shown.
+// Tracing never changes a gate outcome and never blocks a turn.
+type Tracing = { config: TraceConfig; resource: Record<string, string>; redact: RegExp[]; everyTurn: boolean; source: string }
+type TurnTrace = { traceId: string; rootSpanId: string; startMs: number; prompt: string; spans: SpanRecord[]; touched: boolean; dropped: number }
+type GateNote = { outcome?: string; reason?: string; command?: string; foundry: boolean }
+let tracing: Tracing | null = null
+let literalNote = ''
+let tracingNote = 'off: no OTLP endpoint or Langfuse keys configured'
+let lastExport: { traceId: string; status: string; atMs: number } | null = null
+const turnTraces = new Map<string, TurnTrace>()
+const ENV_FILE_TIMEOUT_MS = 10_000
+const MAX_SPANS = 200
+const STALE_TURN_MS = 3_600_000
+
+// Read as data (parseEnvFile), never sourced. 1Password references resolve
+// through `op read` by argv, in-process; the values never reach the model.
+async function traceEnvFromFile($: EngineInterface, path: string): Promise<TraceEnv | null> {
+  const text = await $.fs.read(path).then(String).catch(() => null)
+  if (text === null) return null
+  const { env, refs, literalSecrets } = parseEnvFile(text)
+  if (literalSecrets.length > 0) literalNote = ` (ignored ${literalSecrets.join(', ')}: write them as op:// references)`
+  // Together, so a hung `op` costs one timeout, not one per reference.
+  await Promise.all(
+    Object.entries(refs).map(async ([key, ref]) => {
+      const ran = await $.process.run(['op', 'read', '--no-newline', ref], { timeoutMs: ENV_FILE_TIMEOUT_MS }).catch(() => null)
+      if (ran && ran.exitCode === 0 && ran.stdout.trim() !== '') env[key] = ran.stdout.trim()
+    }),
+  )
+  return env
+}
+
+async function loadTracing($: EngineInterface, profile: string | null): Promise<void> {
+  tracing = null
+  literalNote = ''
+  // $.env.get takes literal names, so the variables the mod reads stay listable.
+  const read = (value: string | undefined) => value || undefined
+  const env: TraceEnv = {
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: read(await $.env.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')),
+    OTEL_EXPORTER_OTLP_ENDPOINT: read(await $.env.get('OTEL_EXPORTER_OTLP_ENDPOINT')),
+    OTEL_EXPORTER_OTLP_HEADERS: read(await $.env.get('OTEL_EXPORTER_OTLP_HEADERS')),
+    LANGFUSE_BASE_URL: read(await $.env.get('LANGFUSE_BASE_URL')),
+    LANGFUSE_HOST: read(await $.env.get('LANGFUSE_HOST')),
+    LANGFUSE_PUBLIC_KEY: read(await $.env.get('LANGFUSE_PUBLIC_KEY')),
+    LANGFUSE_SECRET_KEY: read(await $.env.get('LANGFUSE_SECRET_KEY')),
+    FOUNDRY_OTEL: read(await $.env.get('FOUNDRY_OTEL')),
+    FOUNDRY_OTEL_TOOL_IO: read(await $.env.get('FOUNDRY_OTEL_TOOL_IO')),
+    PALANTIR_AGENT_OTEL_TOOL_IO: read(await $.env.get('PALANTIR_AGENT_OTEL_TOOL_IO')),
+    OTEL_SERVICE_NAME: read(await $.env.get('OTEL_SERVICE_NAME')),
+    OTEL_RESOURCE_ATTRIBUTES: read(await $.env.get('OTEL_RESOURCE_ATTRIBUTES')),
+    FOUNDRY_OTEL_REDACT_DOMAINS: read(await $.env.get('FOUNDRY_OTEL_REDACT_DOMAINS')),
+  }
+  for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key]
+  let source = 'environment'
+  if ((env.FOUNDRY_OTEL ?? '').toLowerCase() === 'off') {
+    tracingNote = 'off: FOUNDRY_OTEL=off'
+    return
+  }
+  if (traceConfig(env) === null) {
+    const home = await homeDir($)
+    // Only the operator's own file: a path from the environment could come with a project.
+    if (home === '') return
+    const path = `${home}/.claude/foundry/otel.env`
+    const fromFile = await traceEnvFromFile($, path).catch(() => null)
+    if (fromFile === null) return
+    Object.assign(env, fromFile)
+    source = '~/.claude/foundry/otel.env'
+  }
+  const config = traceConfig(env)
+  if (config === null) {
+    tracingNote = (env.FOUNDRY_OTEL ?? '').toLowerCase() === 'off' ? 'off: FOUNDRY_OTEL=off' : `off: ${source} has no OTLP endpoint or Langfuse keys (or a key reference did not resolve)`
+    return
+  }
+  tracing = {
+    config,
+    resource: resourceAttributes(env, profile),
+    redact: domainPatterns(env.FOUNDRY_OTEL_REDACT_DOMAINS),
+    everyTurn: (env.FOUNDRY_OTEL ?? '').toLowerCase() === 'all',
+    source,
+  }
+  $.ui.log(`foundry: tracing to ${config.host}`, { to: 'debug' })
+  tracingNote = `on: ${config.host} (from ${source}${config.toolIo ? '' : ', tool input and output off'}${tracing.everyTurn ? ', every turn' : ', Foundry turns'})`
+}
+
+function startTurn(key: string, prompt: string, nowMs: number): TurnTrace {
+  for (const [stale, turn] of turnTraces) if (stale !== 'main' && nowMs - turn.startMs > STALE_TURN_MS) turnTraces.delete(stale)
+  const turn = { traceId: randomHex(32), rootSpanId: randomHex(16), startMs: nowMs, prompt, spans: [], touched: false, dropped: 0 }
+  turnTraces.set(key, turn)
+  return turn
+}
+
+function recordTool(key: string, tool: string, input: unknown, ran: unknown, note: GateNote, startMs: number, endMs: number): void {
+  if (tracing === null) return
+  const turn = turnTraces.get(key) ?? startTurn(key, '', startMs)
+  turn.touched ||= note.foundry
+  if (turn.spans.length >= MAX_SPANS) {
+    turn.dropped += 1
+    return
+  }
+  const result = (ran ?? {}) as Record<string, unknown>
+  const denied = typeof result.deny === 'string' ? result.deny : undefined
+  const output = denied ?? result.text ?? result.result
+  // Only Foundry calls carry their input and output; other tools in the turn are named, not shown.
+  const io = tracing.config.toolIo && note.foundry
+  const attributes: SpanRecord['attributes'] = {
+    'langfuse.observation.type': 'tool',
+    'gen_ai.tool.name': tool,
+    ...(note.command ? { 'foundry.command': redactString(note.command, tracing.redact) } : {}),
+    ...(note.outcome ? { 'foundry.gate.outcome': note.outcome } : {}),
+    ...(note.reason ? { 'foundry.gate.reason': serializePayload(note.reason, tracing.redact) ?? '' } : {}),
+  }
+  const inputJson = io ? serializePayload(input, tracing.redact) : undefined
+  const outputJson = io ? serializePayload(output, tracing.redact) : undefined
+  if (inputJson) attributes['langfuse.observation.input'] = inputJson
+  if (outputJson) attributes['langfuse.observation.output'] = outputJson
+  turn.spans.push({
+    spanId: randomHex(16),
+    parentSpanId: turn.rootSpanId,
+    name: `tool ${tool}${note.command ? ` ${redactString(note.command, tracing.redact)}` : ''}`,
+    startMs,
+    endMs,
+    attributes,
+    ...(denied ? { error: `denied: ${denied}` } : result.isError === true ? { error: 'tool error' } : {}),
+  })
+}
+
+async function exportTurn($: EngineInterface, key: string, answer: string, usage: unknown, reason: string, endMs: number): Promise<void> {
+  const turn = turnTraces.get(key)
+  turnTraces.delete(key)
+  if (tracing === null || turn === undefined || !(turn.touched || tracing.everyTurn)) return
+  const sessionId = await $.session.id().catch(() => 'unknown')
+  const redact = tracing.redact
+  const root: SpanRecord = {
+    spanId: turn.rootSpanId,
+    name: key === 'main' ? 'claude-foundry turn' : 'claude-foundry subagent turn',
+    startMs: turn.startMs,
+    endMs,
+    attributes: {
+      'langfuse.observation.type': 'agent',
+      'langfuse.trace.name': key === 'main' ? 'claude-foundry turn' : 'claude-foundry subagent turn',
+      'langfuse.session.id': sessionId,
+      'session.id': sessionId,
+      'foundry.turn.reason': reason,
+      'foundry.tool.count': turn.spans.length,
+      ...(turn.dropped > 0 ? { 'foundry.spans.dropped': turn.dropped } : {}),
+      ...(key === 'main' ? {} : { 'foundry.agent.id': key }),
+    },
+    ...(reason === 'error' || reason === 'refusal' ? { error: reason } : {}),
+  }
+  const prompt = serializePayload(turn.prompt || undefined, redact)
+  const output = serializePayload(answer || undefined, redact)
+  if (prompt) root.attributes['langfuse.observation.input'] = prompt
+  if (output) root.attributes['langfuse.observation.output'] = output
+  const spans = [root, ...turn.spans]
+  const counted = usage as { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; model?: string } | undefined
+  if (counted?.model) {
+    spans.push({
+      spanId: randomHex(16),
+      parentSpanId: turn.rootSpanId,
+      name: 'model',
+      startMs: turn.startMs,
+      endMs,
+      attributes: {
+        'langfuse.observation.type': 'generation',
+        'gen_ai.request.model': counted.model,
+        'langfuse.observation.model.name': counted.model,
+        'langfuse.observation.usage_details': JSON.stringify({
+          input: counted.input_tokens ?? 0,
+          output: counted.output_tokens ?? 0,
+          cache_read_input_tokens: counted.cache_read_input_tokens ?? 0,
+          cache_creation_input_tokens: counted.cache_creation_input_tokens ?? 0,
+        }),
+      },
+    })
+  }
+  const body = otlpBody(turn.traceId, tracing.resource, spans)
+  const sent = { traceId: turn.traceId, status: 'sending', atMs: endMs }
+  lastExport = sent
+  try {
+    const response = await $.http.fetch(tracing.config.url, { method: 'POST', headers: tracing.config.headers, body })
+    sent.status = `HTTP ${response.status}`
+  } catch (error) {
+    sent.status = `failed: ${redactString(error instanceof Error ? error.message : 'fetch error').slice(0, 120)}`
+  }
+}
+
+function touchesFoundry(tool: string, input: Record<string, unknown>, classified: boolean): boolean {
+  if (classified || tool === ORTHANC_CLI || tool === ORTHANC_HELP) return true
+  if (tool === 'Bash') return /\borthanc\b/.test(asString(input.command))
+  return /^mcp__.*(palantir|foundry)/i.test(tool)
+}
+
+async function traceText($: EngineInterface): Promise<string> {
+  const lines = [`Tracing ${tracingNote}${literalNote}.`]
+  if (tracing === null) {
+    lines.push('Set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS, or LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY, in the environment or in ~/.claude/foundry/otel.env (KEY=value lines; keys as op:// references; read once per session).')
+    return lines.join('\n')
+  }
+  if (lastExport === null) {
+    lines.push('No Foundry turn exported yet this session.')
+    return lines.join('\n')
+  }
+  lines.push(`Last trace ${lastExport.traceId}: ${lastExport.status}.`)
+  const api = langfuseApiBase(tracing.config)
+  if (api === null || !lastExport.status.startsWith('HTTP 2')) return lines.join('\n')
+  const headers = Object.fromEntries(Object.entries(tracing.config.headers).filter(([name]) => name.toLowerCase() !== 'content-type'))
+  const found = await $.http.fetch(`${api}/traces/${lastExport.traceId}`, { headers }).catch(() => null)
+  if (found?.ok) {
+    let count = '?'
+    try {
+      const parsed = JSON.parse(found.text) as { observations?: unknown[] }
+      count = String(parsed.observations?.length ?? '?')
+    } catch {}
+    lines.push(`Langfuse has it: ${count} observations.`)
+  } else {
+    lines.push(`Langfuse lookup: ${found ? `HTTP ${found.status}` : 'failed'} (ingestion can take a few seconds; run /trace again).`)
+  }
+  return lines.join('\n')
 }
 
 async function askOperator($: EngineInterface, reason: string): Promise<boolean> {
@@ -726,12 +1035,20 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
     }
     case 'approval': {
       const wanted = args.trim()
-      if (wanted === '') return `Foundry approval mode: ${await approvalMode($)}. Modes: ${APPROVAL_MODES.join(', ')}.`
+      if (wanted === '') return `Foundry approval mode: ${await approvalMode($)}. Modes: ${APPROVAL_MODES.join(', ')}. /approval rules shows the guard's operator rules.`
+      if (wanted === 'rules') {
+        const rules = await operatorRules($)
+        return rules.length === 0
+          ? 'No operator rules. Write them in ~/.claude/foundry/rules.md (yours) or .claude/foundry-rules.md (this project, stricter only), one per line; the auto-mode guard follows them. The branch rule always applies first.'
+          : rules.map(rule => `${rule.path}${rule.isProject ? ' (project: may only make the guard stricter)' : ''}:\n${rule.text}`).join('\n\n')
+      }
       const mode = parseApprovalMode(wanted)
       if (mode === null) return `Unknown mode '${wanted}'. Modes: ${APPROVAL_MODES.join(', ')}.`
       await $.store.set('approvalMode', mode)
       return `Foundry approval mode: ${mode}.`
     }
+    case 'trace':
+      return traceText($)
     case 'foundry': {
       const opened = await $.ui.open({ id: CONTEXT_PANE, title: 'Foundry context', focus: true, closeOnEscape: true })
       return opened.isPlaced ? 'Foundry context is open (Esc closes it).' : await treeText($)
@@ -739,9 +1056,77 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
   }
 }
 
+// The guard, then the tools this mod serves: compass check → rules files →
+// git push → ladder → loop guard → serve. `note` records the gate's outcome for tracing.
+async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<'tool.call'>, note: GateNote): Promise<EventResult<'tool.call'>> {
+  const tool = String(e.tool)
+  const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...input } =
+    e as unknown as Record<string, unknown>
+  note.foundry = touchesFoundry(tool, input, false)
+  note.outcome = 'block'
+  const rootReason = compassRootReason(tool, input)
+  if (rootReason) return { deny: rootReason }
+  const rulesReason = rulesWriteReason(tool, input, await sessionCwd($), await homeDir($))
+  if (rulesReason) return { deny: rulesReason }
+  if (tool === 'Bash' && typeof input.command === 'string') {
+    if (gitPushNamesFoundry(input.command)) return { deny: FOUNDRY_GIT_PUSH_REASON }
+    const directories = gitPushDirectories(input.command)
+    const home = (await $.env.get('HOME'))?.trim() ?? ''
+    for (const pushed of directories ?? []) {
+      const directory = pushed.replace(/^~(?=\/|$)/, home)
+      // Read the remotes in-process only; they can carry a token and are never shown.
+      // A directory that is not a repository cannot push; a check that cannot run denies.
+      const remotes = await $.process
+        .run(['git', ...(directory ? ['-C', directory] : []), 'remote', '-v'], { timeoutMs: 10_000 })
+        .catch(() => null)
+      if (remotes === null) return { deny: `foundry: could not check whether ${pushed || 'this directory'} is a Foundry repository, so the push was not run.` }
+      if (remotes.stdout.includes('ri.stemma.')) return { deny: FOUNDRY_GIT_PUSH_REASON }
+    }
+  }
+
+  const manifest = tool === ORTHANC_CLI || tool === 'Bash' ? await loadManifest($).catch(() => []) : []
+  const branch = (await $.state.get(BRANCH)).value ?? null
+  const classification = classifyCall(tool, input, manifest, branch)
+  note.outcome = undefined
+  if (classification) {
+    note.foundry = true
+    note.command = classification.command ?? undefined
+    const mode = await approvalMode($)
+    const verdict =
+      mode === 'auto' && classification.kind === 'mutation'
+        ? await guardVerdict($, tool, input, classification).catch(() => null)
+        : undefined
+    const decision = ladderDecision(mode, classification, verdict)
+    $.ui.log(`foundry: ${tool} ${classification.command ?? ''} → ${decision.outcome}: ${decision.reason}`, { to: 'debug' })
+    note.outcome = decision.outcome
+    note.reason = decision.reason
+    if (decision.outcome === 'block') return { deny: decision.reason }
+    if (decision.outcome === 'ask' && !(await askOperator($, decision.reason))) {
+      return { deny: `Operator declined or no one could be asked: ${decision.reason}` }
+    }
+  }
+
+  const looped = loopStep(loop, tool, input)
+  loop = looped.next
+  if (looped.reason) {
+    note.outcome = 'block'
+    return { deny: looped.reason }
+  }
+
+  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input) : await next(e)
+  if (classification?.kind === 'branch-creation' && classification.command === 'global-branch create') {
+    const text = typeof ran.result === 'string' ? ran.result : ''
+    const rid = /ri\.branch\.[^"\s,}]+/.exec(text)?.[0]
+    if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, rid ?? classification.proposedName ?? null)
+  }
+  return ran
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    rulesSnapshot = undefined
+    await operatorRules($)
     await $.tool.register({
       name: 'orthanc_help',
       isDeferred: false,
@@ -783,6 +1168,13 @@ export const register: Register = on => {
     }
     if (refusedCommands.length > 0) $.ui.log(`foundry: commands refused: ${refusedCommands.join(', ')}`, { to: 'debug' })
     await startupScope($).catch(error => $.ui.log(`foundry: no stack selected (${String(error)})`, { to: 'debug' }))
+    turnTraces.clear()
+    lastExport = null
+    const startScope = await currentScope($).catch(() => null)
+    await loadTracing($, startScope ? (profileArg(startScope) ?? null) : null).catch(() => {
+      tracing = null
+      tracingNote = 'off: tracing setup failed'
+    })
     void loadManifest($).catch(() => undefined)
     return started
   })
@@ -802,43 +1194,29 @@ export const register: Register = on => {
     return { sections: [...composed.sections, { id: 'foundry:context', text, scope: 'session' }] }
   })
 
-  // The guard, then the tools this mod serves. One hook, so the order of
-  // compass check → ladder → loop guard → serve is fixed.
   on('tool.call', async ($, e, next) => {
-    const tool = String(e.tool)
-    const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...input } =
-      e as unknown as Record<string, unknown>
-    const rootReason = compassRootReason(tool, input)
-    if (rootReason) return { deny: rootReason }
-
-    const manifest = tool === ORTHANC_CLI || tool === 'Bash' ? await loadManifest($).catch(() => []) : []
-    const branch = (await $.state.get(BRANCH)).value ?? null
-    const classification = classifyCall(tool, input, manifest, branch)
-    if (classification) {
-      const mode = await approvalMode($)
-      const verdict =
-        mode === 'auto' && classification.kind === 'mutation'
-          ? await guardVerdict($, tool, input, classification).catch(() => null)
-          : undefined
-      const decision = ladderDecision(mode, classification, verdict)
-      $.ui.log(`foundry: ${tool} ${classification.command ?? ''} → ${decision.outcome}: ${decision.reason}`, { to: 'debug' })
-      if (decision.outcome === 'block') return { deny: decision.reason }
-      if (decision.outcome === 'ask' && !(await askOperator($, decision.reason))) {
-        return { deny: `Operator declined or no one could be asked: ${decision.reason}` }
-      }
-    }
-
-    const looped = loopStep(loop, tool, input)
-    loop = looped.next
-    if (looped.reason) return { deny: looped.reason }
-
-    const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input) : await next(e)
-    if (classification?.kind === 'branch-creation' && classification.command === 'global-branch create') {
-      const text = typeof ran.result === 'string' ? ran.result : ''
-      if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, classification.proposedName ?? null)
+    const note: GateNote = { foundry: false }
+    const startMs = Date.now()
+    const ran = await guardedCall($, e, next, note)
+    try {
+      const { tool: _tool, tool_use_id: _id, agentId, requestMeta: _meta, consent: _consent, ...input } = e as unknown as Record<string, unknown>
+      recordTool(typeof agentId === 'string' ? agentId : 'main', String(e.tool), input, ran, note, startMs, Date.now())
+    } catch {
+      // Tracing never changes what the call did.
     }
     return ran
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'foundry: the Foundry guard failed; the call was not run.' }))
+
+  on('turn.start', async ($, e, next) => {
+    if (tracing !== null) startTurn('main', e.text, Date.now())
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const completed = await next(e)
+    if (tracing !== null) void exportTurn($, e.agentId ?? 'main', e.answer, completed.usage ?? e.usage, e.reason, Date.now()).catch(() => undefined)
+    return completed
+  })
 
   for (const entry of COMMAND_TABLE) {
     on('command.run', { command: entry.name }, async ($, e) => ({ text: await runEntry($, entry, e.args) })).catch(

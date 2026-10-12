@@ -10,6 +10,17 @@ Use this policy whenever the Foundry tool decision flow reaches documentation, r
 4. Search for the existing resource before creating one (`orthanc search` for titles, `resource search` within a folder).
 5. Read the resource and its dependencies before modifying it.
 
+## Branches, never main
+
+All agent work happens on branches. The mod blocks anything else in every approval mode.
+
+1. Ontology: create a global branch (`global-branch create agent/<kebab-name>`) and pass its RID (`ri.branch..branch.…`) as `--branch` on every ontology write. An ontology branch RID is not enough: only a global branch is provably not main.
+2. Datasets, streams, builds, `cp`: pass one `--branch <work branch>`, never `master` or `main`. Create a dataset branch with `dataset branches create <dataset> agent-<kebab-name>`.
+3. Code: push to a work branch with `repository push <rid> refs/heads/<work> refs/heads/<work>` and open a pull request. Never `--allow-default-branch`, never raw `git push`.
+4. Promotion is the operator's: do not merge, accept or approve proposals, or create release tags. `ontology object-upsert`, `object-upsert-batch` and `action-apply-with-overrides` cannot take a branch, so agents do not run them.
+
+5. Writes go through `orthanc_cli` only. Bash may run Orthanc reads; an Orthanc write in Bash, in any wrapping, is blocked.
+
 ## Local repository clones (orthanc-first)
 
 Code repositories are cloned locally through Orthanc, never through raw git smart-HTTP:
