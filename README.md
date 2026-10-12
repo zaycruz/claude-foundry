@@ -190,6 +190,26 @@ are redacted; add your own domains with `FOUNDRY_OTEL_REDACT_DOMAINS=...`.
 `/trace` shows the collector's host, never a header. Export is fire-and-forget
 and never changes what a tool call does.
 
+## FDE eval
+
+`evals/fde/` compares FDE mode on and off on live Foundry write tasks. Each task
+runs in both arms, interleaved, with the same prompt and approval mode
+(`allow-edits`, since `auto` asks the operator about schema changes and a
+headless run has none). Success means the branch shows the change and main is
+unchanged, both read back through Orthanc. No model grades anything. Every
+branch a case makes is closed afterwards.
+
+```
+python3 evals/fde/run.py --tasks evals/fde/tasks.local.json --runs 3
+python3 evals/fde/score.py <run-id>
+```
+
+Tasks name your stack's entities, so they live in `evals/fde/tasks.local.json`
+(gitignored). Each task has `id`, `difficulty`, `prompt`, and `checks` /
+`main_unchanged_check`, written as `orthanc ... | jq -r '<expr>'` with
+`expect_equals`. Run it on a lab machine with `claude`, `orthanc` and `jq`. On
+Linux, give Orthanc the profile through `FOUNDRY_PROFILE_<NAME>_HOST` / `_TOKEN`.
+
 ## Develop
 
 ```

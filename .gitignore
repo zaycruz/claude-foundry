@@ -6,3 +6,8 @@ hooks/fixtures.local.ts
 hooks/e2e.local.test.ts
 hooks/fixtures.zap.ts
 node_modules/
+
+# FDE eval: tasks name stack entities, results hold stack data.
+evals/fde/*.local.*
+evals/fde/results/
+__pycache__/
