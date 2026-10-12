@@ -45,7 +45,7 @@ export type CommandAction =
   | { type: 'resource'; kind: CompassKind }
   | { type: 'lookup'; lookup: Lookup; kind: FoundryResourceKind }
   | { type: 'blocked'; bead: string; what: string }
-  | { type: 'open' | 'onboard' | 'auth' | 'scope' | 'approval' | 'mcp-status' | 'foundry' | 'trace' }
+  | { type: 'open' | 'onboard' | 'auth' | 'scope' | 'approval' | 'mcp-status' | 'foundry' | 'trace' | 'fde' }
 
 export type CommandEntry = { name: string; description: string; argumentHint?: string; action: CommandAction }
 
@@ -130,6 +130,12 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
   },
   { name: 'scope', description: 'Show the Foundry context; `clear` resets it, `ontology` re-picks it', argumentHint: '[show | clear | ontology]', action: { type: 'scope' } },
   { name: 'approval', description: 'Show or set the Foundry approval mode, or show the guard rules', argumentHint: '[mode|rules]', action: { type: 'approval' } },
+  {
+    name: 'fde',
+    description: 'FDE mode: bind this session to one agent branch for a goal; writes plan before they apply',
+    argumentHint: '<goal> | --branch <rid> <goal> | resume | end',
+    action: { type: 'fde' },
+  },
   { name: 'trace', description: 'Show trace export status (Langfuse/OTLP) and check the last Foundry trace landed', action: { type: 'trace' } },
   { name: 'mcp-status', description: 'Show Orthanc and Foundry stack status', action: { type: 'mcp-status' } },
 ]

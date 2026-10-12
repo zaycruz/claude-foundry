@@ -50,12 +50,26 @@ export type FoundryPicker = {
   chain: FoundryPickerKind[]
 }
 
+/** /fde: a session bound to one agent global branch. */
+export type FdeSession = {
+  goal: string
+  profile: string
+  ontologyRid: string
+  branchRid: string
+  branchName: string
+  startedAt: string
+  /** Signatures of clean dry runs; an --apply must match one. */
+  plans: string[]
+  applied: { command: string; at: string }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     foundry: {
       scope: FoundryScope
       picker: FoundryPicker | null
       workingBranch: string | null
+      fde: FdeSession | null
     }
   }
 }

@@ -37,7 +37,7 @@ const COMMANDS = [
   'foundry', 'open', 'onboard', 'auth', 'profile', 'ontology', 'project', 'object-type', 'action-type',
   'link-type', 'interface', 'folder', 'dataset', 'media-set', 'repository', 'contour', 'source',
   'developer-console', 'aip-chatbot', 'egress-policy', 'certificate', 'automation', 'media-item', 'objects',
-  'function', 'language-model', 'permission', 'search', 'scope', 'approval', 'mcp-status', 'trace',
+  'function', 'language-model', 'permission', 'search', 'scope', 'approval', 'mcp-status', 'trace', 'fde',
 ]
 
 const scope = normalizeScope(

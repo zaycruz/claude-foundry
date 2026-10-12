@@ -52,12 +52,13 @@ const BRANCH_REQUIRED_PATHS = new Set([
   'orchestration builds create',
   'cp',
 ])
+export const requiresBranch = (path: string) => BRANCH_REQUIRED_PATHS.has(path)
 // Ontology writes Orthanc cannot branch: they change live data on main.
 const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-upsert-batch', 'ontology action-apply-with-overrides'])
 // Promotion into main is the operator's decision, not the agent's.
 // A tag publishes a release from a commit, so it is promotion too.
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'repository tag create'])
-const BRANCH_FLAGS = ['--branch', '-b']
+export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
 // Orthanc flags that take no value, so the word after one is a positional.
 const BOOLEAN_FLAGS = new Set([
@@ -193,7 +194,7 @@ function targetsProtected(input: unknown): boolean {
   })
 }
 
-const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, '$2')
+export const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, '$2')
 
 /** Every value of the named flags (`--name value`, `--name=value`, `-bvalue`), unquoted; '' for a flag with no value. */
 export function flagValues(args: readonly string[], names: readonly string[]): string[] {

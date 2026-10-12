@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, Next, Register } from 'claude-code'
 
-import type { FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
+import type { FdeSession, FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
 import {
   applyClear,
   blockedText,
@@ -29,6 +29,26 @@ import {
   resourceRows,
 } from './catalog'
 import {
+  adoptable,
+  branchCreateArgs,
+  foreignRids,
+  takePlan,
+  branchRidFrom,
+  contentHash,
+  fdeBind,
+  fdeBranchName,
+  fdeContext,
+  fdeHandoff,
+  fdeStatus,
+  fileCandidates,
+  hasApply,
+  parseFdeArgs,
+  planGate,
+  planSignature,
+  recordApply,
+  recordPlan,
+} from './fde'
+import {
   type Envelope,
   failure,
   guideEnvelope,
@@ -50,6 +70,7 @@ import {
   type ApprovalMode,
   type ManifestCommand,
   classifyCall,
+  classifyOrthancCommand,
   compassRootReason,
   DEFAULT_APPROVAL_MODE,
   type GateClassification,
@@ -84,10 +105,12 @@ import {
 const SCOPE = { plugin: 'foundry', key: 'scope' } as const
 const PICKER = { plugin: 'foundry', key: 'picker' } as const
 const BRANCH = { plugin: 'foundry', key: 'workingBranch' } as const
+const FDE = { plugin: 'foundry', key: 'fde' } as const
 const PANE = 'foundry-picker'
 const CONTEXT_PANE = 'foundry-context'
 const pickerAtom = atom(PICKER, null)
 const scopeAtom = atom(SCOPE, emptyScope('unknown', ''))
+const fdeAtom = atom(FDE, null)
 const GUARD_MODEL = 'claude-haiku-5-5'
 const VISIBLE_ROWS = 12
 const TREE_ROWS = 8
@@ -482,7 +505,9 @@ function recordTool(key: string, tool: string, input: unknown, ran: unknown, not
 async function exportTurn($: EngineInterface, key: string, answer: string, usage: unknown, reason: string, endMs: number): Promise<void> {
   const turn = turnTraces.get(key)
   turnTraces.delete(key)
-  if (tracing === null || turn === undefined || !(turn.touched || tracing.everyTurn)) return
+  // In FDE mode every turn is part of the engagement, so every turn is exported.
+  const fde = await fdeState($).catch(() => null)
+  if (tracing === null || turn === undefined || !(turn.touched || tracing.everyTurn || fde !== null)) return
   const sessionId = await $.session.id().catch(() => 'unknown')
   const redact = tracing.redact
   const root: SpanRecord = {
@@ -499,6 +524,7 @@ async function exportTurn($: EngineInterface, key: string, answer: string, usage
       'foundry.tool.count': turn.spans.length,
       ...(turn.dropped > 0 ? { 'foundry.spans.dropped': turn.dropped } : {}),
       ...(key === 'main' ? {} : { 'foundry.agent.id': key }),
+      ...(fde ? { 'foundry.fde.branch': redactString(fde.branchRid, redact), 'foundry.fde.goal': redactString(fde.goal, redact) } : {}),
     },
     ...(reason === 'error' || reason === 'refusal' ? { error: reason } : {}),
   }
@@ -585,15 +611,17 @@ async function askOperator($: EngineInterface, reason: string): Promise<boolean>
   }
 }
 
-async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>) {
+// `notRun` is a failure Orthanc refused before reaching Foundry (a usage error);
+// any other failure may have changed something.
+async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>): Promise<{ out: EventResult<'tool.call'>; failed: boolean; notRun: boolean }> {
   if (tool === ORTHANC_HELP) {
-    return {
+    return { failed: false, notRun: false, out: {
       result: await renderHelp($, {
         group: asString(input.group).trim() || undefined,
         command: asString(input.command).trim() || undefined,
         query: asString(input.query).trim() || undefined,
       }),
-    }
+    } }
   }
   const scope = await currentScope($)
   const envelope = await executeCli($, {
@@ -601,7 +629,8 @@ async function serveTool($: EngineInterface, tool: string, input: Record<string,
     args: Array.isArray(input.args) ? input.args.map(String) : [],
     profile: profileArg(scope),
   })
-  return { result: serialize(envelope, await spill($, input.command, envelope)), ...(isErrorEnvelope(envelope) ? { context: ['The Orthanc call returned errors; read them before retrying.'] } : {}) }
+  const failed = isErrorEnvelope(envelope)
+  return { failed, notRun: failed && isUsageError(envelope), out: { result: serialize(envelope, await spill($, input.command, envelope)), ...(failed ? { context: ['The Orthanc call returned errors; read them before retrying.'] } : {}) } }
 }
 
 // Writes an oversized envelope where the model can read it whole; undefined when
@@ -616,6 +645,152 @@ async function spill($: EngineInterface, command: unknown, envelope: Envelope): 
   } catch {
     return undefined
   }
+}
+
+// ---------- /fde ----------
+
+async function fdeState($: EngineInterface): Promise<FdeSession | null> {
+  return (await $.state.get(FDE)).value ?? null
+}
+
+// The session's binding, mirrored to the store so the next session can offer /fde resume.
+async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
+  await $.state.set(FDE, fde)
+  await $.state.set(BRANCH, fde?.branchRid ?? null)
+  await $.store.set('fdeOpen', fde)
+}
+
+async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
+  const stored = await $.store.get('fdeOpen').catch(() => null)
+  return typeof stored === 'object' && stored !== null && typeof (stored as FdeSession).branchRid === 'string' ? (stored as FdeSession) : null
+}
+
+/**
+ * The global branch's name when it is an OPEN agent/ branch of the ontology.
+ * Otherwise a reason, with `transient` set when the lookup failed rather than
+ * the branch being unfit, so a resume can keep the binding and try again.
+ */
+async function openBranch($: EngineInterface, rid: string, profile: string, ontologyRid: string): Promise<{ name: string } | { reason: string; transient: boolean }> {
+  const envelope = await runOrthanc($, ['global-branch', 'get', rid], profile, 60_000)
+  if (isErrorEnvelope(envelope)) return { reason: `global-branch get ${rid} failed: ${errorsOf(envelope)}`, transient: true }
+  const fit = adoptable(envelope.data, ontologyRid)
+  return typeof fit === 'string' ? { reason: fit, transient: false } : fit
+}
+
+// FDE mode: pin the call to the session's branch and hold each --apply to its
+// dry run. It only adds checks; the branch rule and the ladder still judge the
+// bound call. Returns the bound input and its plan, or why it is refused.
+const MAX_PINNED_FILE = 20_000_000
+type FdePlan = { signature: string; isApply: boolean; command: string; files: string[] }
+
+async function filesSignature(
+  $: EngineInterface,
+  fde: FdeSession,
+  command: string,
+  args: string[],
+  files: { required: string[]; optional: string[] },
+): Promise<string | { deny: string }> {
+  const hashes: Record<string, string> = {}
+  for (const file of [...files.required, ...files.optional]) {
+    // Only regular files are read, and only up to a size, so a device or FIFO
+    // argument cannot hang the gate.
+    const stat = await $.fs.stat(file).catch(() => null)
+    if (stat !== null && stat.kind === 'file' && stat.size > MAX_PINNED_FILE) {
+      return { deny: `FDE mode: ${file} is over ${MAX_PINNED_FILE / 1_000_000} MB, too large to check against its dry run, so the call was not run.` }
+    }
+    const text = stat?.kind === 'file' ? await $.fs.read(file).then(String).catch(() => null) : null
+    if (text === null && files.required.includes(file)) return { deny: `FDE mode: could not read ${file} to check it against its dry run, so the call was not run.` }
+    if (text === null) continue
+    const foreign = foreignRids(fde, text)
+    if (foreign) return { deny: `FDE mode: ${foreign}` }
+    hashes[file] = await contentHash(text)
+  }
+  return planSignature(command, args, hashes)
+}
+
+async function fdeGate(
+  $: EngineInterface,
+  fde: FdeSession,
+  input: Record<string, unknown>,
+  manifest: readonly ManifestCommand[],
+): Promise<{ deny: string } | { input: Record<string, unknown>; plan: FdePlan | null }> {
+  const resolved = resolveOrthancCommand(asString(input.command), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
+  const isMutation = resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest) === 'mutation'
+  const bound = fdeBind(fde, resolved.path, resolved.args, (await currentScope($)).profile, isMutation)
+  if ('deny' in bound) return bound
+  const next = { ...input, command: resolved.path, args: bound.args }
+  if (!isMutation) return { input: next, plan: null }
+  const files = fileCandidates(bound.args, await sessionCwd($), await homeDir($))
+  const signature = await filesSignature($, fde, resolved.path, bound.args, files)
+  if (typeof signature !== 'string') return signature
+  const isApply = hasApply(bound.args)
+  const gated = planGate(fde, signature, isApply)
+  if (gated) return { deny: gated }
+  return { input: next, plan: { signature, isApply, command: resolved.path, files: [...files.required, ...files.optional] } }
+}
+
+async function fdeCommand($: EngineInterface, args: string): Promise<string> {
+  const parsed = parseFdeArgs(args)
+  const active = await fdeState($)
+  const earlier = active ? null : await fdeFromEarlier($)
+  if (parsed.kind === 'error') return parsed.reason
+  if (parsed.kind === 'status') {
+    if (active) return fdeStatus(active)
+    return [
+      'FDE mode is off. /fde <goal> creates an agent global branch on the selected ontology and binds this session to it; /fde --branch <rid> <goal> adopts an open one.',
+      ...(earlier ? [`An earlier session left ${earlier.branchName} (${earlier.goal}) bound: /fde resume rebinds it, /fde end hands it off.`] : []),
+    ].join('\n')
+  }
+  if (parsed.kind === 'end') {
+    const ending = active ?? earlier
+    if (ending === null) return 'FDE mode is off.'
+    await setFde($, null)
+    const history = await $.store.get('fdeHandoffs').catch(() => null)
+    await $.store.set('fdeHandoffs', [...(Array.isArray(history) ? history : []), { ...ending, endedAt: new Date().toISOString() }].slice(-10))
+    return fdeHandoff(ending)
+  }
+  if (parsed.kind === 'resume') {
+    if (active) return fdeStatus(active)
+    if (earlier === null) return 'No FDE branch to resume. /fde <goal> starts one.'
+    const open = await openBranch($, earlier.branchRid, earlier.profile, earlier.ontologyRid)
+    if ('reason' in open) {
+      if (open.transient) return `${open.reason} Not resumed; the earlier binding is kept, so /fde resume can try again.`
+      await $.store.set('fdeOpen', null)
+      return `${open.reason} Not resumed; the earlier binding is forgotten.`
+    }
+    await setFde($, earlier)
+    return `Resumed.\n${fdeStatus(earlier)}`
+  }
+  if (active) return `Already in FDE mode:\n${fdeStatus(active)}\n/fde end first.`
+  const scope = await currentScope($)
+  if (scope.profile === 'unknown') return 'No Foundry stack is active. Run /profile first.'
+  if (scope.ontology === null) return 'Choose the ontology first (/ontology): the branch is made on it.'
+  let branchRid: string
+  let branchName: string
+  if (parsed.kind === 'start') {
+    branchName = fdeBranchName(parsed.goal, new Date())
+    const envelope = await runOrthanc($, branchCreateArgs(branchName, scope.ontology.rid, parsed.goal), scope.profile, 120_000)
+    const rid = branchRidFrom(envelope)
+    if (rid === null) return `global-branch create ${branchName} failed, so FDE mode stays off: ${errorsOf(envelope)}`
+    branchRid = rid
+  } else {
+    const open = await openBranch($, parsed.rid, scope.profile, scope.ontology.rid)
+    if ('reason' in open) return `${open.reason} FDE mode stays off.`
+    branchRid = parsed.rid
+    branchName = open.name
+  }
+  const fde: FdeSession = {
+    goal: parsed.goal,
+    profile: scope.profile,
+    ontologyRid: scope.ontology.rid,
+    branchRid,
+    branchName,
+    startedAt: new Date().toISOString(),
+    plans: [],
+    applied: [],
+  }
+  await setFde($, fde)
+  return `${fdeStatus(fde)}\nOntology writes in this session now go to this branch only, and each --apply needs its dry run first.`
 }
 
 // ---------- pickers ----------
@@ -1049,6 +1224,8 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
     }
     case 'trace':
       return traceText($)
+    case 'fde':
+      return fdeCommand($, args)
     case 'foundry': {
       const opened = await $.ui.open({ id: CONTEXT_PANE, title: 'Foundry context', focus: true, closeOnEscape: true })
       return opened.isPlaced ? 'Foundry context is open (Esc closes it).' : await treeText($)
@@ -1060,8 +1237,9 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
 // git push → ladder → loop guard → serve. `note` records the gate's outcome for tracing.
 async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<'tool.call'>, note: GateNote): Promise<EventResult<'tool.call'>> {
   const tool = String(e.tool)
-  const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...input } =
+  const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...raw } =
     e as unknown as Record<string, unknown>
+  let input: Record<string, unknown> = raw
   note.foundry = touchesFoundry(tool, input, false)
   note.outcome = 'block'
   const rootReason = compassRootReason(tool, input)
@@ -1085,6 +1263,31 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   }
 
   const manifest = tool === ORTHANC_CLI || tool === 'Bash' ? await loadManifest($).catch(() => []) : []
+  const fde = tool === ORTHANC_CLI ? await fdeState($) : null
+  let plan: FdePlan | null = null
+  if (fde !== null) {
+    const gated = await fdeGate($, fde, input, manifest)
+    if ('deny' in gated) return gated
+    input = gated.input
+    plan = gated.plan
+  }
+  // An apply takes its dry run now, in one step, so a parallel twin finds it gone.
+  // If the call then does not run, or fails, the plan is put back.
+  if (plan?.isApply) {
+    const signature = plan.signature
+    let taken = false
+    await update($, fdeAtom, current => {
+      if (current === null) return current
+      const took = takePlan(current, signature)
+      taken = took.taken
+      return took.fde
+    })
+    if (!taken) return { deny: planGate({ ...fde!, plans: [] }, signature, true)! }
+  }
+  let executed = false
+  let failed = false
+  let notRun = false
+  try {
   const branch = (await $.state.get(BRANCH)).value ?? null
   const classification = classifyCall(tool, input, manifest, branch)
   note.outcome = undefined
@@ -1113,13 +1316,32 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     return { deny: looped.reason }
   }
 
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input) : await next(e)
+  // The ladder may have waited on the operator: the files the call reads must still be the planned ones.
+  if (plan !== null && plan.files.length > 0) {
+    const args = Array.isArray(input.args) ? input.args.map(String) : []
+    const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
+    if (now !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
+  }
+  executed = true
+  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
+  if (plan !== null && !failed) {
+    const done = plan
+    let latest: FdeSession | null = null
+    await update($, fdeAtom, current => (latest = current === null ? null : done.isApply ? recordApply(current, done.command, done.signature, new Date()) : recordPlan(current, done.signature)))
+    if (latest !== null) await $.store.set('fdeOpen', latest)
+  }
   if (classification?.kind === 'branch-creation' && classification.command === 'global-branch create') {
     const text = typeof ran.result === 'string' ? ran.result : ''
     const rid = /ri\.branch\.[^"\s,}]+/.exec(text)?.[0]
     if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, rid ?? classification.proposedName ?? null)
   }
   return ran
+  } finally {
+    if (plan?.isApply && (!executed || notRun)) {
+      const signature = plan.signature
+      await update($, fdeAtom, current => (current === null ? null : recordPlan(current, signature))).catch(() => undefined)
+    }
+  }
 }
 
 export const register: Register = on => {
@@ -1176,6 +1398,8 @@ export const register: Register = on => {
       tracingNote = 'off: tracing setup failed'
     })
     void loadManifest($).catch(() => undefined)
+    const earlier = (await fdeState($)) === null ? await fdeFromEarlier($).catch(() => null) : null
+    if (earlier) $.ui.toast(`FDE branch ${earlier.branchName} (${earlier.goal}) is still open from an earlier session: /fde resume or /fde end`)
     return started
   })
 
@@ -1185,13 +1409,21 @@ export const register: Register = on => {
     const started = await next(e)
     if (!e.agent_type.startsWith('foundry:')) return started
     const text = contextText(await currentScope($), await approvalMode($))
-    return { ...started, additionalContext: [...(started.additionalContext ?? []), text] }
+    const fde = await fdeState($)
+    return { ...started, additionalContext: [...(started.additionalContext ?? []), text, ...(fde ? [fdeContext(fde)] : [])] }
   }).catch(($, e, next) => next(e))
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     const text = contextText(await currentScope($), await approvalMode($))
-    return { sections: [...composed.sections, { id: 'foundry:context', text, scope: 'session' }] }
+    const fde = await fdeState($)
+    return {
+      sections: [
+        ...composed.sections,
+        { id: 'foundry:context', text, scope: 'session' },
+        ...(fde ? [{ id: 'foundry:fde', text: fdeContext(fde), scope: 'session' as const }] : []),
+      ],
+    }
   })
 
   on('tool.call', async ($, e, next) => {
@@ -1281,6 +1513,21 @@ export const register: Register = on => {
         {picker.isMulti && (
           <Button key="done" variant="primary" label="Done" onPress={() => void finish(picker.chosen)} />
         )}
+      </Box>
+    )
+  })
+
+  // FDE mode band: the goal and branch stay in view while the session is bound.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const fde = await read($, fdeAtom)
+    if (fde === null || e.props.hasSurvey) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box>
+        <Text color="yellow" bold>
+          FDE
+        </Text>
+        <Text dimColor>{` ${fde.goal} · ${fde.branchName} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
       </Box>
     )
   })
