@@ -45,7 +45,7 @@ export type CommandAction =
   | { type: 'resource'; kind: CompassKind }
   | { type: 'lookup'; lookup: Lookup; kind: FoundryResourceKind }
   | { type: 'blocked'; bead: string; what: string }
-  | { type: 'open' | 'onboard' | 'auth' | 'scope' | 'approval' | 'mcp-status' | 'foundry' }
+  | { type: 'open' | 'onboard' | 'auth' | 'scope' | 'approval' | 'mcp-status' | 'foundry' | 'trace' }
 
 export type CommandEntry = { name: string; description: string; argumentHint?: string; action: CommandAction }
 
@@ -129,7 +129,8 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
     action: { type: 'lookup', lookup: 'search', kind: 'searchResults' },
   },
   { name: 'scope', description: 'Show the Foundry context; `clear` resets it, `ontology` re-picks it', argumentHint: '[show | clear | ontology]', action: { type: 'scope' } },
-  { name: 'approval', description: 'Show or set the Foundry approval mode', argumentHint: '[mode]', action: { type: 'approval' } },
+  { name: 'approval', description: 'Show or set the Foundry approval mode, or show the guard rules', argumentHint: '[mode|rules]', action: { type: 'approval' } },
+  { name: 'trace', description: 'Show trace export status (Langfuse/OTLP) and check the last Foundry trace landed', action: { type: 'trace' } },
   { name: 'mcp-status', description: 'Show Orthanc and Foundry stack status', action: { type: 'mcp-status' } },
 ]
 
