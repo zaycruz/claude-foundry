@@ -23,7 +23,7 @@ says so instead of falling back to REST.
   a Foundry repository and Foundry writes outside Orthanc are blocked. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
   write, however the shell wraps the call.
-- **FDE mode** (`/fde <goal>`): binds the session to one agent global branch.
+- **FDE mode** (`/fde on`, or `/fde <goal>`): binds the session to one agent global branch.
   Ontology writes are pinned to it, each `--apply` needs a dry run of the same
   call first, and `/fde end` hands the branch back to the operator, still open.
 - **Foundry context** in the system prompt (stack, ontology, projects, types,
@@ -79,7 +79,7 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
-| `/fde <goal>`, `/fde --branch <rid> <goal>`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch or adopt an open one, show status, rebind after a restart, hand off |
+| `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt an open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
@@ -89,10 +89,12 @@ mod never falls back to Foundry REST.
 
 ## FDE mode
 
-`/fde <goal>` turns a session into one unit of Foundry work. It creates
-`agent/fde-<goal>-<timestamp>` as a global branch on the selected ontology
-(`/fde --branch <rid> <goal>` adopts an open one instead) and binds the session,
-subagents included, to it:
+`/fde on` puts the session in FDE mode: it creates `agent/fde-<timestamp>` as a
+global branch on the selected ontology and binds the session, subagents
+included, to it. `/fde <goal>` does the same with a goal, which names the branch
+(`agent/fde-<goal>-<timestamp>`) and heads the prompt and the handoff;
+`/fde goal <text>` sets or changes it later. `/fde --branch <rid> [goal]` adopts
+an open agent branch instead. While bound:
 
 - Ontology writes go to that branch. A write that needs a branch and names none
   gets it; a call that names any other global branch, another ontology,

@@ -32,6 +32,7 @@ import {
   adoptable,
   branchCreateArgs,
   foreignRids,
+  goalLabel,
   takePlan,
   branchRidFrom,
   contentHash,
@@ -737,8 +738,8 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   if (parsed.kind === 'status') {
     if (active) return fdeStatus(active)
     return [
-      'FDE mode is off. /fde <goal> creates an agent global branch on the selected ontology and binds this session to it; /fde --branch <rid> <goal> adopts an open one.',
-      ...(earlier ? [`An earlier session left ${earlier.branchName} (${earlier.goal}) bound: /fde resume rebinds it, /fde end hands it off.`] : []),
+      'FDE mode is off. /fde on (or /fde <goal>) creates an agent global branch on the selected ontology and binds this session to it; /fde --branch <rid> [goal] adopts an open one.',
+      ...(earlier ? [`An earlier session left ${earlier.branchName} (${goalLabel(earlier.goal)}) bound: /fde resume rebinds it, /fde end hands it off.`] : []),
     ].join('\n')
   }
   if (parsed.kind === 'end') {
@@ -749,9 +750,15 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
     await $.store.set('fdeHandoffs', [...(Array.isArray(history) ? history : []), { ...ending, endedAt: new Date().toISOString() }].slice(-10))
     return fdeHandoff(ending)
   }
+  if (parsed.kind === 'goal') {
+    if (!active) return 'FDE mode is off, so there is no goal to set. /fde on starts it.'
+    const next = { ...active, goal: parsed.goal }
+    await setFde($, next)
+    return `Goal set.\n${fdeStatus(next)}`
+  }
   if (parsed.kind === 'resume') {
     if (active) return fdeStatus(active)
-    if (earlier === null) return 'No FDE branch to resume. /fde <goal> starts one.'
+    if (earlier === null) return 'No FDE branch to resume. /fde on starts one.'
     const open = await openBranch($, earlier.branchRid, earlier.profile, earlier.ontologyRid)
     if ('reason' in open) {
       if (open.transient) return `${open.reason} Not resumed; the earlier binding is kept, so /fde resume can try again.`
@@ -1399,7 +1406,7 @@ export const register: Register = on => {
     })
     void loadManifest($).catch(() => undefined)
     const earlier = (await fdeState($)) === null ? await fdeFromEarlier($).catch(() => null) : null
-    if (earlier) $.ui.toast(`FDE branch ${earlier.branchName} (${earlier.goal}) is still open from an earlier session: /fde resume or /fde end`)
+    if (earlier) $.ui.toast(`FDE branch ${earlier.branchName} (${goalLabel(earlier.goal)}) is still open from an earlier session: /fde resume or /fde end`)
     return started
   })
 
@@ -1527,7 +1534,7 @@ export const register: Register = on => {
         <Text color="yellow" bold>
           FDE
         </Text>
-        <Text dimColor>{` ${fde.goal} · ${fde.branchName} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+        <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
       </Box>
     )
   })

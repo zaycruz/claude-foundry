@@ -132,8 +132,8 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
   { name: 'approval', description: 'Show or set the Foundry approval mode, or show the guard rules', argumentHint: '[mode|rules]', action: { type: 'approval' } },
   {
     name: 'fde',
-    description: 'FDE mode: bind this session to one agent branch for a goal; writes plan before they apply',
-    argumentHint: '<goal> | --branch <rid> <goal> | resume | end',
+    description: 'FDE mode: bind this session to one agent branch; writes plan before they apply',
+    argumentHint: 'on | <goal> | goal <text> | --branch <rid> [goal] | resume | end',
     action: { type: 'fde' },
   },
   { name: 'trace', description: 'Show trace export status (Langfuse/OTLP) and check the last Foundry trace landed', action: { type: 'trace' } },

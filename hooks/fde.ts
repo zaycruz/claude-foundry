@@ -40,19 +40,28 @@ export type FdeArgs =
   | { kind: 'resume' }
   | { kind: 'start'; goal: string }
   | { kind: 'adopt'; rid: string; goal: string }
+  | { kind: 'goal'; goal: string }
   | { kind: 'error'; reason: string }
+
+/** The goal as shown; a session started with /fde on has none until /fde goal sets one. */
+export const goalLabel = (goal: string) => (goal === '' ? 'no goal set' : goal)
 
 export function parseFdeArgs(text: string): FdeArgs {
   const trimmed = text.trim()
   if (trimmed === '' || trimmed === 'status') return { kind: 'status' }
   if (trimmed === 'end') return { kind: 'end' }
   if (trimmed === 'resume') return { kind: 'resume' }
+  if (trimmed.toLowerCase() === 'on') return { kind: 'start', goal: '' }
+  const setGoal = /^goal(?:\s+([\s\S]*))?$/.exec(trimmed)
+  if (setGoal) {
+    const goal = cleanGoal(setGoal[1] ?? '')
+    return goal === '' ? { kind: 'error', reason: 'Name the goal: /fde goal <text>.' } : { kind: 'goal', goal }
+  }
   const adopt = /^--branch(?:=|\s+)(\S+)\s*([\s\S]*)$/.exec(trimmed)
   if (adopt) {
     const rid = adopt[1]!
     const goal = cleanGoal(adopt[2] ?? '')
     if (!GLOBAL_BRANCH.test(rid)) return { kind: 'error', reason: `'${rid}' is not a global branch RID (ri.branch..branch.…).` }
-    if (goal === '') return { kind: 'error', reason: 'Name the goal after the branch: /fde --branch <rid> <goal>.' }
     return { kind: 'adopt', rid, goal }
   }
   return { kind: 'start', goal: cleanGoal(trimmed) }
@@ -70,13 +79,13 @@ export function fdeBranchName(goal: string, now: Date): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
   if (slug.length > room) slug = slug.slice(0, room).replace(/-[^-]*$/, '') || slug.slice(0, room)
-  slug = slug.replace(/-+$/, '') || 'work'
-  const name = `${PREFIX}${slug}${suffix}`
+  slug = slug.replace(/-+$/, '')
+  const name = slug === '' ? `${PREFIX}${stamp(now)}` : `${PREFIX}${slug}${suffix}`
   return validateBranchName('global-branch create', name).ok ? name : `${PREFIX}work${suffix}`
 }
 
 export function branchCreateArgs(name: string, ontologyRid: string, goal: string): string[] {
-  return ['global-branch', 'create', name, '--ontology-rid', ontologyRid, '--description', `claude-foundry FDE: ${goal}`.slice(0, GOAL_MAX), '--apply']
+  return ['global-branch', 'create', name, '--ontology-rid', ontologyRid, '--description', (goal === '' ? 'claude-foundry FDE session' : `claude-foundry FDE: ${goal}`).slice(0, GOAL_MAX), '--apply']
 }
 
 /** The global branch RID in a clean orthanc envelope; null on errors or none. */
@@ -231,7 +240,7 @@ const appliedLines = (fde: FdeSession) =>
 export function fdeContext(fde: FdeSession): string {
   return [
     '# FDE mode',
-    `Goal: ${fde.goal}`,
+    `Goal: ${goalLabel(fde.goal)}${fde.goal === '' ? ' (the operator works with you turn by turn; /fde goal sets one)' : ''}`,
     `This session works on one global branch: ${fde.branchName} (${fde.branchRid}) on ontology ${fde.ontologyRid}, stack ${fde.profile}.`,
     'Ontology writes are pinned to it: omit --branch and the mode adds it; any other branch, --profile or a new branch is refused. ' +
       'Pass --branch with that RID on reads you mean to see the branch (`ontology definition --object-type X --branch <rid>`); reads without it see main.',
@@ -244,7 +253,7 @@ export function fdeContext(fde: FdeSession): string {
 
 export function fdeStatus(fde: FdeSession): string {
   return [
-    `FDE mode on · ${fde.goal}`,
+    `FDE mode on · ${goalLabel(fde.goal)}`,
     `branch ${fde.branchName} (${fde.branchRid})`,
     `stack ${fde.profile} · ontology ${fde.ontologyRid} · since ${fde.startedAt}`,
     `${fde.applied.length} applied · ${fde.plans.length} planned`,
@@ -254,7 +263,7 @@ export function fdeStatus(fde: FdeSession): string {
 
 export function fdeHandoff(fde: FdeSession): string {
   return [
-    `# FDE handoff: ${fde.goal}`,
+    `# FDE handoff: ${goalLabel(fde.goal)}`,
     '',
     `- Branch: ${fde.branchName} (${fde.branchRid}), still OPEN and not merged.`,
     `- Stack ${fde.profile}, ontology ${fde.ontologyRid}, started ${fde.startedAt}.`,
