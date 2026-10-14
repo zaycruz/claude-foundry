@@ -23,6 +23,9 @@ says so instead of falling back to REST.
   a Foundry repository and Foundry writes outside Orthanc are blocked. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
   write, however the shell wraps the call.
+- **FDE mode** (`/fde on`, or `/fde <goal>`): binds the session to one agent global branch.
+  Ontology writes are pinned to it, each `--apply` needs a dry run of the same
+  call first, and `/fde end` hands the branch back to the operator, still open.
 - **Foundry context** in the system prompt (stack, ontology, projects, types,
   resources), and in the mod's own subagents.
 - **Slash commands** for choosing that context, and **`/foundry`**, a live view
@@ -76,12 +79,47 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
+| `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt an open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
 filter, and `clear`. `/link-type`, `/interface`, `/egress-policy`,
 `/certificate` and `/automation` wait on Orthanc list commands and say so; the
 mod never falls back to Foundry REST.
+
+## FDE mode
+
+`/fde on` puts the session in FDE mode: it creates `agent/fde-<timestamp>` as a
+global branch on the selected ontology and binds the session, subagents
+included, to it. `/fde <goal>` does the same with a goal, which names the branch
+(`agent/fde-<goal>-<timestamp>`) and heads the prompt and the handoff;
+`/fde goal <text>` sets or changes it later. `/fde --branch <rid> [goal]` adopts
+an open agent branch instead. While bound:
+
+- Ontology writes go to that branch. A write that needs a branch and names none
+  gets it; a call that names any other global branch, another ontology,
+  `--profile` or an abbreviated branch flag is refused. Dataset, stream and
+  build writes keep the branch rule (a work branch, never main) but are not
+  pinned to the global branch.
+- The agent cannot create, close or merge global branches, or touch proposals,
+  while bound; `global-branch add-repo` runs on the bound branch only.
+- Plan, then apply: an `--apply` runs only after a clean dry run of the same
+  call. The plan pins every file the call reads (`--*-file` values, `@file`,
+  and any path-like argument that reads as a file) by SHA-256, checked again
+  just before the call runs, and a file naming another global branch or
+  ontology is refused. Each dry run licenses one apply: the apply takes it
+  before running, so two identical applies in parallel cannot share it, and a
+  refused apply, or one Orthanc rejects as a usage error, gives it back; any
+  other failure keeps it spent, since Foundry may have changed. Directory
+  arguments are not hashed, and a file over 20 MB is refused.
+- The goal and branch go into the system prompt and a band above the prompt,
+  and every turn is traced (not only the ones that touch Foundry).
+
+`/fde end` prints a handoff (branch, applied writes, how to close it) and
+leaves the branch open: merging or closing it is the operator's call. If a
+session ends while bound, the next one offers `/fde resume`. The mode only
+adds checks. The branch rule, the approval ladder and the destructive rule
+judge every bound call as before, in every approval mode.
 
 ## Operator rules and auto mode
 
