@@ -50,6 +50,8 @@ import {
   recordPlan,
 } from './fde'
 import {
+  CLI_TIMEOUT_FLOOR_MS,
+  cliTimeoutMs,
   type Envelope,
   failure,
   guideEnvelope,
@@ -66,6 +68,7 @@ import {
   rowsOf,
   serialize,
 } from './orthanc'
+import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -116,7 +119,6 @@ const GUARD_MODEL = 'claude-haiku-5-5'
 const VISIBLE_ROWS = 12
 const TREE_ROWS = 8
 const ROOT_CONCURRENCY = 6
-const CLI_TIMEOUT_MS = 300_000
 
 let loop: { identity: string; streak: number } | null = null
 let manifestCache: readonly ManifestCommand[] | undefined
@@ -130,17 +132,32 @@ async function orthancBin($: EngineInterface): Promise<string> {
   return (await $.env.get('ORTHANC_BIN'))?.trim() || 'orthanc'
 }
 
+// $.process.run stops at ten minutes: a longer wait streams under its own deadline.
+async function runLong($: EngineInterface, command: readonly string[], timeoutMs: number): Promise<ProcessOutput> {
+  let expire = () => {}
+  const expired = new Promise<void>(resolve => {
+    expire = resolve
+  })
+  const timer = $.clock.after(timeoutMs, () => expire())
+  try {
+    return await readToExit($.process.spawn({ argv: command }), expired, timeoutMs)
+  } finally {
+    timer.cancel()
+  }
+}
+
 // orthanc in agent mode, argv only, no shell; any failure comes back as an
 // envelope so callers handle one shape.
 async function runOrthanc(
   $: EngineInterface,
   argv: readonly string[],
   profile?: string,
-  timeoutMs = CLI_TIMEOUT_MS,
+  timeoutMs = CLI_TIMEOUT_FLOOR_MS,
 ): Promise<Envelope> {
   const full = ['--agent', '--non-interactive', ...(profile ? ['--profile', profile] : []), ...argv]
   try {
-    const ran = await $.process.run([await orthancBin($), ...full], { timeoutMs })
+    const command = [await orthancBin($), ...full]
+    const ran = timeoutMs > PROCESS_RUN_MAX_MS ? await runLong($, command, timeoutMs) : await $.process.run(command, { timeoutMs })
     return (
       parseEnvelope(ran.stdout) ??
       failure('orthanc-launch-error', `orthanc exited ${ran.exitCode} with no foundry-agent-v1 envelope`, argv.join(' '), {
@@ -149,7 +166,9 @@ async function runOrthanc(
       })
     )
   } catch (error) {
-    return failure('orthanc-launch-error', error instanceof Error ? error.message : String(error), argv.join(' '))
+    return failure('orthanc-launch-error', error instanceof Error ? error.message : String(error), argv.join(' '), {
+      timeout_seconds: timeoutMs / 1000,
+    })
   }
 }
 
@@ -199,7 +218,7 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
       command.path,
     )
   }
-  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile)
+  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, cliTimeoutMs(command, resolved.args))
   return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path) : null)
 }
 

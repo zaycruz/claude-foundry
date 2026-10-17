@@ -167,6 +167,89 @@ test('F17: Orthanc writes in Bash block in every mode, however the shell hides t
   }
 })
 
+// Free text that mentions orthanc (bead hooks-kus).
+//
+// Ways this can fail, written before the code:
+//  G1  A commit message, PR body, bead note or echo text that mentions orthanc is refused.
+//  G2  Free text that starts with $VAR and mentions orthanc is refused as a hidden call.
+//  G3  A redirect target such as > "$TMPDIR/x" reads as a command named by a variable.
+//  G4  A heredoc body (a commit message, a PR body) is read line by line as commands.
+//  G5  Code the shell does run stops being blocked: bash -c, sh -lc, eval, ssh host '…'.
+//  G6  $(…) or backticks inside double quotes, or in an unquoted heredoc, run orthanc
+//      and pass because the quotes were skipped.
+//  G7  Text fed to a shell or interpreter on stdin (| sh, <<<, a heredoc to python3)
+//      runs orthanc unseen.
+//  G8  Wrapper prefixes stop being blocked: env, xargs, sudo, nohup, timeout, find -exec.
+//  G9  An F17 or round 3 case regresses.
+//  G10 git push detection changes (it keeps its own parser).
+test('G1-G4: free text that only mentions orthanc passes', async () => {
+  const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, 'agent/x')
+  for (const command of [
+    'git commit -m "fix orthanc timeout"',
+    'git commit -m "orthanc proposal merge p is gated now"',
+    'gh pr create --draft --title "Guard: orthanc in free text" --body "orthanc repository push … still blocks"',
+    'gh pr create --body "orthanc dataset create x; orthanc proposal merge p"',
+    'bd create "orthanc_cli timeout" --description "orthanc ontology object-type-upsert T waits"',
+    'bd update hooks-kus --notes "run orthanc dataset create x | tee log"',
+    'echo "orthanc proposal merge p"',
+    "echo 'run orthanc dataset create x now'",
+    'report --activity "Checking Orthanc flags"',
+    'git commit -m "$VERSION: orthanc timeout guard"',
+    'printf "%s\\n" "see orthanc help (dataset create)"',
+    'orthanc --agent ontology list > "$TMPDIR/m.json"',
+    'orthanc ontology list 2> "$LOG"',
+    'git commit -F - <<EOF\nfix orthanc timeout\northanc proposal merge p is now gated\nEOF',
+    "gh pr create --body-file - <<'EOF'\northanc dataset create x\nEOF\necho done",
+    "cat > /tmp/body.txt <<'EOF'\nrun `orthanc proposal merge p` with orthanc_cli\nEOF",
+    'cat > /tmp/body.txt <<-EOF\n\torthanc proposal merge p is gated\n\tEOF\ngit add -A',
+  ]) {
+    expect({ command, result: bash(command) }).toEqual({ command, result: null })
+  }
+})
+
+test('G5-G9: orthanc writes the shell runs stay blocked', async () => {
+  const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, 'agent/x')
+  for (const command of [
+    'env X=1 orthanc dataset create x --apply',
+    "bash -c 'orthanc dataset create x --apply'",
+    "sh -lc 'cd /tmp; orthanc proposal merge p'",
+    "zsh -c 'true && orthanc dataset create x'",
+    "eval 'orthanc dataset create x'",
+    "ssh box 'orthanc dataset create x'",
+    "xargs -I{} sh -c 'orthanc dataset create {}'",
+    "sudo -u svc bash -c 'orthanc proposal merge p'",
+    "find . -name x -exec sh -c 'orthanc dataset create x' \\;",
+    'nohup orthanc dataset create x &',
+    'timeout 60 orthanc proposal merge p',
+    'git commit -m "$(orthanc proposal merge p)"',
+    'git commit -m "msg `orthanc proposal merge p`"',
+    'echo "x $(echo "y" && orthanc dataset create x) z"',
+    'echo "orthanc dataset create x" | sh',
+    'echo "orthanc dataset create x" | bash -s',
+    'bash <<< "orthanc dataset create x"',
+    'python3 <<EOF\nimport subprocess; subprocess.run(["orthanc", "dataset", "create", "x"])\nEOF',
+    'cat <<EOF | sh\northanc dataset create x\nEOF',
+    'cat <<EOF\n$(orthanc proposal merge p)\nEOF',
+    'X="orthanc dataset create x"; bash -c "$X"',
+    "bash -c 'git commit -m \"$(orthanc proposal merge p)\"'",
+    'bash -s x <<EOF\northanc dataset create x\nEOF',
+    'sh -s -- a <<< "orthanc dataset create x"',
+    `python3 - x <<'PY'\nimport os; os.system("orthanc dataset create x")\nPY`,
+    'ssh box <<EOF\northanc proposal merge p\nEOF',
+    'ssh box <<< "orthanc dataset create x"',
+    'kubectl exec -i p -- bash <<EOF\northanc dataset create x\nEOF',
+    'bash 0<<EOF\northanc dataset create x\nEOF',
+    'node /dev/stdin x <<EOF\nrequire("child_process").execSync("orthanc dataset create x")\nEOF',
+  ]) {
+    expect({ command, blocked: blockedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
+  }
+})
+
+test('G10: git push detection keeps reading pushes inside quoted shell code', async () => {
+  expect(gitPushDirectories(`sh -c 'cd /tmp/clone; git push'`)).toContain('/tmp/clone')
+  expect(gitPushDirectories('git commit -m "fix push"')).toBe(null)
+})
+
 test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => {
   const cli = (command: string, args: string[]) => classifyCall(CLI, { command, args }, MANIFEST, null)
   expect(blockedEverywhere(cli('ontology object-type-upsert', ['T', '--branch', GLOBAL, '--branch', 'main']))).toBe(true)
