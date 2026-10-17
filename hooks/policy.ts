@@ -2,7 +2,9 @@
 // no `$`, so the test kit and the hooks share them. Read/mutation comes from
 // orthanc's own agent-manifest `kind`.
 
-export type ManifestCommand = { path: string; kind?: string; auth?: string; input?: string }
+/** One option of a manifest command, as Orthanc's agent-manifest lists it. */
+export type ManifestFlag = { flag: string; takesValue: boolean; default?: string }
+export type ManifestCommand = { path: string; kind?: string; auth?: string; input?: string; flags?: ManifestFlag[] }
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 export type ApprovalMode = (typeof APPROVAL_MODES)[number]
@@ -381,6 +383,196 @@ export function shellSegments(command: string, depth = 0): string[][] {
   return [...segments, ...nested]
 }
 
+/** Where the `$(` … `)` whose `(` is at `open` ends: its `)`, or the end of
+ * `text`. Quotes and nested parentheses inside it are honored. */
+function substitutionEnd(text: string, open: number): number {
+  let depth = 0
+  let quote: string | null = null
+  for (let index = open; index < text.length; index += 1) {
+    const char = text[index]!
+    if (quote === "'") {
+      if (char === "'") quote = null
+    } else if (char === '\\') index += 1
+    else if (quote === '"') {
+      if (char === '"') quote = null
+    } else if (char === "'" || char === '"') quote = char
+    else if (char === '(') depth += 1
+    else if (char === ')' && (depth -= 1) === 0) return index
+  }
+  return text.length
+}
+
+/** Where the backquoted command whose opening backquote is at `open` ends. */
+function backquoteEnd(text: string, open: number): number {
+  for (let index = open + 1; index < text.length; index += 1) {
+    if (text[index] === '\\') index += 1
+    else if (text[index] === '`') return index
+  }
+  return text.length
+}
+
+/** The `$(…)` and backquoted commands in text the shell expands (a
+ * double-quoted word, an unquoted heredoc body). `text[at]` starts one or not. */
+function substitutionAt(text: string, at: number): { body: string; end: number } | null {
+  if (text[at] === '$' && text[at + 1] === '(') {
+    const end = substitutionEnd(text, at + 1)
+    return { body: text.slice(at + 2, end), end }
+  }
+  if (text[at] === '`') {
+    const end = backquoteEnd(text, at)
+    return { body: text.slice(at + 1, end), end }
+  }
+  return null
+}
+
+function substitutionsIn(text: string): string[] {
+  const found: string[] = []
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === '\\') {
+      index += 1
+      continue
+    }
+    const substitution = substitutionAt(text, index)
+    if (substitution === null) continue
+    found.push(substitution.body)
+    index = substitution.end
+  }
+  return found
+}
+
+/** One pass over a shell line as the shell reads it: the words of each simple
+ * command, plus the command text the shell runs from inside words (`$(…)` and
+ * backquotes in double quotes or an unquoted heredoc). Redirect targets and
+ * heredoc bodies are data, not words. Single-quoted text stays literal. */
+function shellWords(command: string): { segments: string[][]; code: string[] } {
+  const segments: string[][] = []
+  const code: string[] = []
+  const heredocs: { delimiter: string; expands: boolean; tabs: boolean }[] = []
+  let words: string[] = []
+  let word = ''
+  let quote: string | null = null
+  let quoted = false
+  let target: 'file' | 'heredoc' | 'heredoc-tabs' | null = null
+  const endWord = () => {
+    if (word !== '' || quoted) {
+      if (target === 'heredoc' || target === 'heredoc-tabs') heredocs.push({ delimiter: word, expands: !quoted, tabs: target === 'heredoc-tabs' })
+      else if (target === null) words.push(word)
+      target = null
+    }
+    word = ''
+    quoted = false
+  }
+  const endSegment = () => {
+    endWord()
+    target = null
+    if (words.length > 0) segments.push(words)
+    words = []
+  }
+  // At a newline: skip the bodies of the heredocs opened on the line that ends here.
+  const skipHeredocs = (newline: number): number => {
+    let end = newline
+    for (const heredoc of heredocs.splice(0)) {
+      const body: string[] = []
+      while (end < command.length) {
+        const start = end + 1
+        const next = command.indexOf('\n', start)
+        end = next < 0 ? command.length : next
+        const line = command.slice(start, end)
+        if ((heredoc.tabs ? line.replace(/^\t+/, '') : line) === heredoc.delimiter) break
+        body.push(line)
+      }
+      if (heredoc.expands) code.push(...substitutionsIn(body.join('\n')))
+    }
+    return end
+  }
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!
+    if (quote === "'") {
+      if (char === "'") quote = null
+      else word += char
+      continue
+    }
+    if (quote === '"') {
+      const substitution = substitutionAt(command, index)
+      if (char === '"') quote = null
+      else if (char === '\\' && index + 1 < command.length) word += command[++index]
+      else if (substitution !== null) {
+        code.push(substitution.body)
+        word += command.slice(index, substitution.end + 1)
+        index = substitution.end
+      } else word += char
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      quoted = true
+    } else if (char === '\\' && index + 1 < command.length) word += command[++index]
+    else if (char === '\n') {
+      endSegment()
+      index = skipHeredocs(index)
+    } else if (/\s/.test(char)) endWord()
+    else if (char === '$' && command[index + 1] === '(') {
+      endSegment()
+      index += 1
+    } else if (char === '<' || char === '>' || (char === '&' && command[index + 1] === '>')) {
+      endWord()
+      let last = index
+      while ('<>&|'.includes(command[last + 1] ?? ' ')) last += 1
+      const operator = command.slice(index, last + 1)
+      index = last
+      if (command[last + 1] === '(') {
+        // <(…) and >(…) run a command: read it as its own segment.
+        endSegment()
+        index += 1
+      } else if (operator === '<<') {
+        const tabs = command[last + 1] === '-'
+        if (tabs) index += 1
+        target = tabs ? 'heredoc-tabs' : 'heredoc'
+      } else target = 'file'
+    } else if (SHELL_OPERATORS.includes(char)) endSegment()
+    else word += char
+  }
+  endSegment()
+  return { segments, code }
+}
+
+const SHELLS = /^(sh|bash|zsh|dash|ksh|mksh|ash|fish|busybox)$/
+// Heads whose following words are one command line the shell runs (eval, ssh host …).
+const LINE_RUNNERS = new Set(['eval', 'ssh', 'watch', 'tmux', 'screen', 'parallel'])
+const CODE_FLAG = /^-[A-Za-z]*[cS]$/
+const NESTING_LIMIT = 3
+
+/** The words of a segment that the shell runs as code: the value after -c
+ * (sh -c, bash -lc, su -c, npx -c), env -S, and everything after eval or ssh.
+ * Free-text heads (git, echo, grep, …) run none of their words. */
+function codeWords(words: readonly string[]): string[] {
+  let head = 0
+  while (head < words.length && ASSIGNMENT.test(words[head]!)) head += 1
+  if (head >= words.length || NON_EXECUTING.has(basename(words[head]))) return []
+  const code: string[] = []
+  for (let index = head; index < words.length; index += 1) {
+    if (LINE_RUNNERS.has(basename(words[index]))) {
+      code.push(words.slice(index + 1).join(' '))
+      break
+    }
+    if (CODE_FLAG.test(words[index]!) && words[index + 1] !== undefined) code.push(words[index + 1]!)
+  }
+  return code
+}
+
+/** The simple commands a Bash line runs, for the Orthanc guard. Unlike
+ * shellSegments, a quoted word is read as a command only where the shell runs
+ * it (see codeWords and shellWords), so free text that mentions orthanc in a
+ * commit message, a PR body or an echo stays text. Code nested past the limit
+ * comes back as a `$` segment, which hidesOrthanc refuses. */
+export function commandSegments(command: string, depth = 0): string[][] {
+  const { segments, code } = shellWords(command)
+  const nested = [...code, ...segments.flatMap(codeWords)].filter(item => item.trim() !== '')
+  if (nested.length === 0) return segments
+  if (depth >= NESTING_LIMIT) return [...segments, ['$']]
+  return [...segments, ...nested.flatMap(item => commandSegments(item, depth + 1))]
+}
+
 const basename = (word: string | undefined) => (word ?? '').split('/').at(-1)?.replace(/^!/, '') ?? ''
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 const MENTIONS_ORTHANC = /(^|[^\w/.-])orthanc([^\w.-]|$)|ORTHANC_BIN/i
@@ -417,7 +609,8 @@ function orthancStart(words: readonly string[]): number {
 function hidesOrthanc(words: readonly string[], command: string): boolean {
   if (!MENTIONS_ORTHANC.test(command)) return false
   let index = 0
-  while (index < words.length && (ASSIGNMENT.test(words[index]!) || WRAPPERS.has(basename(words[index])) || words[index]!.startsWith('-'))) {
+  // Wrappers, their flags and the numbers they take (`timeout 5`, `nice -n 10`).
+  while (index < words.length && (ASSIGNMENT.test(words[index]!) || WRAPPERS.has(basename(words[index])) || words[index]!.startsWith('-') || /^[0-9.]+[smhd]?$/.test(words[index]!))) {
     if (ASSIGNMENT.test(words[index]!) && MENTIONS_ORTHANC.test(words[index]!.replace(ASSIGNMENT, ''))) return true
     index += 1
   }
@@ -426,6 +619,8 @@ function hidesOrthanc(words: readonly string[], command: string): boolean {
   if (head.startsWith('$')) return true
   const rest = words.slice(index + 1)
   if (INDIRECT.has(head)) return rest.some(word => MENTIONS_ORTHANC.test(word))
+  // A shell or interpreter with no script reads its code from stdin (`| sh`, `bash <<<`, a heredoc).
+  if ((SHELLS.test(basename(head)) || CODE_RUNNERS.test(basename(head))) && rest.every(word => word.startsWith('-'))) return true
   // Interpreter code inline (`python3 -c "…orthanc…"`): a word holding code, or the one after -c/-e.
   return CODE_RUNNERS.test(basename(head)) &&
     rest.some((word, position) => MENTIONS_ORTHANC.test(word) && (/[\s()'"\[\];]/.test(word) || /^-(c|e|-eval)$/.test(rest[position - 1] ?? '')))
@@ -473,7 +668,7 @@ function shellClassification(
     isDestructive: false,
     error,
   })
-  for (const words of shellSegments(command)) {
+  for (const words of commandSegments(command)) {
     if (hidesOrthanc(words, command)) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }

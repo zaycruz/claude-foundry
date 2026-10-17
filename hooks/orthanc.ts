@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { DENIED_COMMANDS, type ManifestCommand } from './policy'
+import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -50,9 +50,62 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           kind: typeof entry.kind === 'string' ? entry.kind : undefined,
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
           input: typeof entry.input === 'string' ? entry.input : undefined,
+          flags: flagsFrom(entry.args),
         }]
       : [],
   )
+}
+
+function flagsFrom(args: unknown): ManifestFlag[] {
+  if (!Array.isArray(args)) return []
+  return args.filter(isRecord).flatMap(arg =>
+    typeof arg.flag === 'string'
+      ? [{ flag: arg.flag, takesValue: arg.takes_value === true, ...(typeof arg.default === 'string' ? { default: arg.default } : {}) }]
+      : [],
+  )
+}
+
+// orthanc_cli's process timer. Waiting commands (repository checks wait,
+// ontology branch-index-status --wait, sql wait, …) run as long as their own
+// --timeout, plus --publish-grace after the checks pass. The timer gives them
+// that wait, one poll interval (Orthanc can overshoot its deadline by one) and
+// a margin, so Orthanc reports its own timeout instead of being killed. The
+// floor is the old fixed 300 s; the cap is Orthanc's longest default wait
+// (branch-index-status, 1800 s) plus the margin.
+const CLI_MARGIN_S = 120
+const CLI_LONGEST_WAIT_S = 1800
+export const CLI_TIMEOUT_FLOOR_MS = 300_000
+export const CLI_TIMEOUT_CAP_MS = (CLI_LONGEST_WAIT_S + CLI_MARGIN_S) * 1000
+const WAIT_FLAGS = ['--timeout', '--publish-grace']
+const POLL_FLAGS = ['--interval', '--poll-interval']
+
+/** The last value given for `flag` (`--flag v` or `--flag=v`); '' when it dangles, undefined when absent. */
+function flagArgument(args: readonly string[], flag: string): string | undefined {
+  let value: string | undefined
+  args.forEach((arg, index) => {
+    if (arg === flag) value = args[index + 1] ?? ''
+    else if (arg.startsWith(`${flag}=`)) value = arg.slice(flag.length + 1)
+  })
+  return value
+}
+
+/** How long orthanc_cli lets `command` run with `args` (the resolved args, flags included), in ms. */
+export function cliTimeoutMs(command: ManifestCommand | undefined, args: readonly string[]): number {
+  const flags = command?.flags ?? []
+  const declares = (flag: string) => flags.some(entry => entry.flag === flag)
+  const passes = (flag: string) => args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
+  const seconds = (flag: string) => {
+    const raw = flagArgument(args, flag) ?? flags.find(entry => entry.flag === flag)?.default
+    const value = raw === undefined || raw.trim() === '' ? NaN : Number(raw)
+    return Number.isFinite(value) && value > 0 ? value : 0
+  }
+  // A command with a --wait switch only waits when it is passed; --no-wait never waits.
+  const waits = !passes('--no-wait') && (!declares('--wait') || passes('--wait'))
+  const wait = waits ? WAIT_FLAGS.reduce((sum, flag) => sum + seconds(flag), 0) : 0
+  if (wait === 0) return CLI_TIMEOUT_FLOOR_MS
+  const poll = Math.max(...POLL_FLAGS.map(seconds))
+  const total = (wait + poll + CLI_MARGIN_S) * 1000
+  return Math.min(CLI_TIMEOUT_CAP_MS, Math.max(CLI_TIMEOUT_FLOOR_MS, total))
 }
 
 export const normalizeCommand = (command: string) => command.trim().replace(/\s+/g, ' ')

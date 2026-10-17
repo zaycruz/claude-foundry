@@ -50,6 +50,8 @@ import {
   recordPlan,
 } from './fde'
 import {
+  CLI_TIMEOUT_FLOOR_MS,
+  cliTimeoutMs,
   type Envelope,
   failure,
   guideEnvelope,
@@ -116,7 +118,6 @@ const GUARD_MODEL = 'claude-haiku-5-5'
 const VISIBLE_ROWS = 12
 const TREE_ROWS = 8
 const ROOT_CONCURRENCY = 6
-const CLI_TIMEOUT_MS = 300_000
 
 let loop: { identity: string; streak: number } | null = null
 let manifestCache: readonly ManifestCommand[] | undefined
@@ -136,7 +137,7 @@ async function runOrthanc(
   $: EngineInterface,
   argv: readonly string[],
   profile?: string,
-  timeoutMs = CLI_TIMEOUT_MS,
+  timeoutMs = CLI_TIMEOUT_FLOOR_MS,
 ): Promise<Envelope> {
   const full = ['--agent', '--non-interactive', ...(profile ? ['--profile', profile] : []), ...argv]
   try {
@@ -149,7 +150,9 @@ async function runOrthanc(
       })
     )
   } catch (error) {
-    return failure('orthanc-launch-error', error instanceof Error ? error.message : String(error), argv.join(' '))
+    return failure('orthanc-launch-error', error instanceof Error ? error.message : String(error), argv.join(' '), {
+      timeout_seconds: timeoutMs / 1000,
+    })
   }
 }
 
@@ -199,7 +202,7 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
       command.path,
     )
   }
-  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile)
+  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, cliTimeoutMs(command, resolved.args))
   return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path) : null)
 }
 
