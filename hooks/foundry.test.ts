@@ -232,6 +232,14 @@ test('G5-G9: orthanc writes the shell runs stay blocked', async () => {
     'cat <<EOF\n$(orthanc proposal merge p)\nEOF',
     'X="orthanc dataset create x"; bash -c "$X"',
     "bash -c 'git commit -m \"$(orthanc proposal merge p)\"'",
+    'bash -s x <<EOF\northanc dataset create x\nEOF',
+    'sh -s -- a <<< "orthanc dataset create x"',
+    `python3 - x <<'PY'\nimport os; os.system("orthanc dataset create x")\nPY`,
+    'ssh box <<EOF\northanc proposal merge p\nEOF',
+    'ssh box <<< "orthanc dataset create x"',
+    'kubectl exec -i p -- bash <<EOF\northanc dataset create x\nEOF',
+    'bash 0<<EOF\northanc dataset create x\nEOF',
+    'node /dev/stdin x <<EOF\nrequire("child_process").execSync("orthanc dataset create x")\nEOF',
   ]) {
     expect({ command, blocked: blockedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
   }

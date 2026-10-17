@@ -68,6 +68,7 @@ import {
   rowsOf,
   serialize,
 } from './orthanc'
+import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -131,6 +132,20 @@ async function orthancBin($: EngineInterface): Promise<string> {
   return (await $.env.get('ORTHANC_BIN'))?.trim() || 'orthanc'
 }
 
+// $.process.run stops at ten minutes: a longer wait streams under its own deadline.
+async function runLong($: EngineInterface, command: readonly string[], timeoutMs: number): Promise<ProcessOutput> {
+  let expire = () => {}
+  const expired = new Promise<void>(resolve => {
+    expire = resolve
+  })
+  const timer = $.clock.after(timeoutMs, () => expire())
+  try {
+    return await readToExit($.process.spawn({ argv: command }), expired, timeoutMs)
+  } finally {
+    timer.cancel()
+  }
+}
+
 // orthanc in agent mode, argv only, no shell; any failure comes back as an
 // envelope so callers handle one shape.
 async function runOrthanc(
@@ -141,7 +156,8 @@ async function runOrthanc(
 ): Promise<Envelope> {
   const full = ['--agent', '--non-interactive', ...(profile ? ['--profile', profile] : []), ...argv]
   try {
-    const ran = await $.process.run([await orthancBin($), ...full], { timeoutMs })
+    const command = [await orthancBin($), ...full]
+    const ran = timeoutMs > PROCESS_RUN_MAX_MS ? await runLong($, command, timeoutMs) : await $.process.run(command, { timeoutMs })
     return (
       parseEnvelope(ran.stdout) ??
       failure('orthanc-launch-error', `orthanc exited ${ran.exitCode} with no foundry-agent-v1 envelope`, argv.join(' '), {

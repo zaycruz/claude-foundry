@@ -15,11 +15,19 @@
 //  T9  Flags written inside the command string (F16) are not seen.
 //  T10 An older manifest without flag defaults breaks the derivation.
 //  T11 A manifest without args loses the flags it does carry.
+//  T12 $.process.run kills its child at ten minutes whatever timeoutMs says,
+//      so any timer over 600 s is still cut (found after the first fix).
+//  T13 The streamed run never ends: a silent child outlives its deadline, or
+//      the timer keeps running after the child exits.
+//  T14 The streamed run loses output, reads a signal exit as success, or
+//      leaves the child running when it gives up.
 
+import type { HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, manifestFrom } from './orthanc'
 import { type ManifestCommand, resolveOrthancCommand } from './policy'
+import { PROCESS_RUN_MAX_MS, readToExit } from './process'
 
 const CHECKS_WAIT: ManifestCommand = {
   path: 'repository checks wait',
@@ -123,4 +131,65 @@ test('T10 T11: the manifest keeps flag defaults; without them only explicit valu
   const bare: ManifestCommand = { path: 'repository checks wait' }
   expect(cliTimeoutMs(bare, ['ri.r', 'v1'])).toBe(CLI_TIMEOUT_FLOOR_MS)
   expect(seconds(cliTimeoutMs(bare, ['ri.r', 'v1', '--timeout', '1500']))).toBe(1620)
+})
+
+// A child that hands up `pieces`, then ends with `end`, or never ends when `end` is null.
+function fakeChild(pieces: ProcessSpawnChunk[], end: ProcessSpawnResult | null) {
+  const seen = { returned: false }
+  const queue = [...pieces]
+  const stream = {
+    next: () => {
+      const piece = queue.shift()
+      if (piece !== undefined) return Promise.resolve({ done: false as const, value: piece })
+      return end === null ? new Promise<never>(() => {}) : Promise.resolve({ done: true as const, value: end })
+    },
+    return: (value: ProcessSpawnResult) => {
+      seen.returned = true
+      return Promise.resolve({ done: true as const, value })
+    },
+  }
+  return { child: stream as unknown as HookStream<ProcessSpawnChunk, ProcessSpawnResult>, seen }
+}
+const never = new Promise<void>(() => {})
+
+test('T12: only a timer past the ten-minute run cap streams', async () => {
+  expect(PROCESS_RUN_MAX_MS).toBe(600_000)
+  expect(cliTimeoutMs(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '1500']) > PROCESS_RUN_MAX_MS).toBe(true)
+  expect(cliTimeoutMs(SQL_WAIT, ['q']) > PROCESS_RUN_MAX_MS).toBe(false)
+})
+
+test('T13 T14: a streamed run keeps all output and maps a signal exit to 1', async () => {
+  const { child, seen } = fakeChild(
+    [
+      { stream: 'stdout', text: '{"schema_version":' },
+      { stream: 'stderr', text: 'polling' },
+      { stream: 'stdout', text: '"foundry-agent-v1"}' },
+    ],
+    { code: 0, signal: null },
+  )
+  expect(await readToExit(child, never, 1_750_000)).toEqual({ exitCode: 0, stdout: '{"schema_version":"foundry-agent-v1"}', stderr: 'polling' })
+  expect(seen.returned).toBe(false)
+  const killed = fakeChild([], { code: null, signal: 'SIGTERM' })
+  expect((await readToExit(killed.child, never, 700_000)).exitCode).toBe(1)
+  const failed = fakeChild([{ stream: 'stderr', text: 'boom' }], { code: 2, signal: null })
+  expect(await readToExit(failed.child, never, 700_000)).toEqual({ exitCode: 2, stdout: '', stderr: 'boom' })
+})
+
+test('T13 T14: a silent child past its deadline is stopped and the run rejects', async () => {
+  const { child, seen } = fakeChild([{ stream: 'stderr', text: 'waiting' }], null)
+  let expire = () => {}
+  const expired = new Promise<void>(resolve => {
+    expire = resolve
+  })
+  let outcome = 'pending'
+  const running = readToExit(child, expired, 1_920_000).then(
+    () => void (outcome = 'resolved'),
+    (error: Error) => void (outcome = error.message),
+  )
+  await Promise.resolve()
+  expect(outcome).toBe('pending')
+  expire()
+  await running
+  expect(outcome).toBe('still running after 1920 s; stopped')
+  expect(seen.returned).toBe(true)
 })

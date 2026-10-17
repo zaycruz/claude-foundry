@@ -440,22 +440,40 @@ function substitutionsIn(text: string): string[] {
   return found
 }
 
+/** What a command does with the text fed to its stdin by a heredoc or a
+ * here-string: a shell (or ssh) runs it as shell code, an interpreter runs it
+ * as its own code, anything else reads it as data. */
+function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
+  let head = 0
+  while (head < words.length && ASSIGNMENT.test(words[head]!)) head += 1
+  if (head >= words.length || NON_EXECUTING.has(basename(words[head]))) return null
+  if (words.some(word => SHELLS.test(basename(word)) || basename(word) === 'ssh')) return 'shell'
+  if (words.some(word => CODE_RUNNERS.test(basename(word)))) return 'interpreter'
+  return null
+}
+
 /** One pass over a shell line as the shell reads it: the words of each simple
  * command, plus the command text the shell runs from inside words (`$(…)` and
- * backquotes in double quotes or an unquoted heredoc). Redirect targets and
- * heredoc bodies are data, not words. Single-quoted text stays literal. */
-function shellWords(command: string): { segments: string[][]; code: string[] } {
+ * backquotes in double quotes or an unquoted heredoc). Redirect targets are
+ * data. A heredoc or here-string is data too, unless its command reads stdin
+ * as code: then a shell's text is code, and an interpreter's text that
+ * mentions orthanc makes the line `hidden`. Single-quoted text stays literal. */
+function shellWords(command: string): { segments: string[][]; code: string[]; hidden: boolean } {
   const segments: string[][] = []
   const code: string[] = []
-  const heredocs: { delimiter: string; expands: boolean; tabs: boolean }[] = []
+  const heredocs: { delimiter: string; expands: boolean; tabs: boolean; owner: string[] }[] = []
+  // Text fed to a command's stdin, judged once its line is complete.
+  const fed: { owner: string[]; text: string }[] = []
   let words: string[] = []
   let word = ''
   let quote: string | null = null
   let quoted = false
-  let target: 'file' | 'heredoc' | 'heredoc-tabs' | null = null
+  let target: 'file' | 'herestring' | 'heredoc' | 'heredoc-tabs' | null = null
   const endWord = () => {
     if (word !== '' || quoted) {
-      if (target === 'heredoc' || target === 'heredoc-tabs') heredocs.push({ delimiter: word, expands: !quoted, tabs: target === 'heredoc-tabs' })
+      if (target === 'heredoc' || target === 'heredoc-tabs') {
+        heredocs.push({ delimiter: word, expands: !quoted, tabs: target === 'heredoc-tabs', owner: words })
+      } else if (target === 'herestring') fed.push({ owner: words, text: word })
       else if (target === null) words.push(word)
       target = null
     }
@@ -482,6 +500,7 @@ function shellWords(command: string): { segments: string[][]; code: string[] } {
         body.push(line)
       }
       if (heredoc.expands) code.push(...substitutionsIn(body.join('\n')))
+      fed.push({ owner: heredoc.owner, text: body.join('\n') })
     }
     return end
   }
@@ -515,6 +534,8 @@ function shellWords(command: string): { segments: string[][]; code: string[] } {
       endSegment()
       index += 1
     } else if (char === '<' || char === '>' || (char === '&' && command[index + 1] === '>')) {
+      // A file descriptor glued to the redirect (`2>`, `0<<`) is not a word.
+      if (!quoted && /^[0-9]+$/.test(word)) word = ''
       endWord()
       let last = index
       while ('<>&|'.includes(command[last + 1] ?? ' ')) last += 1
@@ -524,7 +545,8 @@ function shellWords(command: string): { segments: string[][]; code: string[] } {
         // <(…) and >(…) run a command: read it as its own segment.
         endSegment()
         index += 1
-      } else if (operator === '<<') {
+      } else if (operator === '<<<') target = 'herestring'
+      else if (operator === '<<') {
         const tabs = command[last + 1] === '-'
         if (tabs) index += 1
         target = tabs ? 'heredoc-tabs' : 'heredoc'
@@ -533,7 +555,13 @@ function shellWords(command: string): { segments: string[][]; code: string[] } {
     else word += char
   }
   endSegment()
-  return { segments, code }
+  let hidden = false
+  for (const { owner, text } of fed) {
+    const reader = stdinReader(owner)
+    if (reader === 'shell') code.push(text)
+    else if (reader === 'interpreter' && MENTIONS_ORTHANC.test(text)) hidden = true
+  }
+  return { segments, code, hidden }
 }
 
 const SHELLS = /^(sh|bash|zsh|dash|ksh|mksh|ash|fish|busybox)$/
@@ -541,6 +569,13 @@ const SHELLS = /^(sh|bash|zsh|dash|ksh|mksh|ash|fish|busybox)$/
 const LINE_RUNNERS = new Set(['eval', 'ssh', 'watch', 'tmux', 'screen', 'parallel'])
 const CODE_FLAG = /^-[A-Za-z]*[cS]$/
 const NESTING_LIMIT = 3
+// Words after which a later word is the program that runs (`docker exec -i c sh`).
+const LAUNCHERS = new Set([
+  'exec', 'run', 'ssh', 'sudo', 'doas', 'env', 'xargs', 'nohup', 'timeout', 'nice', 'stdbuf', 'setsid', 'chroot',
+  'unshare', 'nsenter', 'flock', 'time', 'command', 'caffeinate',
+])
+// A segment hidesOrthanc refuses whenever the line mentions orthanc.
+const UNREADABLE = ['$']
 
 /** The words of a segment that the shell runs as code: the value after -c
  * (sh -c, bash -lc, su -c, npx -c), env -S, and everything after eval or ssh.
@@ -566,11 +601,12 @@ function codeWords(words: readonly string[]): string[] {
  * commit message, a PR body or an echo stays text. Code nested past the limit
  * comes back as a `$` segment, which hidesOrthanc refuses. */
 export function commandSegments(command: string, depth = 0): string[][] {
-  const { segments, code } = shellWords(command)
+  const { segments, code, hidden } = shellWords(command)
+  const own = hidden ? [...segments, UNREADABLE] : segments
   const nested = [...code, ...segments.flatMap(codeWords)].filter(item => item.trim() !== '')
-  if (nested.length === 0) return segments
-  if (depth >= NESTING_LIMIT) return [...segments, ['$']]
-  return [...segments, ...nested.flatMap(item => commandSegments(item, depth + 1))]
+  if (nested.length === 0) return own
+  if (depth >= NESTING_LIMIT) return [...own, UNREADABLE]
+  return [...own, ...nested.flatMap(item => commandSegments(item, depth + 1))]
 }
 
 const basename = (word: string | undefined) => (word ?? '').split('/').at(-1)?.replace(/^!/, '') ?? ''
@@ -619,8 +655,22 @@ function hidesOrthanc(words: readonly string[], command: string): boolean {
   if (head.startsWith('$')) return true
   const rest = words.slice(index + 1)
   if (INDIRECT.has(head)) return rest.some(word => MENTIONS_ORTHANC.test(word))
-  // A shell or interpreter with no script reads its code from stdin (`| sh`, `bash <<<`, a heredoc).
-  if ((SHELLS.test(basename(head)) || CODE_RUNNERS.test(basename(head))) && rest.every(word => word.startsWith('-'))) return true
+  // A shell or interpreter in command position (the head, after `--`, or after
+  // a launcher such as `kubectl exec -i p -- bash`, `docker exec -i c sh`)
+  // reads its code from stdin when it has no script, a script of - or
+  // /dev/stdin, or (a shell) -s.
+  const runner = words.findIndex(
+    (word, position) =>
+      position >= index &&
+      (SHELLS.test(basename(word)) || CODE_RUNNERS.test(basename(word))) &&
+      (position === index || words[position - 1] === '--' || words.slice(index, position).some(earlier => LAUNCHERS.has(basename(earlier)))),
+  )
+  if (runner >= 0 && (runner === index || !NON_EXECUTING.has(basename(head)))) {
+    const after = words.slice(runner + 1)
+    const script = after.find(word => word === '-' || !word.startsWith('-'))
+    if (script === undefined || script === '-' || script === '/dev/stdin') return true
+    if (SHELLS.test(basename(words[runner])) && after.some(word => /^-[A-Za-z]*s[A-Za-z]*$/.test(word))) return true
+  }
   // Interpreter code inline (`python3 -c "…orthanc…"`): a word holding code, or the one after -c/-e.
   return CODE_RUNNERS.test(basename(head)) &&
     rest.some((word, position) => MENTIONS_ORTHANC.test(word) && (/[\s()'"\[\];]/.test(word) || /^-(c|e|-eval)$/.test(rest[position - 1] ?? '')))
