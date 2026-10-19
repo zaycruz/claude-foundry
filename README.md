@@ -7,6 +7,9 @@ says so instead of falling back to REST.
 
 - **Two tools.** `orthanc_help` discovers Orthanc's command surface; `orthanc_cli`
   runs a command in agent mode and returns its `foundry-agent-v1` envelope.
+  A waiting command (`repository checks wait`, `ontology branch-index-status
+  --wait`, `sql wait`) runs as long as its own `--timeout` and `--publish-grace`
+  plus a margin, from 300 s up to 1,920 s.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
@@ -22,7 +25,8 @@ says so instead of falling back to REST.
   merges and approvals, release tags, default-branch pushes, raw `git push` to
   a Foundry repository and Foundry writes outside Orthanc are blocked. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
-  write, however the shell wraps the call.
+  write, however the shell wraps the call. Text that only mentions Orthanc (a
+  commit message, a PR body, an `echo`) is not a call.
 - **FDE mode** (`/fde on`, or `/fde <goal>`): binds the session to one agent global branch.
   Ontology writes are pinned to it, each `--apply` needs a dry run of the same
   call first, and `/fde end` hands the branch back to the operator, still open.
