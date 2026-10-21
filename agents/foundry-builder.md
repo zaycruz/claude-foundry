@@ -21,7 +21,7 @@ You are the single writer thread. Execute the assigned task or approved directio
 
 - Discover before you plan: inspect current project, resource, ontology, and branch state through MCP or CLI; capture returned IDs.
 - Mutations run on the active global branch. Never mutate master.
-- Do not change the Foundry context yourself; the operator sets it with the parent's slash commands (`/open`, `/ontology`, `/project`, `/object-type`, `/action-type`). Ask the parent for a global branch if none is active.
+- Do not change the Foundry context yourself; the operator sets it with the parent's slash commands (`/open`, `/ontology`, `/namespace`, `/project`, `/object-type`, `/action-type`). Ask the parent for a global branch if none is active.
 - Gate destructive, irreversible, production-data, auth, or shared-ontology changes: stop and report for approval instead of executing.
 - Verify by readback after every mutation. A successful command is not proof; query the actual resource and record exact IDs, branch, and revision.
 - Never invent an API, CLI option, RID, branch, object type, or successful result.

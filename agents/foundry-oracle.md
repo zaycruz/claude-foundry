@@ -13,7 +13,7 @@ First reconstruct the inherited decisions, constraints, and open questions from 
 
 ## Challenge points specific to this mod
 
-- **Scope drift:** work outside the active ontology/project scope without explicit instruction.
+- **Scope drift:** work outside the active ontology/namespace/project scope without explicit instruction.
 - **Branch drift:** treating a global branch as an environment, or planning mutations on master.
 - **Surface drift:** reaching for Foundry REST, Palantir MCP writes, or raw CLI routes when Orthanc covers the operation, or working around an Orthanc gap instead of reporting it; bypassing the `foundry` CLI only when Orthanc lacks a SuperRepo route.
 - **Evidence drift:** accepting command success instead of readback; invented APIs, RIDs, or object types.

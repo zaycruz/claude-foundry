@@ -1,4 +1,5 @@
-// FDE mode (/fde): one session, one goal, one agent global branch. Pure
+// FDE mode (/fde): one session, one goal, one global branch (an agent/ one it
+// made, or one the person adopted), and the namespace in scope, if any. Pure
 // functions, shared by the hooks and the tests. The mode only adds checks: the
 // branch rule, the ladder and the destructive rule run as they do without it.
 //
@@ -8,9 +9,12 @@
 //  - no global-branch or proposal changes (but add-repo on the bound branch):
 //    closing or merging is the operator's;
 //  - --apply runs only after a clean dry run of the same call, with every file
-//    it reads pinned by SHA-256; each dry run licenses one apply.
+//    it reads pinned by SHA-256; each dry run licenses one apply;
+//  - when a namespace is bound, every resource a write names, in its arguments
+//    or the files it reads, must be in it (reads may look anywhere).
 
-import type { FdeSession } from '../types'
+import type { FdeSession, FoundryNamespace } from '../types'
+import { isRecord } from './orthanc'
 import { BRANCH_FLAGS, flagValues, requiresBranch, unquote, validateBranchName } from './policy'
 
 const PREFIX = 'agent/fde-'
@@ -18,13 +22,56 @@ const NAME_MAX = 64
 const GOAL_MAX = 200
 const RECORD_MAX = 50
 const GLOBAL_BRANCH = /^ri\.branch\.\.branch\.[A-Za-z0-9-]+$/
+const PROPOSAL_RID = /^ri\.branch\.\.proposal\.[A-Za-z0-9-]+$/
+// A display name safe to show: one plain branch name, no spaces, quotes or control characters.
+const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/
+const FOREIGN_LINE = 'not an agent/ branch: FDE mode adopted it, and others may have work on it'
 const GLOBAL_BRANCH_ANY = /ri\.branch\.\.branch\.[A-Za-z0-9-]+/g
 const ONTOLOGY_RID = /ri\.ontology\.main\.ontology\.[A-Za-z0-9-]+/g
+// Any Compass resource RID: RIDs a mutation names go to batch-get for their namespace.
+const RESOURCE_RID = /ri\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]+\.[A-Za-z0-9-]+/g
+// A quoted path in a file the call reads: an unquoted word in prose is not a path.
+const QUOTED_PATH = /(?:"[^"\n]*"|'[^'\n]*')/g
+// A path right after a quote: what a decoded double encoding leaves when its quotes no longer pair.
+const QUOTE_OPENED_PATH = /["'](\/[^"'\n]*)/g
+const BRANCH_RID_PREFIX = 'ri.branch.'
+// A Compass folder RID: what `resource batch-get` may leave out, and what a write must then place.
+export const COMPASS_FOLDER_RID = 'ri.compass.main.folder.'
+const BATCH_MAX = 1000
 // Flags that could be read as a branch flag by a lenient parser: a --br… prefix, or -b inside a bundle.
 const AMBIGUOUS_BRANCH_FLAG = /^(--br(?!anch(=|$))[a-z-]*(=.*)?|-[a-z]*b[a-z]+|-[a-z]+b)$/i
 const PROFILE_FLAG = /^--profile(=|$)/
 // While bound, only this branch command runs, and only on the bound branch.
 const GLOBAL_BRANCH_ALLOWED = new Set(['global-branch add-repo'])
+
+// One JSON string escape and its letter forms, in one alternation: one pass never turns
+// `\\u002e` into `\.`, only into `\u002e`.
+const JSON_ESCAPE = /\\(?:u([0-9a-fA-F]{4})|(["\\/bfnrt]))/g
+const ESCAPED: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }
+
+/** The text, then each JSON-unescaped copy of it until one stops changing (at most 8): what a parser reads out of an escaped or doubly encoded string. */
+export function decodings(text: string): string[] {
+  const out = [text]
+  let current = text
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = current.replace(JSON_ESCAPE, (_whole, hex: string | undefined, letter: string | undefined) =>
+      hex !== undefined ? String.fromCharCode(parseInt(hex, 16)) : (ESCAPED[letter!] ?? letter!),
+    )
+    if (next === current || out.includes(next)) break
+    out.push(next)
+    current = next
+  }
+  return out
+}
+
+// A name or path that is safe to show: no control, line-breaking or bidi character, at most 100 of them.
+const NOT_PLAIN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
+
+/** The space as it may be shown: a name or path that is not plain shows as the space's RID. */
+export function plainSpace(space: FoundryNamespace): FoundryNamespace {
+  const shown = (value: string) => (value.length <= 100 && !NOT_PLAIN.test(value) ? value : space.rid)
+  return { rid: space.rid, name: shown(space.name), path: shown(space.path) }
+}
 
 /** One line, no control characters, at most 200 characters. */
 const cleanGoal = (text: string) =>
@@ -121,6 +168,12 @@ export function fileCandidates(args: readonly string[], cwd: string, home = ''):
       index += 1
       continue
     }
+    // A short flag with its file attached: -s@/work/schema.json is that file.
+    const attached = /^-[A-Za-z]=?@(.+)$/.exec(arg)
+    if (attached !== null) {
+      required.push(absolute(attached[1]!, cwd, home))
+      continue
+    }
     const joined = /^(--[a-z0-9-]+)=(.+)$/i.exec(arg)
     const raw = joined ? unquote(joined[2]!) : arg
     const value = raw.replace(/^@/, '')
@@ -162,11 +215,12 @@ export function takePlan(fde: FdeSession, signature: string): { fde: FdeSession;
   return { fde: { ...fde, plans: fde.plans.filter(plan => plan !== signature) }, taken: true }
 }
 
-/** Why a file the call reads is refused: it names another global branch or ontology. */
+/** Why a file the call reads is refused: it names another global branch or ontology, escaped or not. */
 export function foreignRids(fde: FdeSession, text: string): string | null {
-  const branches = new Set(text.match(GLOBAL_BRANCH_ANY) ?? [])
+  const decoded = decodings(text)
+  const branches = new Set(decoded.flatMap(copy => copy.match(GLOBAL_BRANCH_ANY) ?? []))
   branches.delete(fde.branchRid)
-  const ontologies = new Set(text.match(ONTOLOGY_RID) ?? [])
+  const ontologies = new Set(decoded.flatMap(copy => copy.match(ONTOLOGY_RID) ?? []))
   ontologies.delete(fde.ontologyRid)
   const found = [...branches, ...ontologies]
   return found.length === 0 ? null : `a file this call reads names ${found.join(', ')}; the session works on ${fde.branchRid} in ${fde.ontologyRid} only.`
@@ -195,19 +249,23 @@ export function fdeBind(
   if (profile !== fde.profile) {
     return { deny: `${tag}: the session's branch is on stack '${fde.profile}', but the active stack is '${profile}'. Switch back with /profile ${fde.profile}, or /fde end.` }
   }
+  if (fde.namespace !== null && path === 'space create') {
+    return { deny: `${tag}: the session works in ${fde.namespace.name} only, and a new space is outside it. The operator ends the mode with /fde end.` }
+  }
   if (path === 'global-branch create') {
     return { deny: `${tag}: this session works on ${fde.branchRid} only. Do not create another global branch; the operator ends the mode with /fde end.` }
   }
   if ((path.startsWith('global-branch ') && !GLOBAL_BRANCH_ALLOWED.has(path)) || path.startsWith('proposal ')) {
     return { deny: `${tag}: '${path}' changes branches or proposals, which is the operator's decision at handoff. Report that the work is ready instead.` }
   }
-  const foreign = new Set(words.flatMap(word => word.match(GLOBAL_BRANCH_ANY) ?? []))
+  const decoded = words.flatMap(word => decodings(word))
+  const foreign = new Set(decoded.flatMap(word => word.match(GLOBAL_BRANCH_ANY) ?? []))
   foreign.delete(fde.branchRid)
   if (foreign.size > 0) return { deny: `${tag}: this call names ${[...foreign].join(', ')}; the session works on ${fde.branchRid} only.` }
   if (path.startsWith('global-branch ') && !words.includes(fde.branchRid)) {
     return { deny: `${tag}: '${path}' must name the session's branch ${fde.branchRid}.` }
   }
-  const ontologies = new Set(words.flatMap(word => word.match(ONTOLOGY_RID) ?? []))
+  const ontologies = new Set(decoded.flatMap(word => word.match(ONTOLOGY_RID) ?? []))
   ontologies.delete(fde.ontologyRid)
   if (ontologies.size > 0) {
     return { deny: `${tag}: the branch belongs to ontology ${fde.ontologyRid}; this call names ${[...ontologies].join(', ')}.` }
@@ -223,16 +281,144 @@ export function fdeBind(
   return { deny: `${tag}: ontology writes go to ${fde.branchRid}; this call names --branch ${named}. Drop --branch and the mode supplies it.` }
 }
 
-/** The branch's name when `data` (global-branch get) is an OPEN agent/ branch of `ontologyRid`; why not otherwise. */
+/** A stored binding: junk is null, and a session from before namespaces has `namespace: null, spaces: []`. */
+export function normalizeFde(stored: unknown): FdeSession | null {
+  if (!isRecord(stored) || typeof stored.branchRid !== 'string') return null
+  const space = (value: unknown): FoundryNamespace | null =>
+    isRecord(value) && typeof value.rid === 'string' && value.rid !== '' && typeof value.name === 'string' && typeof value.path === 'string'
+      ? { rid: value.rid, name: value.name, path: value.path }
+      : null
+  const plain = (value: unknown): FoundryNamespace | null => {
+    const found = space(value)
+    return found === null ? null : plainSpace(found)
+  }
+  return {
+    ...(stored as object as FdeSession),
+    namespace: plain(stored.namespace),
+    spaces: Array.isArray(stored.spaces) ? stored.spaces.map(plain).filter((entry): entry is FoundryNamespace => entry !== null) : [],
+  }
+}
+
+/** Why a write is refused: what it names, the namespace it is in, and that inputs count too. */
+const refusal = (fde: FdeSession, target: string, spaceRid: string): string => {
+  const ns = fde.namespace!
+  const listed = fde.spaces.find(space => space.rid === spaceRid)
+  const label = listed ? listed.name : `another namespace (${spaceRid})`
+  return (
+    `FDE mode (${fde.branchName}): ${target} is in ${label}, not ${ns.name}; the session works in ${ns.name} only, ` +
+    'and every resource a write names (in its arguments or the files it reads) must be in it.'
+  )
+}
+
+/** The space `path` names, by whole segments: `/Acme` does not claim `/Acme Dev/x`. Only a real path places one: a RID or an empty path standing in for a path claims nothing. */
+const placePath = (fde: FdeSession, path: string): FoundryNamespace | undefined =>
+  fde.spaces.find(space => space.path.startsWith('/') && (path === space.path || path.startsWith(space.path + '/')))
+
+/** The arg as a path: `--flag=/x` carries `/x`; anything that is not absolute is not a path. */
+const argPath = (arg: string): string => {
+  const word = unquote(arg)
+  const joined = /^--[a-z0-9-]+=(.*)$/i.exec(word)
+  return joined ? unquote(joined[1]!) : word
+}
+
+/**
+ * What a write names that could sit outside the bound namespace: the RIDs left
+ * to look up, or why the call is refused now. Without a bound namespace nothing
+ * is checked; a path under no listed space is nobody's business.
+ */
+export function namespaceScan(fde: FdeSession, args: readonly string[], texts: readonly string[]): { deny: string } | { lookup: string[] } {
+  if (fde.namespace === null) return { lookup: [] }
+  const skip = new Set([fde.branchRid, fde.ontologyRid, fde.namespace.rid])
+  const found: string[] = []
+  for (const arg of args) found.push(...decodings(unquote(arg)).flatMap(copy => copy.match(RESOURCE_RID) ?? []))
+  for (const text of texts) found.push(...decodings(text).flatMap(copy => copy.match(RESOURCE_RID) ?? []))
+  const lookup: string[] = []
+  for (const rid of new Set(found)) {
+    if (skip.has(rid) || rid.startsWith(BRANCH_RID_PREFIX)) continue
+    // batch-get never returns a namespace's own space, so a listed one is refused by the list.
+    const named = fde.spaces.find(space => space.rid === rid)
+    if (named !== undefined) return { deny: refusal(fde, rid, named.rid) }
+    lookup.push(rid)
+  }
+  // Whole args are paths; inside an arg (inline JSON) or a file, only quoted strings
+  // and paths that open right after a quote are, in every decoding.
+  const paths = [
+    ...args.flatMap(arg => decodings(arg).map(argPath)),
+    ...[...args, ...texts].flatMap(text =>
+      decodings(text).flatMap(copy => [
+        ...(copy.match(QUOTED_PATH) ?? []).map(unquote),
+        ...Array.from(copy.matchAll(QUOTE_OPENED_PATH), match => match[1]!),
+      ]),
+    ),
+  ]
+  for (const path of paths) {
+    if (!path.startsWith('/')) continue
+    const placed = placePath(fde, path)
+    if (placed !== undefined && placed.rid !== fde.namespace.rid) return { deny: refusal(fde, path, placed.rid) }
+  }
+  return { lookup }
+}
+
+/** `resource batch-get` argv for one call: at most 1000 RIDs each, in order. */
+export function batchGetArgs(rids: readonly string[]): string[][] {
+  const chunks: string[][] = []
+  for (let index = 0; index < rids.length; index += BATCH_MAX) chunks.push(['resource', 'batch-get', ...rids.slice(index, index + BATCH_MAX)])
+  return chunks
+}
+
+/** Each asked RID's spaceRid in a batch-get `data`, in asked order: null when batch-get left it out. */
+export function spacesOf(data: unknown, asked: readonly string[]): Map<string, string | null> {
+  const rows = isRecord(data) && Array.isArray(data.resources) ? data.resources.filter(isRecord) : []
+  const spaces = new Map(rows.flatMap(row => (typeof row.rid === 'string' && typeof row.spaceRid === 'string' ? [[row.rid, row.spaceRid] as [string, string]] : [])))
+  return new Map(asked.map(rid => [rid, spaces.get(rid) ?? null] as [string, string | null]))
+}
+
+/** Why this write names something outside the bound namespace; null when nothing looked-up is outside. */
+export function namespaceDeny(fde: FdeSession, spaces: ReadonlyMap<string, string | null>): string | null {
+  if (fde.namespace === null) return null
+  const ns = fde.namespace
+  for (const [rid, spaceRid] of spaces) {
+    if (spaceRid === null) {
+      if (!rid.startsWith(COMPASS_FOLDER_RID)) continue
+      return (
+        `FDE mode (${fde.branchName}): ${rid} is a Compass folder resource batch-get did not return, so it cannot be placed in ${ns.name}; ` +
+        `the session works in ${ns.name} only, and every resource a write names (in its arguments or the files it reads) must be in it.`
+      )
+    }
+    if (spaceRid !== ns.rid) return refusal(fde, rid, spaceRid)
+  }
+  return null
+}
+
+/**
+ * The branch to show when `data` (global-branch get) is an OPEN branch of
+ * `ontologyRid`, whatever its prefix (a Foundry AI FDE branch is named
+ * ai-fde/<user>/<slug>): its display name when that is a plain branch name,
+ * its RID when it is not. Anything else is a reason it cannot be adopted.
+ */
 export function adoptable(data: unknown, ontologyRid: string): { name: string } | string {
   const record = (data as { branch_record?: Record<string, unknown> } | null)?.branch_record
   if (typeof record !== 'object' || record === null) return 'global-branch get returned no branch record.'
-  const name = typeof record.display_name === 'string' ? cleanGoal(record.display_name) : ''
   if (record.branch_status !== 'OPEN') return `The branch is ${String(record.branch_status ?? 'unknown')}, not OPEN.`
   if (record.ontology_rid !== ontologyRid) return `The branch belongs to ontology ${String(record.ontology_rid ?? 'unknown')}, not the selected ${ontologyRid}.`
-  if (!name.startsWith('agent/') || !validateBranchName('global-branch create', name).ok) return `The branch '${name.slice(0, 80) || '?'}' is not a valid agent/ branch name.`
-  return { name }
+  const name = typeof record.display_name === 'string' && PLAIN_NAME.test(record.display_name) ? record.display_name : ''
+  if (name !== '') return { name }
+  if (typeof record.branch_rid === 'string' && GLOBAL_BRANCH.test(record.branch_rid)) return { name: record.branch_rid }
+  return 'The branch has no plain name, and global-branch get returned no branch RID to show instead.'
 }
+
+/** The proposal `data` (global-branch get) has open on the branch; null when it has none. */
+export function openProposal(data: unknown): string | null {
+  const rid = (data as { branch_record?: Record<string, unknown> } | null)?.branch_record?.active_proposal
+  return typeof rid === 'string' && PROPOSAL_RID.test(rid) ? rid : null
+}
+
+/** A branch FDE mode could have made itself; every other one belongs to someone else. */
+export function isAgentBranch(name: string): boolean {
+  return name.startsWith('agent/') && validateBranchName('global-branch create', name).ok
+}
+
+const adoptedForeign = (fde: FdeSession) => !isAgentBranch(fde.branchName)
 
 const appliedLines = (fde: FdeSession) =>
   fde.applied.length === 0 ? ['- nothing applied'] : fde.applied.map(entry => `- ${entry.at} ${entry.command}`)
@@ -242,6 +428,10 @@ export function fdeContext(fde: FdeSession): string {
     '# FDE mode',
     `Goal: ${goalLabel(fde.goal)}${fde.goal === '' ? ' (the operator works with you turn by turn; /fde goal sets one)' : ''}`,
     `This session works on one global branch: ${fde.branchName} (${fde.branchRid}) on ontology ${fde.ontologyRid}, stack ${fde.profile}.`,
+    ...(adoptedForeign(fde)
+      ? [`This is ${FOREIGN_LINE}. Change only what the goal needs, and leave what you did not make as you found it.`]
+      : []),
+    ...(fde.namespace ? [`Writes are limited to namespace ${fde.namespace.name} (${fde.namespace.path}): every resource a write names (in its arguments or the files it reads) must be in it, or the write is refused. Reads may look anywhere.`] : []),
     'Ontology writes are pinned to it: omit --branch and the mode adds it; any other branch, --profile or a new branch is refused. ' +
       'Pass --branch with that RID on reads you mean to see the branch (`ontology definition --object-type X --branch <rid>`); reads without it see main.',
     'Plan, then apply: run each write as a dry run (no --apply), read the plan, then repeat it with --apply and identical arguments. ' +
@@ -255,7 +445,9 @@ export function fdeStatus(fde: FdeSession): string {
   return [
     `FDE mode on · ${goalLabel(fde.goal)}`,
     `branch ${fde.branchName} (${fde.branchRid})`,
+    ...(adoptedForeign(fde) ? [FOREIGN_LINE] : []),
     `stack ${fde.profile} · ontology ${fde.ontologyRid} · since ${fde.startedAt}`,
+    ...(fde.namespace ? [`namespace ${fde.namespace.name} (${fde.namespace.path}): writes naming resources outside it are refused`] : []),
     `${fde.applied.length} applied · ${fde.plans.length} planned`,
     '/fde end hands off and leaves the branch open.',
   ].join('\n')
@@ -267,10 +459,13 @@ export function fdeHandoff(fde: FdeSession): string {
     '',
     `- Branch: ${fde.branchName} (${fde.branchRid}), still OPEN and not merged.`,
     `- Stack ${fde.profile}, ontology ${fde.ontologyRid}, started ${fde.startedAt}.`,
+    ...(fde.namespace ? [`- Namespace: ${fde.namespace.name} (${fde.namespace.path}).`] : []),
     `- Applied writes (${fde.applied.length}):`,
     ...appliedLines(fde).map(line => `  ${line}`),
     '',
-    'The operator reviews the branch, then merges it through a proposal or closes it: ' +
-      `orthanc global-branch close ${fde.branchRid} --apply --yes.`,
+    adoptedForeign(fde)
+      ? 'This is not an agent/ branch: FDE mode adopted it and leaves it as it found it, open. Whoever owns it decides whether it merges or closes.'
+      : 'The operator reviews the branch, then merges it through a proposal or closes it: ' +
+        `orthanc global-branch close ${fde.branchRid} --apply --yes.`,
   ].join('\n')
 }

@@ -14,6 +14,25 @@
 //  8. The prompt block omits a selected resource kind, so the model never sees it.
 //  9. The context tree miscounts, or a clear button clears the wrong thing.
 // 10. '/objects text' invents a property instead of saying orthanc needs --query.
+//
+// Namespace scope (one Compass namespace, which orthanc calls a space), also
+// written before the code; hooks/e2e.local.test.ts runs them over recorded output:
+// F-NS1  /namespace lists something other than `space list`, or saves the namespace
+//        without its path (search needs the path, not the display name).
+// F-NS2  With a namespace, /project still lists every project on the stack.
+// F-NS3  With a namespace and no project, Compass pickers root at projects outside it.
+// F-NS4  With a namespace, /search looks outside its path, or keeps --limit, which
+//        orthanc ignores once --path-prefix is set.
+// F-NS5  A different namespace keeps projects and Compass resources picked outside
+//        it; re-picking the same one, or clearing it, throws picks away.
+// F-NS6  A stored scope from before namespaces fails to load, or loads a namespace
+//        without a RID.
+// F-NS7  The prompt block omits the namespace, its path, or how to stay inside it,
+//        so the model lists and searches the whole stack anyway.
+// F-NS8  /open forces a namespace on a stack that does not need one.
+// F-NS9  A failed `space list` or `project list --space-rid` saves anything.
+// F-NS10 Switching profiles loses or leaks a profile's namespace.
+// F-NS11 /scope clear, or clearing the namespace, leaves it in the prompt.
 import { expect, test } from 'claude-code/testing'
 
 import {
@@ -34,7 +53,7 @@ const run = (command: string, args: string) =>
   ({ command, args, origin: { kind: 'sdk' }, presentation: { isFullscreen: false, columns: 120 } }) as const
 
 const COMMANDS = [
-  'foundry', 'open', 'onboard', 'auth', 'profile', 'ontology', 'project', 'object-type', 'action-type',
+  'foundry', 'open', 'onboard', 'auth', 'profile', 'ontology', 'namespace', 'project', 'object-type', 'action-type',
   'link-type', 'interface', 'folder', 'dataset', 'media-set', 'repository', 'contour', 'source',
   'developer-console', 'aip-chatbot', 'egress-policy', 'certificate', 'automation', 'media-item', 'objects',
   'function', 'language-model', 'permission', 'search', 'scope', 'approval', 'mcp-status', 'trace', 'fde',
@@ -87,6 +106,8 @@ test('a v0.1 stored scope loads with empty new fields', async () => {
   const old = normalizeScope({ profile: 'zap', host: 'h', ontology: null, projects: [], objectTypes: [], updatedAt: 'x' }, 'zap', 'h')
   expect(old.actionTypes).toEqual([])
   expect(old.resources).toEqual({})
+  expect(old.namespace).toBe(null)
+  expect(normalizeScope({ namespace: { name: 'no rid', path: '/x' } }, 'zap', 'h').namespace).toBe(null)
   expect(normalizeScope(null, 'acme', 'r').profile).toBe('acme')
   expect(normalizeScope({ profile: 7, resources: 'bad' }, 'acme', 'r').resources).toEqual({})
 })

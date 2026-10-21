@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, Next, Register } from 'claude-code'
 
-import type { FdeSession, FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
+import type { FdeSession, FoundryNamed, FoundryNamespace, FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
 import {
   applyClear,
   blockedText,
@@ -20,6 +20,7 @@ import {
   foundryTree,
   hasFocus,
   mergeSelections,
+  namespaceChanged,
   normalizeScope,
   OBJECT_QUERY_BEAD,
   objectsQuery,
@@ -30,7 +31,9 @@ import {
 } from './catalog'
 import {
   adoptable,
+  batchGetArgs,
   branchCreateArgs,
+  COMPASS_FOLDER_RID,
   foreignRids,
   goalLabel,
   takePlan,
@@ -43,11 +46,18 @@ import {
   fdeStatus,
   fileCandidates,
   hasApply,
+  isAgentBranch,
+  namespaceDeny,
+  namespaceScan,
+  normalizeFde,
+  openProposal,
   parseFdeArgs,
   planGate,
   planSignature,
+  plainSpace,
   recordApply,
   recordPlan,
+  spacesOf,
 } from './fde'
 import {
   CLI_TIMEOUT_FLOOR_MS,
@@ -276,6 +286,8 @@ async function currentScope($: EngineInterface): Promise<FoundryScope> {
 }
 
 const profileArg = (scope: FoundryScope) => (scope.profile === 'unknown' ? undefined : scope.profile)
+
+const spaceArgs = (scope: FoundryScope) => (scope.namespace ? ['--space-rid', scope.namespace.rid] : [])
 
 function contextText(scope: FoundryScope, mode: ApprovalMode): string {
   const lines = [
@@ -670,31 +682,116 @@ async function spill($: EngineInterface, command: unknown, envelope: Envelope): 
 // ---------- /fde ----------
 
 async function fdeState($: EngineInterface): Promise<FdeSession | null> {
-  return (await $.state.get(FDE)).value ?? null
+  return normalizeFde((await $.state.get(FDE)).value)
 }
 
 // The session's binding, mirrored to the store so the next session can offer /fde resume.
+// A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
+  spaceCache.clear()
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
-  const stored = await $.store.get('fdeOpen').catch(() => null)
-  return typeof stored === 'object' && stored !== null && typeof (stored as FdeSession).branchRid === 'string' ? (stored as FdeSession) : null
+  return normalizeFde(await $.store.get('fdeOpen').catch(() => null))
+}
+
+// rid -> the namespace it is in, for the lookups of one binding. Only a
+// successful batch-get is cached, so a failed one is looked up again, and the
+// operator's answer to a failed check is never remembered.
+const spaceCache = new Map<string, string | null>()
+const SPACE_CACHE_MAX = 10_000
+
+function rememberSpaces(spaces: ReadonlyMap<string, string | null>): void {
+  for (const [rid, spaceRid] of spaces) {
+    // A folder batch-get did not return may exist by the next write: ask again, never remember it as missing.
+    if (spaceRid === null && rid.startsWith(COMPASS_FOLDER_RID)) continue
+    spaceCache.set(rid, spaceRid)
+    if (spaceCache.size <= SPACE_CACHE_MAX) continue
+    const oldest = spaceCache.keys().next().value
+    if (typeof oldest === 'string') spaceCache.delete(oldest)
+  }
+}
+
+/** While bound, the namespace in scope is the session's: nothing may move it. */
+const namespaceLocked = (fde: FdeSession) =>
+  `FDE mode (${fde.branchName}) holds this session to ${fde.namespace ? `namespace ${fde.namespace.name}` : 'no namespace'}; /fde end first.`
+
+/** `space list` as namespaces: rid, display name (or path) and path, each plain enough to show. */
+function spacesFrom(envelope: Envelope): FoundryNamespace[] {
+  return listItems(envelope, 'spaces').flatMap(entry => {
+    const rid = asString(entry.rid)
+    const path = asString(entry.path)
+    return rid === '' ? [] : [plainSpace({ rid, name: asString(entry.display_name) || path, path })]
+  })
+}
+
+const couldNotBind = (ontology: FoundryNamed, namespace: FoundryNamespace, why: string) =>
+  `Could not check that the ontology ${ontology.name} is in ${namespace.name} (${why}). FDE mode stays off; try /fde on again.`
+
+/** The RIDs a check could not place, first 20: what the ask and the refusal name. */
+const shownRids = (rids: readonly string[]) =>
+  rids.length <= 20 ? rids.join(', ') : `${rids.slice(0, 20).join(', ')} and ${rids.length - 20} more`
+
+/**
+ * Why a write names something outside the bound namespace, or null. A RID this
+ * session has not placed costs one batch-get, cached for the binding; a lookup
+ * that cannot run asks the operator rather than failing closed, and names what
+ * it could not check.
+ */
+async function namespaceCheck($: EngineInterface, fde: FdeSession, args: string[], texts: readonly string[]): Promise<string | null> {
+  const scanned = namespaceScan(fde, args, texts)
+  if ('deny' in scanned) return scanned.deny
+  const placed = new Map<string, string | null>()
+  const unchecked: string[] = []
+  const failures: string[] = []
+  for (const rid of scanned.lookup) {
+    if (spaceCache.has(rid)) placed.set(rid, spaceCache.get(rid) ?? null)
+  }
+  for (const argv of batchGetArgs(scanned.lookup.filter(rid => !spaceCache.has(rid)))) {
+    const envelope = await runOrthanc($, argv, fde.profile, 60_000)
+    if (isErrorEnvelope(envelope)) {
+      failures.push(errorsOf(envelope))
+      unchecked.push(...argv.slice(2))
+      continue
+    }
+    const spaces = spacesOf(envelope.data, argv.slice(2))
+    rememberSpaces(spaces)
+    for (const [rid, spaceRid] of spaces) placed.set(rid, spaceRid)
+  }
+  const denied = namespaceDeny(fde, placed)
+  if (denied !== null || failures.length === 0 || fde.namespace === null) return denied
+  const error = failures.join('; ')
+  const shown = shownRids(unchecked)
+  const answer = await $.ui
+    .ask(`FDE mode (${fde.branchName}): the namespace check could not run for ${shown} (${error}). Run this write anyway, unchecked against ${fde.namespace.name}?`, {
+      header: 'FDE',
+      options: ['Run unchecked', 'Do not run'],
+    })
+    .catch(() => null)
+  return answer === 'Run unchecked'
+    ? null
+    : `FDE mode (${fde.branchName}): the namespace check could not run for ${shown} (${error}), and the operator declined or could not be asked, so the call was not run.`
 }
 
 /**
- * The global branch's name when it is an OPEN agent/ branch of the ontology.
- * Otherwise a reason, with `transient` set when the lookup failed rather than
- * the branch being unfit, so a resume can keep the binding and try again.
+ * The global branch's name when it is an OPEN branch of the ontology, with the
+ * proposal open on it. Otherwise a reason, with `transient` set when the lookup
+ * failed rather than the branch being unfit, so a resume can keep the binding
+ * and try again.
  */
-async function openBranch($: EngineInterface, rid: string, profile: string, ontologyRid: string): Promise<{ name: string } | { reason: string; transient: boolean }> {
+async function openBranch(
+  $: EngineInterface,
+  rid: string,
+  profile: string,
+  ontologyRid: string,
+): Promise<{ name: string; proposal: string | null } | { reason: string; transient: boolean }> {
   const envelope = await runOrthanc($, ['global-branch', 'get', rid], profile, 60_000)
   if (isErrorEnvelope(envelope)) return { reason: `global-branch get ${rid} failed: ${errorsOf(envelope)}`, transient: true }
   const fit = adoptable(envelope.data, ontologyRid)
-  return typeof fit === 'string' ? { reason: fit, transient: false } : fit
+  return typeof fit === 'string' ? { reason: fit, transient: false } : { name: fit.name, proposal: openProposal(envelope.data) }
 }
 
 // FDE mode: pin the call to the session's branch and hold each --apply to its
@@ -709,8 +806,9 @@ async function filesSignature(
   command: string,
   args: string[],
   files: { required: string[]; optional: string[] },
-): Promise<string | { deny: string }> {
+): Promise<{ signature: string; texts: string[] } | { deny: string }> {
   const hashes: Record<string, string> = {}
+  const texts: string[] = []
   for (const file of [...files.required, ...files.optional]) {
     // Only regular files are read, and only up to a size, so a device or FIFO
     // argument cannot hang the gate.
@@ -724,8 +822,9 @@ async function filesSignature(
     const foreign = foreignRids(fde, text)
     if (foreign) return { deny: `FDE mode: ${foreign}` }
     hashes[file] = await contentHash(text)
+    texts.push(text)
   }
-  return planSignature(command, args, hashes)
+  return { signature: planSignature(command, args, hashes), texts }
 }
 
 async function fdeGate(
@@ -741,15 +840,40 @@ async function fdeGate(
   const next = { ...input, command: resolved.path, args: bound.args }
   if (!isMutation) return { input: next, plan: null }
   const files = fileCandidates(bound.args, await sessionCwd($), await homeDir($))
-  const signature = await filesSignature($, fde, resolved.path, bound.args, files)
-  if (typeof signature !== 'string') return signature
+  const pinned = await filesSignature($, fde, resolved.path, bound.args, files)
+  if ('deny' in pinned) return pinned
+  const signature = pinned.signature
   const isApply = hasApply(bound.args)
   const gated = planGate(fde, signature, isApply)
   if (gated) return { deny: gated }
+  const outside = await namespaceCheck($, fde, bound.args, pinned.texts)
+  if (outside !== null) return { deny: outside }
   return { input: next, plan: { signature, isApply, command: resolved.path, files: [...files.required, ...files.optional] } }
 }
 
-async function fdeCommand($: EngineInterface, args: string): Promise<string> {
+// A /fde from one of these is the person's own typing: the terminal and Remote
+// Control. An SDK turn (`claude -p`, the Agent SDK), peers, relays, channels,
+// triggers and plugins are not (zay, 2026-10-21: "Not you").
+const PERSON_ORIGINS = new Set(['composer', 'bridge'])
+// Loose by design: a turn that carries no origin is nobody's.
+type CommandOrigin = { kind?: string }
+const isPerson = (origin: CommandOrigin | undefined) => PERSON_ORIGINS.has(origin?.kind ?? '')
+
+/** Why a resume of a branch FDE mode did not make is left to the person. */
+const notYourResume = (branchName: string, origin: CommandOrigin | undefined) =>
+  `Only you can resume FDE mode on a branch it did not make: type /fde resume yourself. This one came from ${
+    origin?.kind || 'an unknown source'
+  }, and ${branchName} is not an agent/ branch. FDE mode stays off.`
+
+/** Puts a namespace in one stored stack's scope, leaving the active stack alone. */
+async function storeNamespace($: EngineInterface, profile: string, namespace: FoundryNamespace | null): Promise<void> {
+  const stored = await storedScopes($)
+  const entry = normalizeScope(stored[profile], profile, '')
+  const next = entry.namespace?.rid === namespace?.rid ? entry : namespaceChanged(entry, namespace)
+  await $.store.set('scopes', { ...stored, [profile]: { ...next, updatedAt: new Date().toISOString() } })
+}
+
+async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const parsed = parseFdeArgs(args)
   const active = await fdeState($)
   const earlier = active ? null : await fdeFromEarlier($)
@@ -764,6 +888,12 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   if (parsed.kind === 'end') {
     const ending = active ?? earlier
     if (ending === null) return 'FDE mode is off.'
+    // Ending the mode ends the hold on it: the person's call alone.
+    if (!isPerson(origin)) {
+      return `Only you can end FDE mode: type /fde end yourself. This one came from ${
+        origin?.kind || 'an unknown source'
+      }, so ${active ? 'FDE mode stays on' : `${ending.branchName} stays bound for /fde resume`}.`
+    }
     await setFde($, null)
     const history = await $.store.get('fdeHandoffs').catch(() => null)
     await $.store.set('fdeHandoffs', [...(Array.isArray(history) ? history : []), { ...ending, endedAt: new Date().toISOString() }].slice(-10))
@@ -778,11 +908,22 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   if (parsed.kind === 'resume') {
     if (active) return fdeStatus(active)
     if (earlier === null) return 'No FDE branch to resume. /fde on starts one.'
+    // Only the person resumes a branch FDE mode did not make, as with /fde --branch.
+    if (!isAgentBranch(earlier.branchName) && !isPerson(origin)) return notYourResume(earlier.branchName, origin)
     const open = await openBranch($, earlier.branchRid, earlier.profile, earlier.ontologyRid)
     if ('reason' in open) {
       if (open.transient) return `${open.reason} Not resumed; the earlier binding is kept, so /fde resume can try again.`
       await $.store.set('fdeOpen', null)
       return `${open.reason} Not resumed; the earlier binding is forgotten.`
+    }
+    if (!isAgentBranch(open.name) && !isPerson(origin)) return notYourResume(open.name, origin)
+    // The prompt must show what the resumed session is held to, not what was in
+    // scope while the mode was off. On another stack, only its own scope changes.
+    const bound = await currentScope($)
+    if (bound.profile === earlier.profile) {
+      if (bound.namespace?.rid !== earlier.namespace?.rid) await saveScope($, namespaceChanged(bound, earlier.namespace))
+    } else {
+      await storeNamespace($, earlier.profile, earlier.namespace)
     }
     await setFde($, earlier)
     return `Resumed.\n${fdeStatus(earlier)}`
@@ -791,8 +932,27 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   const scope = await currentScope($)
   if (scope.profile === 'unknown') return 'No Foundry stack is active. Run /profile first.'
   if (scope.ontology === null) return 'Choose the ontology first (/ontology): the branch is made on it.'
+  // With a namespace in scope, the session holds it: nothing is made until the
+  // ontology is in it, so a refused start leaves no branch behind.
+  const namespace = scope.namespace
+  let spaces: FoundryNamespace[] = []
+  if (namespace !== null) {
+    const listed = await runOrthanc($, ['space', 'list'], scope.profile, 60_000)
+    if (isErrorEnvelope(listed)) return couldNotBind(scope.ontology, namespace, `space list failed: ${errorsOf(listed)}`)
+    spaces = spacesFrom(listed)
+    const located = await runOrthanc($, ['resource', 'batch-get', scope.ontology.rid], scope.profile, 60_000)
+    if (isErrorEnvelope(located)) return couldNotBind(scope.ontology, namespace, `batch-get failed: ${errorsOf(located)}`)
+    const spaceRid = spacesOf(located.data, [scope.ontology.rid]).get(scope.ontology.rid) ?? null
+    if (spaceRid === null)
+      return `The ontology ${scope.ontology.name} is not in any namespace, so FDE mode cannot hold the session to ${namespace.name}. /namespace clear runs FDE mode without one. FDE mode stays off.`
+    if (spaceRid !== namespace.rid) {
+      const found = spaces.find(space => space.rid === spaceRid)
+      return `The ontology ${scope.ontology.name} is in ${found ? found.name : `another namespace (${spaceRid})`}, not ${namespace.name}, the namespace in scope. Choose an ontology in ${namespace.name} (/ontology) or another namespace (/namespace). FDE mode stays off.`
+    }
+  }
   let branchRid: string
   let branchName: string
+  let proposal: string | null = null
   if (parsed.kind === 'start') {
     branchName = fdeBranchName(parsed.goal, new Date())
     const envelope = await runOrthanc($, branchCreateArgs(branchName, scope.ontology.rid, parsed.goal), scope.profile, 120_000)
@@ -802,8 +962,14 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   } else {
     const open = await openBranch($, parsed.rid, scope.profile, scope.ontology.rid)
     if ('reason' in open) return `${open.reason} FDE mode stays off.`
+    // Only the person binds the session to a branch FDE mode did not make; an
+    // agent/ branch is nobody else's, so it adopts from anywhere.
+    if (!isAgentBranch(open.name) && !isPerson(origin)) {
+      return `Only you can bind FDE mode to a branch it did not make: type /fde --branch ${parsed.rid} yourself. This one came from ${origin?.kind || 'an unknown source'}, and ${open.name} is not an agent/ branch. FDE mode stays off.`
+    }
     branchRid = parsed.rid
     branchName = open.name
+    proposal = open.proposal
   }
   const fde: FdeSession = {
     goal: parsed.goal,
@@ -814,9 +980,15 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
     startedAt: new Date().toISOString(),
     plans: [],
     applied: [],
+    namespace: scope.namespace,
+    spaces,
   }
   await setFde($, fde)
-  return `${fdeStatus(fde)}\nOntology writes in this session now go to this branch only, and each --apply needs its dry run first.`
+  return [
+    fdeStatus(fde),
+    ...(proposal ? [`It has an open proposal (${proposal}): every write here changes what its reviewers see.`] : []),
+    'Ontology writes in this session now go to this branch only, and each --apply needs its dry run first.',
+  ].join('\n')
 }
 
 // ---------- pickers ----------
@@ -838,11 +1010,11 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
   const def = COMPASS_KINDS[kind]
   let roots = scope.projects.map(project => project.rid)
   if (roots.length === 0) {
-    const projects = await runOrthanc($, ['project', 'list'], scope.profile, 120_000)
+    const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
     if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
     roots = listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
   }
-  if (roots.length === 0) return 'No projects are visible on this stack. No selection was saved.'
+  if (roots.length === 0) return `No projects are visible ${scope.namespace ? `in ${scope.namespace.name}` : 'on this stack'}. No selection was saved.`
   const search = kind === 'folders' && !query.trim() ? 'ri.compass.main.folder.' : query
   const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
     runOrthanc($, resourceArgs(search, def.typeId, root), scope.profile, 180_000),
@@ -851,7 +1023,7 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
   if (failed.length === envelopes.length && failed[0]) return `resource listing failed: ${errorsOf(failed[0])}`
   const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['resources'])))
   return {
-    title: `${def.label}${scope.projects.length > 0 ? ' in selected projects' : ''}`,
+    title: `${def.label}${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}`,
     isMulti: true,
     items: toItems(rows),
     resourceKind: kind,
@@ -882,6 +1054,17 @@ async function pickerSource(
     if (resourceKind && resourceKind in COMPASS_KINDS) return compassSource($, scope, resourceKind as CompassKind, query)
     return 'This resource kind has no listing; use its lookup command.'
   }
+  if (kind === 'namespace') {
+    const envelope = await runOrthanc($, ['space', 'list'], scope.profile, 60_000)
+    if (isErrorEnvelope(envelope)) return `space list failed: ${errorsOf(envelope)}`
+    const rows = spacesFrom(envelope).map(space => ({ key: space.rid, label: space.name, hint: space.path }))
+    if (rows.length === 0) return 'No namespaces are visible on this stack. No selection was saved.'
+    return {
+      title: 'Namespace',
+      isMulti: false,
+      items: [{ key: '', label: 'All namespaces', hint: 'no namespace in scope' }, ...rows],
+    }
+  }
   if (kind === 'ontology') {
     const envelope = await runOrthanc($, ['ontology', 'list'], scope.profile, 60_000)
     if (isErrorEnvelope(envelope)) return `ontology list failed: ${errorsOf(envelope)}`
@@ -896,10 +1079,10 @@ async function pickerSource(
     }
   }
   if (kind === 'project') {
-    const envelope = await runOrthanc($, ['project', 'list'], scope.profile, 120_000)
+    const envelope = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
     if (isErrorEnvelope(envelope)) return `project list failed: ${errorsOf(envelope)}`
     return {
-      title: 'Projects',
+      title: scope.namespace ? `Projects in ${scope.namespace.name}` : 'Projects',
       isMulti: true,
       items: listItems(envelope, 'projects').map(entry => ({
         key: asString(entry.rid),
@@ -942,6 +1125,20 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     if (pick === undefined) return 'No ontology selected.'
     await saveScope($, ontologyChanged(scope, { rid: pick.key, name: pick.label }))
     return `Ontology: ${pick.label}. Projects, types, functions and object instances were cleared.`
+  }
+  if (picker.kind === 'namespace') {
+    const bound = await fdeState($)
+    if (bound !== null) return namespaceLocked(bound)
+    const pick = chosen[0]
+    if (pick === undefined) return 'No namespace selected.'
+    if (pick.key === '') {
+      await saveScope($, namespaceChanged(scope, null))
+      return 'All namespaces: no namespace in scope.'
+    }
+    const next = namespaceChanged(scope, { rid: pick.key, name: pick.label, path: pick.hint })
+    await saveScope($, next)
+    const dropped = next.projects.length !== scope.projects.length || JSON.stringify(next.resources) !== JSON.stringify(scope.resources)
+    return `Namespace: ${pick.label}.${dropped ? ' Projects and Compass resources picked before were cleared.' : ''}`
   }
   if (picker.kind === 'project') {
     await saveScope($, { ...scope, projects: chosen.map(item => ({ rid: item.key, name: item.label })) })
@@ -1002,8 +1199,13 @@ async function openPicker($: EngineInterface, kind: FoundryPickerKind, source: S
 async function runPicker($: EngineInterface, kind: FoundryPickerKind, args: string, options: PickerOptions = {}): Promise<string> {
   const scope = await currentScope($)
   const query = args.trim()
+  if (kind === 'namespace') {
+    const bound = await fdeState($)
+    if (bound !== null) return namespaceLocked(bound)
+  }
   if (query === 'clear' && kind !== 'profile') {
     if (kind === 'ontology') await saveScope($, ontologyChanged(scope, null))
+    if (kind === 'namespace') await saveScope($, namespaceChanged(scope, null))
     if (kind === 'project') await saveScope($, { ...scope, projects: [] })
     if (kind === 'object-type') await saveScope($, { ...scope, objectTypes: [] })
     if (kind === 'action-type') await saveScope($, { ...scope, actionTypes: [] })
@@ -1065,9 +1267,12 @@ async function lookupSource($: EngineInterface, entry: CommandEntry, args: strin
     return source(`Functions matching '${query}'`, resourceRows(rowsOf(envelope, ['results']), ['api_name', 'version', 'type']))
   }
   if (lookup === 'search') {
-    const envelope = await runOrthanc($, ['search', query, '--limit', '100'], scope.profile, 60_000)
+    // A namespace whose path is not a path (no path, or a RID standing in for one) scopes nothing.
+    const prefix = scope.namespace?.path.startsWith('/') ? scope.namespace.path : ''
+    const argv = prefix ? ['search', query, '--path-prefix', prefix, '--page-size', '100'] : ['search', query, '--limit', '100']
+    const envelope = await runOrthanc($, argv, scope.profile, 60_000)
     if (isErrorEnvelope(envelope)) return `search failed: ${errorsOf(envelope)}`
-    return source(`Resources matching '${query}'`, resourceRows(rowsOf(envelope, ['results'])))
+    return source(`Resources matching '${query}'${scope.namespace ? ` in ${scope.namespace.name}` : ''}`, resourceRows(rowsOf(envelope, ['results'])))
   }
   if (lookup === 'permission') {
     const envelope = await runOrthanc($, ['resource-role', 'list', query], scope.profile, 60_000)
@@ -1140,7 +1345,7 @@ async function setupChecks($: EngineInterface): Promise<{ checks: Check[]; scope
       fix: `/auth ${active.name}`,
     })
   }
-  checks.push({ label: 'context', ok: hasFocus(scope), detail: hasFocus(scope) ? 'ontology or projects selected' : 'nothing selected', fix: '/open' })
+  checks.push({ label: 'context', ok: hasFocus(scope), detail: hasFocus(scope) ? 'ontology, namespace or projects selected' : 'nothing selected', fix: '/open' })
   return { checks, scope }
 }
 
@@ -1172,7 +1377,7 @@ async function treeText($: EngineInterface): Promise<string> {
   const scope = await currentScope($)
   const nodes = foundryTree(scope)
   const lines = [`Foundry context · ${scope.profile}${scope.host ? ` (${scope.host})` : ''} · ~${Math.ceil(contextText(scope, await approvalMode($)).length / 4)} tokens`]
-  if (nodes.length === 0) lines.push('  nothing selected: /open sets the stack, ontology and projects')
+  if (nodes.length === 0) lines.push('  nothing selected: /open sets the stack, ontology, namespace and projects')
   nodes.forEach((node, index) => {
     const last = index === nodes.length - 1
     lines.push(`${last ? '└─' : '├─'} ${node.label}${node.detail ? `: ${node.detail}` : ` (${node.count})`}`)
@@ -1185,12 +1390,15 @@ async function treeText($: EngineInterface): Promise<string> {
 }
 
 async function clearFromTree($: EngineInterface, target: ClearTarget): Promise<void> {
-  await saveScope($, applyClear(await currentScope($), target))
+  const scope = await currentScope($)
+  // FDE mode holds the namespace: the pane's clear button clears nothing of it.
+  if (target.type === 'namespace' && (await fdeState($)) !== null) return
+  await saveScope($, applyClear(scope, target))
 }
 
 // ---------- registration ----------
 
-async function runEntry($: EngineInterface, entry: CommandEntry, args: string): Promise<string> {
+async function runEntry($: EngineInterface, entry: CommandEntry, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const action = entry.action
   switch (action.type) {
     case 'picker':
@@ -1203,8 +1411,8 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
       return runLookup($, entry, args)
     case 'open': {
       const scope = await currentScope($)
-      if (scope.profile === 'unknown') return runPicker($, 'profile', '', { chain: ['ontology', 'project'] })
-      return runPicker($, 'ontology', '', { chain: ['project'] })
+      if (scope.profile === 'unknown') return runPicker($, 'profile', '', { chain: ['ontology', 'namespace', 'project'] })
+      return runPicker($, 'ontology', '', { chain: ['namespace', 'project'] })
     }
     case 'onboard': {
       const { checks } = await setupChecks($)
@@ -1227,8 +1435,13 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
       const wanted = args.trim()
       const scope = await currentScope($)
       if (wanted === 'clear') {
-        await saveScope($, emptyScope(scope.profile, scope.host))
-        return 'Foundry context cleared.'
+        const bound = await fdeState($)
+        // FDE mode holds the namespace of the stack it is bound to; another stack clears as it likes.
+        const namespace = bound !== null && bound.profile === scope.profile ? bound.namespace : null
+        await saveScope($, { ...emptyScope(scope.profile, scope.host), namespace })
+        return namespace === null
+          ? 'Foundry context cleared.'
+          : `Foundry context cleared; the namespace ${namespace.name} stays: FDE mode holds it until /fde end.`
       }
       if (wanted === 'ontology') return runPicker($, 'ontology', '')
       const branch = (await $.state.get(BRANCH)).value ?? null
@@ -1251,7 +1464,7 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
     case 'trace':
       return traceText($)
     case 'fde':
-      return fdeCommand($, args)
+      return fdeCommand($, args, origin)
     case 'foundry': {
       const opened = await $.ui.open({ id: CONTEXT_PANE, title: 'Foundry context', focus: true, closeOnEscape: true })
       return opened.isPlaced ? 'Foundry context is open (Esc closes it).' : await treeText($)
@@ -1346,7 +1559,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (plan !== null && plan.files.length > 0) {
     const args = Array.isArray(input.args) ? input.args.map(String) : []
     const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
-    if (now !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
+    if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
   }
   executed = true
   const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
@@ -1477,7 +1690,7 @@ export const register: Register = on => {
   })
 
   for (const entry of COMMAND_TABLE) {
-    on('command.run', { command: entry.name }, async ($, e) => ({ text: await runEntry($, entry, e.args) })).catch(
+    on('command.run', { command: entry.name }, async ($, e) => ({ text: await runEntry($, entry, e.args, e.origin) })).catch(
       ($, e, next) => ({ text: `/${e.command} failed: ${next.error instanceof Error ? next.error.message : String(next.error)}` }),
     )
   }
@@ -1543,17 +1756,22 @@ export const register: Register = on => {
     )
   })
 
-  // FDE mode band: the goal and branch stay in view while the session is bound.
+  // FDE mode band: the goal and branch stay in view while the session is bound,
+  // above whatever the other plugins draw there.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const beneath = await next(e)
     const fde = await read($, fdeAtom)
-    if (fde === null || e.props.hasSurvey) return next(e)
+    if (fde === null || e.props.hasSurvey) return beneath
     const { Box, Text } = $.ui.resolve(e)
     return (
-      <Box>
-        <Text color="yellow" bold>
-          FDE
-        </Text>
-        <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+      <Box flexDirection="column">
+        {beneath}
+        <Box>
+          <Text color="yellow" bold>
+            FDE
+          </Text>
+          <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName}${fde.namespace ? ` · ${fde.namespace.name}` : ''} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+        </Box>
       </Box>
     )
   })
@@ -1578,7 +1796,7 @@ export const register: Register = on => {
         <Text dimColor>
           ~{tokens} tokens in the system prompt · approval {mode} · branch {branch ?? 'none'}
         </Text>
-        {nodes.length === 0 && <Text dimColor>Nothing selected. /open sets the stack, ontology and projects.</Text>}
+        {nodes.length === 0 && <Text dimColor>Nothing selected. /open sets the stack, ontology, namespace and projects.</Text>}
         {nodes.map(node => (
           <Box key={node.id} flexDirection="column" marginTop={1}>
             <Box flexDirection="row" justifyContent="space-between">

@@ -2,6 +2,9 @@ export type FoundryNamed = { rid: string; name: string }
 
 export type FoundryObjectType = { apiName: string; displayName: string; rid?: string }
 
+/** One Compass namespace (what orthanc calls a space): its RID, display name and path. */
+export type FoundryNamespace = { rid: string; name: string; path: string }
+
 /** The scope keys that hold selected Foundry resources. */
 export type FoundryResourceKind =
   | 'folders'
@@ -26,6 +29,7 @@ export type FoundryScope = {
   profile: string
   host: string
   ontology: FoundryNamed | null
+  namespace: FoundryNamespace | null
   projects: FoundryNamed[]
   objectTypes: FoundryObjectType[]
   actionTypes: FoundryObjectType[]
@@ -35,7 +39,7 @@ export type FoundryScope = {
 
 export type FoundryPickItem = { key: string; label: string; hint: string }
 
-export type FoundryPickerKind = 'profile' | 'ontology' | 'project' | 'object-type' | 'action-type' | 'resource'
+export type FoundryPickerKind = 'profile' | 'ontology' | 'namespace' | 'project' | 'object-type' | 'action-type' | 'resource'
 
 export type FoundryPicker = {
   kind: FoundryPickerKind
@@ -61,6 +65,10 @@ export type FdeSession = {
   /** Signatures of clean dry runs; an --apply must match one. */
   plans: string[]
   applied: { command: string; at: string }[]
+  /** The namespace in scope at /fde on: a write naming a resource outside it is refused. Null: no namespace check. */
+  namespace: FoundryNamespace | null
+  /** The stack's namespaces at /fde on (empty without a namespace), to name them in refusals and to place Compass paths. */
+  spaces: FoundryNamespace[]
 }
 
 declare module 'claude-code' {
