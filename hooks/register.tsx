@@ -20,6 +20,7 @@ import {
   foundryTree,
   hasFocus,
   mergeSelections,
+  namespaceChanged,
   normalizeScope,
   OBJECT_QUERY_BEAD,
   objectsQuery,
@@ -276,6 +277,8 @@ async function currentScope($: EngineInterface): Promise<FoundryScope> {
 }
 
 const profileArg = (scope: FoundryScope) => (scope.profile === 'unknown' ? undefined : scope.profile)
+
+const spaceArgs = (scope: FoundryScope) => (scope.namespace ? ['--space-rid', scope.namespace.rid] : [])
 
 function contextText(scope: FoundryScope, mode: ApprovalMode): string {
   const lines = [
@@ -838,11 +841,11 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
   const def = COMPASS_KINDS[kind]
   let roots = scope.projects.map(project => project.rid)
   if (roots.length === 0) {
-    const projects = await runOrthanc($, ['project', 'list'], scope.profile, 120_000)
+    const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
     if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
     roots = listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
   }
-  if (roots.length === 0) return 'No projects are visible on this stack. No selection was saved.'
+  if (roots.length === 0) return `No projects are visible ${scope.namespace ? `in ${scope.namespace.name}` : 'on this stack'}. No selection was saved.`
   const search = kind === 'folders' && !query.trim() ? 'ri.compass.main.folder.' : query
   const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
     runOrthanc($, resourceArgs(search, def.typeId, root), scope.profile, 180_000),
@@ -851,7 +854,7 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
   if (failed.length === envelopes.length && failed[0]) return `resource listing failed: ${errorsOf(failed[0])}`
   const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['resources'])))
   return {
-    title: `${def.label}${scope.projects.length > 0 ? ' in selected projects' : ''}`,
+    title: `${def.label}${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}`,
     isMulti: true,
     items: toItems(rows),
     resourceKind: kind,
@@ -882,6 +885,23 @@ async function pickerSource(
     if (resourceKind && resourceKind in COMPASS_KINDS) return compassSource($, scope, resourceKind as CompassKind, query)
     return 'This resource kind has no listing; use its lookup command.'
   }
+  if (kind === 'namespace') {
+    const envelope = await runOrthanc($, ['space', 'list'], scope.profile, 60_000)
+    if (isErrorEnvelope(envelope)) return `space list failed: ${errorsOf(envelope)}`
+    const rows = listItems(envelope, 'spaces')
+      .map(entry => ({
+        key: asString(entry.rid),
+        label: asString(entry.display_name) || asString(entry.path),
+        hint: asString(entry.path),
+      }))
+      .filter(entry => entry.key !== '')
+    if (rows.length === 0) return 'No namespaces are visible on this stack. No selection was saved.'
+    return {
+      title: 'Namespace',
+      isMulti: false,
+      items: [{ key: '', label: 'All namespaces', hint: 'no namespace in scope' }, ...rows],
+    }
+  }
   if (kind === 'ontology') {
     const envelope = await runOrthanc($, ['ontology', 'list'], scope.profile, 60_000)
     if (isErrorEnvelope(envelope)) return `ontology list failed: ${errorsOf(envelope)}`
@@ -896,10 +916,10 @@ async function pickerSource(
     }
   }
   if (kind === 'project') {
-    const envelope = await runOrthanc($, ['project', 'list'], scope.profile, 120_000)
+    const envelope = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
     if (isErrorEnvelope(envelope)) return `project list failed: ${errorsOf(envelope)}`
     return {
-      title: 'Projects',
+      title: scope.namespace ? `Projects in ${scope.namespace.name}` : 'Projects',
       isMulti: true,
       items: listItems(envelope, 'projects').map(entry => ({
         key: asString(entry.rid),
@@ -942,6 +962,18 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     if (pick === undefined) return 'No ontology selected.'
     await saveScope($, ontologyChanged(scope, { rid: pick.key, name: pick.label }))
     return `Ontology: ${pick.label}. Projects, types, functions and object instances were cleared.`
+  }
+  if (picker.kind === 'namespace') {
+    const pick = chosen[0]
+    if (pick === undefined) return 'No namespace selected.'
+    if (pick.key === '') {
+      await saveScope($, namespaceChanged(scope, null))
+      return 'All namespaces: no namespace in scope.'
+    }
+    const next = namespaceChanged(scope, { rid: pick.key, name: pick.label, path: pick.hint })
+    await saveScope($, next)
+    const dropped = next.projects.length !== scope.projects.length || JSON.stringify(next.resources) !== JSON.stringify(scope.resources)
+    return `Namespace: ${pick.label}.${dropped ? ' Projects and Compass resources picked before were cleared.' : ''}`
   }
   if (picker.kind === 'project') {
     await saveScope($, { ...scope, projects: chosen.map(item => ({ rid: item.key, name: item.label })) })
@@ -1004,6 +1036,7 @@ async function runPicker($: EngineInterface, kind: FoundryPickerKind, args: stri
   const query = args.trim()
   if (query === 'clear' && kind !== 'profile') {
     if (kind === 'ontology') await saveScope($, ontologyChanged(scope, null))
+    if (kind === 'namespace') await saveScope($, namespaceChanged(scope, null))
     if (kind === 'project') await saveScope($, { ...scope, projects: [] })
     if (kind === 'object-type') await saveScope($, { ...scope, objectTypes: [] })
     if (kind === 'action-type') await saveScope($, { ...scope, actionTypes: [] })
@@ -1065,9 +1098,12 @@ async function lookupSource($: EngineInterface, entry: CommandEntry, args: strin
     return source(`Functions matching '${query}'`, resourceRows(rowsOf(envelope, ['results']), ['api_name', 'version', 'type']))
   }
   if (lookup === 'search') {
-    const envelope = await runOrthanc($, ['search', query, '--limit', '100'], scope.profile, 60_000)
+    const argv = scope.namespace?.path
+      ? ['search', query, '--path-prefix', scope.namespace.path, '--page-size', '100']
+      : ['search', query, '--limit', '100']
+    const envelope = await runOrthanc($, argv, scope.profile, 60_000)
     if (isErrorEnvelope(envelope)) return `search failed: ${errorsOf(envelope)}`
-    return source(`Resources matching '${query}'`, resourceRows(rowsOf(envelope, ['results'])))
+    return source(`Resources matching '${query}'${scope.namespace ? ` in ${scope.namespace.name}` : ''}`, resourceRows(rowsOf(envelope, ['results'])))
   }
   if (lookup === 'permission') {
     const envelope = await runOrthanc($, ['resource-role', 'list', query], scope.profile, 60_000)
@@ -1140,7 +1176,7 @@ async function setupChecks($: EngineInterface): Promise<{ checks: Check[]; scope
       fix: `/auth ${active.name}`,
     })
   }
-  checks.push({ label: 'context', ok: hasFocus(scope), detail: hasFocus(scope) ? 'ontology or projects selected' : 'nothing selected', fix: '/open' })
+  checks.push({ label: 'context', ok: hasFocus(scope), detail: hasFocus(scope) ? 'ontology, namespace or projects selected' : 'nothing selected', fix: '/open' })
   return { checks, scope }
 }
 
@@ -1172,7 +1208,7 @@ async function treeText($: EngineInterface): Promise<string> {
   const scope = await currentScope($)
   const nodes = foundryTree(scope)
   const lines = [`Foundry context · ${scope.profile}${scope.host ? ` (${scope.host})` : ''} · ~${Math.ceil(contextText(scope, await approvalMode($)).length / 4)} tokens`]
-  if (nodes.length === 0) lines.push('  nothing selected: /open sets the stack, ontology and projects')
+  if (nodes.length === 0) lines.push('  nothing selected: /open sets the stack, ontology, namespace and projects')
   nodes.forEach((node, index) => {
     const last = index === nodes.length - 1
     lines.push(`${last ? '└─' : '├─'} ${node.label}${node.detail ? `: ${node.detail}` : ` (${node.count})`}`)
@@ -1203,8 +1239,8 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
       return runLookup($, entry, args)
     case 'open': {
       const scope = await currentScope($)
-      if (scope.profile === 'unknown') return runPicker($, 'profile', '', { chain: ['ontology', 'project'] })
-      return runPicker($, 'ontology', '', { chain: ['project'] })
+      if (scope.profile === 'unknown') return runPicker($, 'profile', '', { chain: ['ontology', 'namespace', 'project'] })
+      return runPicker($, 'ontology', '', { chain: ['namespace', 'project'] })
     }
     case 'onboard': {
       const { checks } = await setupChecks($)
@@ -1578,7 +1614,7 @@ export const register: Register = on => {
         <Text dimColor>
           ~{tokens} tokens in the system prompt · approval {mode} · branch {branch ?? 'none'}
         </Text>
-        {nodes.length === 0 && <Text dimColor>Nothing selected. /open sets the stack, ontology and projects.</Text>}
+        {nodes.length === 0 && <Text dimColor>Nothing selected. /open sets the stack, ontology, namespace and projects.</Text>}
         {nodes.map(node => (
           <Box key={node.id} flexDirection="column" marginTop={1}>
             <Box flexDirection="row" justifyContent="space-between">

@@ -75,10 +75,10 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | Command | Does |
 | --- | --- |
 | `/foundry` | The Foundry resources in context: counts, items, clear buttons, prompt size |
-| `/open` | Stack, then ontology, then projects |
+| `/open` | Stack, then ontology, then namespace, then projects |
 | `/onboard`, `/mcp-status` | Check orthanc, profiles, stack, credentials, context |
 | `/auth [profile]` | How to store credentials, and whether they work |
-| `/profile`, `/ontology`, `/project` | Choose the stack, ontology, projects |
+| `/profile`, `/ontology`, `/namespace`, `/project` | Choose the stack, ontology, namespace, projects |
 | `/object-type`, `/action-type` | Ontology types in scope |
 | `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
@@ -90,6 +90,13 @@ Every command has one name; there are no aliases. Every list command takes a
 filter, and `clear`. `/link-type`, `/interface`, `/egress-policy`,
 `/certificate` and `/automation` wait on Orthanc list commands and say so; the
 mod never falls back to Foundry REST.
+
+`/namespace` scopes the context to one Compass namespace (orthanc's space):
+`/project` and the Compass pickers list only its projects, `/search` stays under
+its path, and the prompt tells Claude to do the same. Choosing a different
+namespace clears the projects and Compass resources picked before; choosing
+the same one or clearing it keeps them. Like project scope it steers discovery;
+the gate does not deny writes outside it.
 
 ## FDE mode
 

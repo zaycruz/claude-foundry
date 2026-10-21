@@ -4,6 +4,7 @@
 
 import type {
   FoundryNamed,
+  FoundryNamespace,
   FoundryObjectType,
   FoundryPickerKind,
   FoundryResource,
@@ -38,6 +39,14 @@ export const RESOURCE_LABELS: Record<FoundryResourceKind, string> = {
 /** Resource kinds that belong to the ontology and go when it changes. */
 const ONTOLOGY_KINDS: readonly FoundryResourceKind[] = ['objectInstances', 'functions']
 
+/** Resource kinds addressed by a Compass path, so they go when the namespace changes. */
+const NAMESPACE_KINDS: readonly FoundryResourceKind[] = [
+  ...(Object.keys(COMPASS_KINDS) as CompassKind[]),
+  'mediaItems',
+  'permissions',
+  'searchResults',
+]
+
 export type Lookup = 'media-item' | 'objects' | 'function' | 'language-model' | 'permission' | 'search'
 
 export type CommandAction =
@@ -71,11 +80,12 @@ const blocked = (name: string, what: string, bead: string): CommandEntry =>
 
 export const COMMAND_TABLE: readonly CommandEntry[] = [
   { name: 'foundry', description: 'Show the Foundry resources in context (like /context, for Palantir)', action: { type: 'foundry' } },
-  { name: 'open', description: 'Set working context: stack, then ontology and projects', action: { type: 'open' } },
+  { name: 'open', description: 'Set working context: stack, then ontology, namespace and projects', action: { type: 'open' } },
   { name: 'onboard', description: 'Check Foundry setup: orthanc, stack, credentials, context', action: { type: 'onboard' } },
   { name: 'auth', description: 'Show how to authenticate a Foundry stack', argumentHint: '[profile]', action: { type: 'auth' } },
   picker('profile', 'profile', 'Choose the Foundry stack (orthanc profile)'),
   picker('ontology', 'ontology', 'Choose the active Foundry ontology'),
+  picker('namespace', 'namespace', 'Choose the Compass namespace (space) in scope'),
   picker('project', 'project', 'Choose the Foundry projects in scope'),
   picker('object-type', 'object-type', 'Choose the ontology object types in scope'),
   picker('action-type', 'action-type', 'Choose the ontology action types in scope'),
@@ -151,6 +161,11 @@ const asString = (value: unknown) => (typeof value === 'string' ? value : '')
 const named = (value: unknown): FoundryNamed | null =>
   isRecord(value) && typeof value.rid === 'string' ? { rid: value.rid, name: asString(value.name) || value.rid } : null
 
+const namespaceOf = (value: unknown): FoundryNamespace | null =>
+  isRecord(value) && typeof value.rid === 'string'
+    ? { rid: value.rid, name: asString(value.name) || value.rid, path: asString(value.path) }
+    : null
+
 const types = (value: unknown): FoundryObjectType[] =>
   Array.isArray(value)
     ? value.filter(isRecord).flatMap(entry =>
@@ -171,6 +186,7 @@ export const emptyScope = (profile: string, host: string): FoundryScope => ({
   profile,
   host,
   ontology: null,
+  namespace: null,
   projects: [],
   objectTypes: [],
   actionTypes: [],
@@ -192,6 +208,7 @@ export function normalizeScope(value: unknown, profile: string, host: string): F
     profile: asString(value.profile) || profile,
     host: asString(value.host) || host,
     ontology: named(value.ontology),
+    namespace: namespaceOf(value.namespace),
     projects: Array.isArray(value.projects) ? value.projects.map(named).filter((entry): entry is FoundryNamed => entry !== null) : [],
     objectTypes: types(value.objectTypes),
     actionTypes: types(value.actionTypes),
@@ -204,6 +221,14 @@ export function ontologyChanged(scope: FoundryScope, ontology: FoundryNamed | nu
   const resources = { ...scope.resources }
   for (const kind of ONTOLOGY_KINDS) resources[kind] = []
   return { ...scope, ontology, projects: [], objectTypes: [], actionTypes: [], resources }
+}
+
+/** A different namespace drops what was picked under the old one; clearing or re-picking keeps it. */
+export function namespaceChanged(scope: FoundryScope, namespace: FoundryNamespace | null): FoundryScope {
+  if (namespace === null || namespace.rid === scope.namespace?.rid) return { ...scope, namespace }
+  const resources = { ...scope.resources }
+  for (const kind of NAMESPACE_KINDS) resources[kind] = []
+  return { ...scope, namespace, projects: [], resources }
 }
 
 // ---------- orthanc rows ----------
@@ -249,6 +274,13 @@ const list = (entries: readonly FoundryResource[]) => entries.map(entry => `${en
 export function contextLines(scope: FoundryScope): string[] {
   const lines: string[] = []
   if (scope.ontology) lines.push(`Ontology: ${scope.ontology.name} (${scope.ontology.rid}).`)
+  if (scope.namespace) {
+    lines.push(`Namespace: ${scope.namespace.name} (${scope.namespace.rid})${scope.namespace.path ? `, path ${scope.namespace.path}` : ''}.`)
+    lines.push(
+      `Keep Compass work inside it: pass --space-rid ${scope.namespace.rid} to project list and project search` +
+        `${scope.namespace.path ? `, --path-prefix ${scope.namespace.path} to search` : ''}, and list or search resources under its projects.`,
+    )
+  }
   if (scope.projects.length > 0) {
     lines.push(`Projects: ${scope.projects.map(project => `${project.name} (${project.rid})`).join(', ')}.`)
     lines.push('Keep project discovery within the selected project subtrees.')
@@ -267,12 +299,12 @@ export function contextLines(scope: FoundryScope): string[] {
 }
 
 export const hasFocus = (scope: FoundryScope) =>
-  scope.ontology !== null || scope.projects.length > 0 || Object.values(scope.resources).some(entries => (entries?.length ?? 0) > 0)
+  scope.ontology !== null || scope.namespace !== null || scope.projects.length > 0 || Object.values(scope.resources).some(entries => (entries?.length ?? 0) > 0)
 
 // ---------- /foundry tree ----------
 
 export type ClearTarget =
-  | { type: 'ontology' }
+  | { type: 'ontology' | 'namespace' }
   | { type: 'projects' | 'objectTypes' | 'actionTypes' }
   | { type: 'resource'; kind: FoundryResourceKind }
   | { type: 'item'; section: 'projects' | 'objectTypes' | 'actionTypes'; key: string }
@@ -304,6 +336,9 @@ export function foundryTree(scope: FoundryScope): TreeNode[] {
   const nodes: TreeNode[] = []
   if (scope.ontology) {
     nodes.push({ id: 'ontology', label: 'Ontology', detail: scope.ontology.name, count: 1, command: '/ontology', clear: { type: 'ontology' }, children: [] })
+  }
+  if (scope.namespace) {
+    nodes.push({ id: 'namespace', label: 'Namespace', detail: scope.namespace.name, count: 1, command: '/namespace', clear: { type: 'namespace' }, children: [] })
   }
   const typed = (id: 'projects' | 'objectTypes' | 'actionTypes', label: string, command: string, entries: { key: string; label: string; detail: string }[]) => {
     if (entries.length === 0) return
@@ -340,6 +375,8 @@ export function applyClear(scope: FoundryScope, target: ClearTarget): FoundrySco
   switch (target.type) {
     case 'ontology':
       return ontologyChanged(scope, null)
+    case 'namespace':
+      return namespaceChanged(scope, null)
     case 'projects':
     case 'objectTypes':
     case 'actionTypes':
