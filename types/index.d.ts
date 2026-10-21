@@ -65,6 +65,10 @@ export type FdeSession = {
   /** Signatures of clean dry runs; an --apply must match one. */
   plans: string[]
   applied: { command: string; at: string }[]
+  /** The namespace in scope at /fde on: a write naming a resource outside it is refused. Null: no namespace check. */
+  namespace: FoundryNamespace | null
+  /** The stack's namespaces at /fde on (empty without a namespace), to name them in refusals and to place Compass paths. */
+  spaces: FoundryNamespace[]
 }
 
 declare module 'claude-code' {

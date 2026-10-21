@@ -101,10 +101,12 @@ const session = (over: Partial<FdeSession> = {}): FdeSession => ({
   startedAt: NOW.toISOString(),
   plans: [],
   applied: [],
+  namespace: null,
+  spaces: [],
   ...over,
 })
 
-const bind = (path: string, args: string[], over: Partial<FdeSession> = {}, profile = 'zap') =>
+const bind =(path: string, args: string[], over: Partial<FdeSession> = {}, profile = 'zap') =>
   fdeBind(session(over), path, args, profile, path !== 'ontology definition')
 
 test('D3: branch names are valid agent/ names for any goal, at most 64 characters', async () => {
