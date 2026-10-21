@@ -1,4 +1,5 @@
-// FDE mode (/fde): one session, one goal, one agent global branch. Pure
+// FDE mode (/fde): one session, one goal, one global branch (an agent/ one it
+// made, or one the person adopted), and the namespace in scope, if any. Pure
 // functions, shared by the hooks and the tests. The mode only adds checks: the
 // branch rule, the ladder and the destructive rule run as they do without it.
 //
@@ -21,6 +22,10 @@ const NAME_MAX = 64
 const GOAL_MAX = 200
 const RECORD_MAX = 50
 const GLOBAL_BRANCH = /^ri\.branch\.\.branch\.[A-Za-z0-9-]+$/
+const PROPOSAL_RID = /^ri\.branch\.\.proposal\.[A-Za-z0-9-]+$/
+// A display name safe to show: one plain branch name, no spaces, quotes or control characters.
+const PLAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/
+const FOREIGN_LINE = 'not an agent/ branch: FDE mode adopted it, and others may have work on it'
 const GLOBAL_BRANCH_ANY = /ri\.branch\.\.branch\.[A-Za-z0-9-]+/g
 const ONTOLOGY_RID = /ri\.ontology\.main\.ontology\.[A-Za-z0-9-]+/g
 // Any Compass resource RID: RIDs a mutation names go to batch-get for their namespace.
@@ -320,16 +325,35 @@ export function namespaceDeny(fde: FdeSession, spaces: ReadonlyMap<string, strin
   return null
 }
 
-/** The branch's name when `data` (global-branch get) is an OPEN agent/ branch of `ontologyRid`; why not otherwise. */
+/**
+ * The branch to show when `data` (global-branch get) is an OPEN branch of
+ * `ontologyRid`, whatever its prefix (a Foundry AI FDE branch is named
+ * ai-fde/<user>/<slug>): its display name when that is a plain branch name,
+ * its RID when it is not. Anything else is a reason it cannot be adopted.
+ */
 export function adoptable(data: unknown, ontologyRid: string): { name: string } | string {
   const record = (data as { branch_record?: Record<string, unknown> } | null)?.branch_record
   if (typeof record !== 'object' || record === null) return 'global-branch get returned no branch record.'
-  const name = typeof record.display_name === 'string' ? cleanGoal(record.display_name) : ''
   if (record.branch_status !== 'OPEN') return `The branch is ${String(record.branch_status ?? 'unknown')}, not OPEN.`
   if (record.ontology_rid !== ontologyRid) return `The branch belongs to ontology ${String(record.ontology_rid ?? 'unknown')}, not the selected ${ontologyRid}.`
-  if (!name.startsWith('agent/') || !validateBranchName('global-branch create', name).ok) return `The branch '${name.slice(0, 80) || '?'}' is not a valid agent/ branch name.`
-  return { name }
+  const name = typeof record.display_name === 'string' && PLAIN_NAME.test(record.display_name) ? record.display_name : ''
+  if (name !== '') return { name }
+  if (typeof record.branch_rid === 'string' && GLOBAL_BRANCH.test(record.branch_rid)) return { name: record.branch_rid }
+  return 'The branch has no plain name, and global-branch get returned no branch RID to show instead.'
 }
+
+/** The proposal `data` (global-branch get) has open on the branch; null when it has none. */
+export function openProposal(data: unknown): string | null {
+  const rid = (data as { branch_record?: Record<string, unknown> } | null)?.branch_record?.active_proposal
+  return typeof rid === 'string' && PROPOSAL_RID.test(rid) ? rid : null
+}
+
+/** A branch FDE mode could have made itself; every other one belongs to someone else. */
+export function isAgentBranch(name: string): boolean {
+  return name.startsWith('agent/') && validateBranchName('global-branch create', name).ok
+}
+
+const adoptedForeign = (fde: FdeSession) => !isAgentBranch(fde.branchName)
 
 const appliedLines = (fde: FdeSession) =>
   fde.applied.length === 0 ? ['- nothing applied'] : fde.applied.map(entry => `- ${entry.at} ${entry.command}`)
@@ -339,6 +363,9 @@ export function fdeContext(fde: FdeSession): string {
     '# FDE mode',
     `Goal: ${goalLabel(fde.goal)}${fde.goal === '' ? ' (the operator works with you turn by turn; /fde goal sets one)' : ''}`,
     `This session works on one global branch: ${fde.branchName} (${fde.branchRid}) on ontology ${fde.ontologyRid}, stack ${fde.profile}.`,
+    ...(adoptedForeign(fde)
+      ? [`This is ${FOREIGN_LINE}. Change only what the goal needs, and leave what you did not make as you found it.`]
+      : []),
     ...(fde.namespace ? [`Writes are limited to namespace ${fde.namespace.name} (${fde.namespace.path}): every resource a write names (in its arguments or the files it reads) must be in it, or the write is refused. Reads may look anywhere.`] : []),
     'Ontology writes are pinned to it: omit --branch and the mode adds it; any other branch, --profile or a new branch is refused. ' +
       'Pass --branch with that RID on reads you mean to see the branch (`ontology definition --object-type X --branch <rid>`); reads without it see main.',
@@ -353,6 +380,7 @@ export function fdeStatus(fde: FdeSession): string {
   return [
     `FDE mode on · ${goalLabel(fde.goal)}`,
     `branch ${fde.branchName} (${fde.branchRid})`,
+    ...(adoptedForeign(fde) ? [FOREIGN_LINE] : []),
     `stack ${fde.profile} · ontology ${fde.ontologyRid} · since ${fde.startedAt}`,
     ...(fde.namespace ? [`namespace ${fde.namespace.name} (${fde.namespace.path}): writes naming resources outside it are refused`] : []),
     `${fde.applied.length} applied · ${fde.plans.length} planned`,
@@ -370,7 +398,9 @@ export function fdeHandoff(fde: FdeSession): string {
     `- Applied writes (${fde.applied.length}):`,
     ...appliedLines(fde).map(line => `  ${line}`),
     '',
-    'The operator reviews the branch, then merges it through a proposal or closes it: ' +
-      `orthanc global-branch close ${fde.branchRid} --apply --yes.`,
+    adoptedForeign(fde)
+      ? 'This is not an agent/ branch: FDE mode adopted it and leaves it as it found it, open. Whoever owns it decides whether it merges or closes.'
+      : 'The operator reviews the branch, then merges it through a proposal or closes it: ' +
+        `orthanc global-branch close ${fde.branchRid} --apply --yes.`,
   ].join('\n')
 }

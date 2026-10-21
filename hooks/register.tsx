@@ -45,9 +45,11 @@ import {
   fdeStatus,
   fileCandidates,
   hasApply,
+  isAgentBranch,
   namespaceDeny,
   namespaceScan,
   normalizeFde,
+  openProposal,
   parseFdeArgs,
   planGate,
   planSignature,
@@ -757,15 +759,21 @@ async function namespaceCheck($: EngineInterface, fde: FdeSession, args: string[
 }
 
 /**
- * The global branch's name when it is an OPEN agent/ branch of the ontology.
- * Otherwise a reason, with `transient` set when the lookup failed rather than
- * the branch being unfit, so a resume can keep the binding and try again.
+ * The global branch's name when it is an OPEN branch of the ontology, with the
+ * proposal open on it. Otherwise a reason, with `transient` set when the lookup
+ * failed rather than the branch being unfit, so a resume can keep the binding
+ * and try again.
  */
-async function openBranch($: EngineInterface, rid: string, profile: string, ontologyRid: string): Promise<{ name: string } | { reason: string; transient: boolean }> {
+async function openBranch(
+  $: EngineInterface,
+  rid: string,
+  profile: string,
+  ontologyRid: string,
+): Promise<{ name: string; proposal: string | null } | { reason: string; transient: boolean }> {
   const envelope = await runOrthanc($, ['global-branch', 'get', rid], profile, 60_000)
   if (isErrorEnvelope(envelope)) return { reason: `global-branch get ${rid} failed: ${errorsOf(envelope)}`, transient: true }
   const fit = adoptable(envelope.data, ontologyRid)
-  return typeof fit === 'string' ? { reason: fit, transient: false } : fit
+  return typeof fit === 'string' ? { reason: fit, transient: false } : { name: fit.name, proposal: openProposal(envelope.data) }
 }
 
 // FDE mode: pin the call to the session's branch and hold each --apply to its
@@ -825,7 +833,13 @@ async function fdeGate(
   return { input: next, plan: { signature, isApply, command: resolved.path, files: [...files.required, ...files.optional] } }
 }
 
-async function fdeCommand($: EngineInterface, args: string): Promise<string> {
+// A /fde from one of these is the person's own typing: the terminal, Remote
+// Control, a -p run. Peers, relays, channels, triggers and plugins are not.
+const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
+// Loose by design: a turn that carries no origin is nobody's.
+type CommandOrigin = { kind?: string }
+
+async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const parsed = parseFdeArgs(args)
   const active = await fdeState($)
   const earlier = active ? null : await fdeFromEarlier($)
@@ -891,6 +905,7 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   }
   let branchRid: string
   let branchName: string
+  let proposal: string | null = null
   if (parsed.kind === 'start') {
     branchName = fdeBranchName(parsed.goal, new Date())
     const envelope = await runOrthanc($, branchCreateArgs(branchName, scope.ontology.rid, parsed.goal), scope.profile, 120_000)
@@ -900,8 +915,14 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   } else {
     const open = await openBranch($, parsed.rid, scope.profile, scope.ontology.rid)
     if ('reason' in open) return `${open.reason} FDE mode stays off.`
+    // Only the person binds the session to a branch FDE mode did not make; an
+    // agent/ branch is nobody else's, so it adopts from anywhere.
+    if (!isAgentBranch(open.name) && !PERSON_ORIGINS.has(origin?.kind ?? '')) {
+      return `Only you can bind FDE mode to a branch it did not make: type /fde --branch ${parsed.rid} yourself. This one came from ${origin?.kind || 'an unknown source'}, and ${open.name} is not an agent/ branch. FDE mode stays off.`
+    }
     branchRid = parsed.rid
     branchName = open.name
+    proposal = open.proposal
   }
   const fde: FdeSession = {
     goal: parsed.goal,
@@ -916,7 +937,11 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
     spaces,
   }
   await setFde($, fde)
-  return `${fdeStatus(fde)}\nOntology writes in this session now go to this branch only, and each --apply needs its dry run first.`
+  return [
+    fdeStatus(fde),
+    ...(proposal ? [`It has an open proposal (${proposal}): every write here changes what its reviewers see.`] : []),
+    'Ontology writes in this session now go to this branch only, and each --apply needs its dry run first.',
+  ].join('\n')
 }
 
 // ---------- pickers ----------
@@ -1326,7 +1351,7 @@ async function clearFromTree($: EngineInterface, target: ClearTarget): Promise<v
 
 // ---------- registration ----------
 
-async function runEntry($: EngineInterface, entry: CommandEntry, args: string): Promise<string> {
+async function runEntry($: EngineInterface, entry: CommandEntry, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const action = entry.action
   switch (action.type) {
     case 'picker':
@@ -1391,7 +1416,7 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
     case 'trace':
       return traceText($)
     case 'fde':
-      return fdeCommand($, args)
+      return fdeCommand($, args, origin)
     case 'foundry': {
       const opened = await $.ui.open({ id: CONTEXT_PANE, title: 'Foundry context', focus: true, closeOnEscape: true })
       return opened.isPlaced ? 'Foundry context is open (Esc closes it).' : await treeText($)
@@ -1617,7 +1642,7 @@ export const register: Register = on => {
   })
 
   for (const entry of COMMAND_TABLE) {
-    on('command.run', { command: entry.name }, async ($, e) => ({ text: await runEntry($, entry, e.args) })).catch(
+    on('command.run', { command: entry.name }, async ($, e) => ({ text: await runEntry($, entry, e.args, e.origin) })).catch(
       ($, e, next) => ({ text: `/${e.command} failed: ${next.error instanceof Error ? next.error.message : String(next.error)}` }),
     )
   }

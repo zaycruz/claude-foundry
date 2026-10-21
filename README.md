@@ -83,7 +83,7 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
-| `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt an open one, set the goal, show status, rebind after a restart, hand off |
+| `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt any open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
@@ -106,7 +106,15 @@ global branch on the selected ontology and binds the session, subagents
 included, to it. `/fde <goal>` does the same with a goal, which names the branch
 (`agent/fde-<goal>-<timestamp>`) and heads the prompt and the handoff;
 `/fde goal <text>` sets or changes it later. `/fde --branch <rid> [goal]` adopts
-an open agent branch instead. While bound:
+an open global branch on the selected ontology instead, whoever made it (a
+Foundry AI FDE branch is `ai-fde/<user>/<slug>`). The agent still creates only
+`agent/` branches, and a branch not named `agent/` is adopted only when you type
+the command yourself (the terminal, Remote Control or a `-p` run), not when a
+peer session, a relay, a channel, a trigger or another plugin sends it. Such a
+branch is flagged in the status, the prompt (others may have work on it) and
+the handoff, which leaves closing it to its owner; a name that is not a plain
+branch name shows as its RID, and an open proposal on it is named when it is
+adopted. While bound:
 
 - Ontology writes go to that branch. A write that needs a branch and names none
   gets it; a call that names any other global branch, another ontology,
