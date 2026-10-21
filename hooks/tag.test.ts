@@ -14,8 +14,9 @@
 //  G3  The question does not say what is approved: the tag, the commit and the
 //      repository, and the Foundry branch when the tag is linked to one.
 //  G4  A tag, commit, repository or branch value that is not plain (a newline,
-//      a quote, a space, a semicolon, over 128 characters, missing) reaches the
-//      question. The call is refused instead, and nothing is asked.
+//      a quote, a space, a semicolon, over 128 characters, missing, given
+//      twice) reaches the question. The call is refused instead, and nothing
+//      is asked.
 //  G5  Declined, dismissed, answered with other text, or no one to ask (a -p
 //      run): the tag runs anyway. Orthanc must never see it.
 //  G6  The apply hides from the check: the path in another case or split
@@ -148,6 +149,9 @@ for (const [label, args] of [
   ['no commit', [REPO, TAG, '--apply']],
   ['a repository that is not a repository RID', ['ri.stemma.main.repository.x;rm', TAG, '--commit-hash', COMMIT, '--apply']],
   ['a branch RID with a newline', [REPO, TAG, '--commit-hash', COMMIT, '--foundry-branch-rid', `${OTHER}\nok`, '--apply']],
+  ['a second --commit-hash', [REPO, TAG, '--commit-hash', COMMIT, '--commit-hash', 'f'.repeat(40), '--apply']],
+  ['a second --foundry-branch-rid', [REPO, TAG, '--commit-hash', COMMIT, '--foundry-branch-rid', OTHER, '--foundry-branch-rid', MADE, '--apply']],
+  ['a quoted tag', [REPO, `"${TAG}"`, '--commit-hash', COMMIT, '--apply']],
 ] as [string, string[]][]) {
   test(`G4: ${label} is refused before anyone is asked`, async ($, on) => {
     const h = harness(on)
