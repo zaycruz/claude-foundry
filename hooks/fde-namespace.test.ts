@@ -318,7 +318,7 @@ function harness(on: On): Harness {
 
 type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 const run = (command: string, args: string) =>
-  ({ command, args, origin: { kind: 'sdk' }, presentation: { isFullscreen: false, columns: 120 } }) as const
+  ({ command, args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } }) as const
 const say = async ($: Engine, command: string, args = '') => (await $.command.run(run(command, args))).text ?? ''
 const write = ($: Engine, args: string[], command = 'dataset create') =>
   $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string; result?: unknown }>

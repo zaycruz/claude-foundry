@@ -24,8 +24,9 @@
 //      --profile runs, or a write naming no branch is not pinned to it.
 //  A7  A /fde --branch the person did not type (another plugin, a peer session, a
 //      coordinator relay, a channel, a scheduled trigger, a task notification, an
-//      unclassified turn) adopts a branch not named agent/. Only composer, bridge
-//      and sdk are the person. agent/ branches still adopt from any origin.
+//      unclassified turn, an SDK host) adopts a branch not named agent/. Only composer
+//      and bridge are the person (fde-hold.test.ts H5). agent/ branches still
+//      adopt from any origin.
 //  A8  /fde resume of an adopted foreign branch fails, renames it or drops the flag.
 //  A9  The agent can create a branch not named agent/ (FDE off or on).
 //
@@ -177,8 +178,8 @@ function harness(on: On): Harness {
 
 type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 type Origin = { kind: string; name?: string; server?: string }
-const SDK: Origin = { kind: 'sdk' }
-const say = async ($: Engine, command: string, args = '', origin: Origin = SDK) =>
+const YOU: Origin = { kind: 'composer' }
+const say = async ($: Engine, command: string, args = '', origin: Origin = YOU) =>
   (await $.command.run({ command, args, origin, presentation: { isFullscreen: false, columns: 120 } } as never)).text ?? ''
 const write = ($: Engine, command: string, args: string[]) =>
   $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string; result?: unknown }>
@@ -187,7 +188,7 @@ const prompt = async ($: Engine) =>
   ((await $.classic.SubagentStart({ agent_id: 'a', agent_type: 'foundry:foundry-scout' } as never)).additionalContext ?? []).join('\n')
 
 /** /profile, /ontology, then /fde --branch FOREIGN from `origin`. */
-async function adopt($: Engine, origin: Origin = SDK, goal = 'tidy the webhook') {
+async function adopt($: Engine, origin: Origin = YOU, goal = 'tidy the webhook') {
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
   return say($, 'fde', `--branch ${FOREIGN} ${goal}`, origin)
@@ -263,6 +264,7 @@ for (const origin of [
   { kind: 'task-notification' },
   { kind: 'auto-continuation' },
   { kind: 'unclassified' },
+  { kind: 'sdk' },
 ] as Origin[]) {
   test(`A7: a /fde --branch from ${origin.kind} does not adopt a branch not named agent/`, async ($, on) => {
     harness(on)
@@ -273,7 +275,7 @@ for (const origin of [
   })
 }
 
-for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }, SDK] as Origin[]) {
+for (const origin of [{ kind: 'composer' }, { kind: 'bridge' }] as Origin[]) {
   test(`A7: a /fde --branch typed through ${origin.kind} adopts it`, async ($, on) => {
     harness(on)
     expect(await adopt($, origin)).toContain('FDE mode on')
