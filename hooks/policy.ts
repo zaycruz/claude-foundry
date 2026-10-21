@@ -57,9 +57,9 @@ const BRANCH_REQUIRED_PATHS = new Set([
 export const requiresBranch = (path: string) => BRANCH_REQUIRED_PATHS.has(path)
 // Ontology writes Orthanc cannot branch: they change live data on main.
 const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-upsert-batch', 'ontology action-apply-with-overrides'])
-// Promotion into main is the operator's decision, not the agent's.
-// A tag publishes a release from a commit, so it is promotion too.
-const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'repository tag create'])
+// Promotion into main is the operator's decision, not the agent's. A release
+// tag is not here: it asks the operator each time (see releaseTagCall).
+const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
 // Orthanc flags that take no value, so the word after one is a positional.
@@ -90,6 +90,8 @@ export type GateClassification = {
   targetsProtected: boolean
   isDestructive: boolean
   proposedName?: string
+  /** The question to put to the operator for a release tag apply, in every mode. */
+  release?: string
   error?: string
 }
 
@@ -115,11 +117,17 @@ function isDestructiveCommand(command: string): boolean {
   return lastWord(command.trim().toLowerCase()).split('-').at(-1) === 'delete'
 }
 
-function argsHaveForce(args: readonly string[]): boolean {
+/** True when any arg names one of these flags, in any case, with or without a
+ * `=value` (`--force`, `-f`, `--APPLY`, `--apply=true`). Over-matching only asks more. */
+function argsNameFlag(args: readonly string[], names: readonly string[]): boolean {
   return args.some(arg => {
-    const flag = arg.trim().toLowerCase().replace(/=.*$/, '')
-    return flag === '--force' || flag === '-f'
+    const flag = unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
+    return names.includes(flag)
   })
+}
+
+function argsHaveForce(args: readonly string[]): boolean {
+  return argsNameFlag(args, ['--force', '-f'])
 }
 
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
@@ -236,7 +244,7 @@ const positionals = (args: readonly string[]) => {
   for (let index = 0; index < args.length; index += 1) {
     const arg = unquote(args[index] ?? '')
     if (arg.startsWith('-')) {
-      const takesValue = !arg.includes('=') && !BOOLEAN_FLAGS.has(arg)
+      const takesValue = !arg.includes('=') && !BOOLEAN_FLAGS.has(arg.toLowerCase())
       if (takesValue && args[index + 1] !== undefined && !unquote(args[index + 1] ?? '').startsWith('-')) index += 1
       continue
     }
@@ -284,6 +292,43 @@ export function branchRuleReason(command: string, args: readonly string[]): stri
   return null
 }
 
+// A release tag: what it publishes must be plain enough for the operator to
+// read the question. Anything else is refused, so nothing half-read is asked.
+const TAG_REPOSITORY = /^ri\.stemma\.main\.repository\.[A-Za-z0-9-]+$/
+const TAG_NAME = /^[A-Za-z0-9][A-Za-z0-9._+\/-]{0,127}$/
+const TAG_COMMIT = /^[0-9a-f]{40,64}$/i
+const TAG_BRANCH_RID = /^ri\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]+\.[A-Za-z0-9-]+$/
+const TAG_REFUSAL =
+  "'repository tag create --apply' must name a repository RID, a plain tag and one --commit-hash <hex> (and one plain --foundry-branch-rid, if any), so the operator can see what they approve."
+
+/** The question a `repository tag create --apply` puts to the operator, or why it is refused. */
+function releaseTagCall(args: readonly string[]): { release: string } | { error: string } {
+  // Orthanc gets the raw args, so a quoted, padded or newline-carrying arg is
+  // not what the operator would read. Any such arg is refused.
+  if (args.some(arg => unquote(arg) !== arg)) return { error: TAG_REFUSAL }
+  const found = positionals(args)
+  const repository = found[0] ?? ''
+  const tag = found[1] ?? ''
+  const commits = flagValues(args, ['--commit-hash'])
+  const links = flagValues(args, ['--foundry-branch-rid'])
+  const commit = commits[0] ?? ''
+  const link = links[0] ?? null
+  if (
+    commits.length > 1 ||
+    links.length > 1 ||
+    !TAG_REPOSITORY.test(repository) ||
+    !TAG_NAME.test(tag) ||
+    !TAG_COMMIT.test(commit) ||
+    (link !== null && !TAG_BRANCH_RID.test(link))
+  ) {
+    return { error: TAG_REFUSAL }
+  }
+  const linked = link === null ? '' : ` (linked to Foundry branch ${link})`
+  return {
+    release: `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag is a release: the operator approves each one, in every mode.`,
+  }
+}
+
 function orthancClassification(
   command: string,
   args: readonly string[],
@@ -297,11 +342,16 @@ function orthancClassification(
   }
   if (!BRANCH_CREATION_PATHS.includes(command)) {
     const refused = branchRuleReason(command, args)
+    const release =
+      refused === null && command === 'repository tag create' && argsNameFlag(args, ['--apply'])
+        ? releaseTagCall(args)
+        : null
     return {
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
       isDestructive: isDestructiveCommand(command) || argsHaveForce(args),
+      ...(release !== null ? release : {}),
       ...(refused ? { error: refused } : {}),
     }
   }
@@ -321,7 +371,9 @@ function orthancClassification(
 
 /** An orthanc_cli command as the manifest path it names (lowercased, longest
  * prefix) and its args; words past the path lead the args. Classifier and
- * executor both resolve through here, so they see the same command. */
+ * executor both resolve through here, so they see the same command. The path
+ * may split across the two ('repository' plus ['tag', 'create', …]): the argv
+ * rebuilt from the path is the same words either way. */
 export function resolveOrthancCommand(
   command: string,
   args: readonly string[],
@@ -329,9 +381,18 @@ export function resolveOrthancCommand(
 ): { path: string; args: string[] } {
   const words = command.trim().split(/\s+/).filter(word => word !== '')
   const paths = new Set(manifest.map(entry => entry.path))
-  for (let width = words.length; width >= 1; width -= 1) {
-    const path = words.slice(0, width).join(' ').toLowerCase()
-    if (paths.has(path)) return { path, args: [...words.slice(width), ...args] }
+  const head = words.map(word => word.toLowerCase())
+  for (const arg of args) {
+    const word = unquote(arg).toLowerCase()
+    if (!/^[a-z0-9-]+$/.test(word)) break
+    head.push(word)
+  }
+  for (let width = head.length; width >= 1; width -= 1) {
+    const path = head.slice(0, width).join(' ')
+    if (!paths.has(path)) continue
+    return width <= words.length
+      ? { path, args: [...words.slice(width), ...args] }
+      : { path, args: args.slice(width - words.length) }
   }
   return { path: words.join(' ').toLowerCase(), args: [...args] }
 }
@@ -751,6 +812,19 @@ export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   return 'unknown'
 }
 
+/** A Foundry call the guard cannot read: blocked in every mode, so it never runs blind. */
+function unreadableCall(input: unknown, workingBranch: string | null, error: string): GateClassification {
+  return {
+    command: null,
+    kind: 'mutation',
+    isBranchScoped: false,
+    hasWorkingBranch: branchIsWorking(workingBranch),
+    targetsProtected: targetsProtected(input),
+    isDestructive: false,
+    error,
+  }
+}
+
 /** Null: a read, or a tool outside the Foundry lane. Never reaches the ladder. */
 export function classifyCall(
   tool: string,
@@ -759,8 +833,17 @@ export function classifyCall(
   workingBranch: string | null,
 ): GateClassification | null {
   if (tool === ORTHANC_CLI) {
+    // Without the manifest the guard cannot tell which command this call runs, and
+    // the executor loads the manifest again for itself. Nothing unreadable runs.
+    if (manifest.length === 0) {
+      return unreadableCall(input, workingBranch, "Orthanc's agent manifest could not be loaded, so the Foundry guard cannot tell which command this call runs. Try again.")
+    }
     const raw = typeof input.command === 'string' ? input.command : ''
     const resolved = resolveOrthancCommand(raw, Array.isArray(input.args) ? input.args.map(String) : [], manifest)
+    // Words that name no command at all: nothing safe to run, so nothing runs.
+    if (resolved.path === '' && resolved.args.length > 0) {
+      return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
+    }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
     if (classifyOrthancCommand(resolved.path, manifest) === 'read') return null
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch)
@@ -788,6 +871,7 @@ export function ladderDecision(
   verdict?: GuardVerdict | null,
 ): LadderDecision {
   if (classification.error) return { outcome: 'block', reason: classification.error }
+  if (classification.release) return { outcome: 'ask', reason: classification.release }
   if (classification.kind === 'branch-creation') {
     if (mode === 'ask-always') {
       return {
@@ -822,6 +906,7 @@ export function modeGuidance(mode: ApprovalMode): string {
     'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
+    'Release tags (repository tag create --apply) ask the operator in every mode. ' +
     `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
     'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
     'the call is blocked — report it, do not retry blindly.'

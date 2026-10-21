@@ -22,8 +22,10 @@ says so instead of falling back to REST.
   `--branch <global branch RID>`; dataset, stream and build writes must name a
   work branch; code goes to a work branch through `orthanc repository push` and
   a pull request. Branchless writes, writes to `main`/`master`, proposal
-  merges and approvals, release tags, default-branch pushes, raw `git push` to
-  a Foundry repository and Foundry writes outside Orthanc are blocked. Orthanc
+  merges and approvals, default-branch pushes, raw `git push` to
+  a Foundry repository and Foundry writes outside Orthanc are blocked. A
+  release tag (`repository tag create --apply`) is not blocked: it asks the
+  operator in every mode, naming the tag, the commit and the repository. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
   write, however the shell wraps the call. Text that only mentions Orthanc (a
   commit message, a PR body, an `echo`) is not a call.

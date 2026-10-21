@@ -261,8 +261,11 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
   expect(cli('cp', ['ri.a', 'ri.f', '-b', 'agent-copy', '--apply'])?.error).toBe(undefined)
 })
 
-test('F21 F22: tags are promotion; repository push reads its destination past boolean flags', async () => {
-  expect(blockedEverywhere(classifyCall(CLI, { command: 'repository tag create', args: ['ri.r', 'v1'] }, MANIFEST, null))).toBe(true)
+test('F21 F22: a tag apply asks in every mode (tag.test.ts); repository push reads its destination past boolean flags', async () => {
+  const tag = (args: string[]) => classifyCall(CLI, { command: 'repository tag create', args }, MANIFEST, null)
+  const applied = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--apply'])
+  expect(MODES.every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  expect(ladderDecision('yolo', tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40)])!).outcome).toBe('run')
   const push = (args: string[]) => classifyCall(CLI, { command: 'repository push', args }, MANIFEST, null)
   expect(blockedEverywhere(push(['--apply', 'ri.stemma.main.repository.x', 'refs/heads/a', 'refs/heads/main']))).toBe(true)
   expect(blockedEverywhere(push(['ri.stemma.main.repository.x', 'refs/heads/main']))).toBe(true)
