@@ -12,6 +12,7 @@ import type {
   FoundryScope,
 } from '../types'
 import { isRecord } from './orthanc'
+import { plainSpace } from './fde'
 
 /** Compass resource kinds orthanc lists with `resource list|search --type`. */
 export const COMPASS_KINDS = {
@@ -163,7 +164,7 @@ const named = (value: unknown): FoundryNamed | null =>
 
 const namespaceOf = (value: unknown): FoundryNamespace | null =>
   isRecord(value) && typeof value.rid === 'string'
-    ? { rid: value.rid, name: asString(value.name) || value.rid, path: asString(value.path) }
+    ? plainSpace({ rid: value.rid, name: asString(value.name) || value.rid, path: asString(value.path) })
     : null
 
 const types = (value: unknown): FoundryObjectType[] =>
@@ -275,10 +276,12 @@ export function contextLines(scope: FoundryScope): string[] {
   const lines: string[] = []
   if (scope.ontology) lines.push(`Ontology: ${scope.ontology.name} (${scope.ontology.rid}).`)
   if (scope.namespace) {
-    lines.push(`Namespace: ${scope.namespace.name} (${scope.namespace.rid})${scope.namespace.path ? `, path ${scope.namespace.path}` : ''}.`)
+    // A RID standing in for a path that is not plain is no path to search under.
+    const path = scope.namespace.path.startsWith('/') ? scope.namespace.path : ''
+    lines.push(`Namespace: ${scope.namespace.name} (${scope.namespace.rid})${path ? `, path ${path}` : ''}.`)
     lines.push(
       `Keep Compass work inside it: pass --space-rid ${scope.namespace.rid} to project list and project search` +
-        `${scope.namespace.path ? `, --path-prefix ${scope.namespace.path} to search` : ''}, and list or search resources under its projects.`,
+        `${path ? `, --path-prefix ${path} to search` : ''}, and list or search resources under its projects.`,
     )
   }
   if (scope.projects.length > 0) {

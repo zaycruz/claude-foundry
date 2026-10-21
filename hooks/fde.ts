@@ -32,13 +32,46 @@ const ONTOLOGY_RID = /ri\.ontology\.main\.ontology\.[A-Za-z0-9-]+/g
 const RESOURCE_RID = /ri\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]+\.[A-Za-z0-9-]+/g
 // A quoted path in a file the call reads: an unquoted word in prose is not a path.
 const QUOTED_PATH = /(?:"[^"\n]*"|'[^'\n]*')/g
+// A path right after a quote: what a decoded double encoding leaves when its quotes no longer pair.
+const QUOTE_OPENED_PATH = /["'](\/[^"'\n]*)/g
 const BRANCH_RID_PREFIX = 'ri.branch.'
+// A Compass folder RID: what `resource batch-get` may leave out, and what a write must then place.
+export const COMPASS_FOLDER_RID = 'ri.compass.main.folder.'
 const BATCH_MAX = 1000
 // Flags that could be read as a branch flag by a lenient parser: a --br… prefix, or -b inside a bundle.
 const AMBIGUOUS_BRANCH_FLAG = /^(--br(?!anch(=|$))[a-z-]*(=.*)?|-[a-z]*b[a-z]+|-[a-z]+b)$/i
 const PROFILE_FLAG = /^--profile(=|$)/
 // While bound, only this branch command runs, and only on the bound branch.
 const GLOBAL_BRANCH_ALLOWED = new Set(['global-branch add-repo'])
+
+// One JSON string escape and its letter forms, in one alternation: one pass never turns
+// `\\u002e` into `\.`, only into `\u002e`.
+const JSON_ESCAPE = /\\(?:u([0-9a-fA-F]{4})|(["\\/bfnrt]))/g
+const ESCAPED: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }
+
+/** The text, then each JSON-unescaped copy of it until one stops changing (at most 8): what a parser reads out of an escaped or doubly encoded string. */
+export function decodings(text: string): string[] {
+  const out = [text]
+  let current = text
+  for (let pass = 0; pass < 8; pass += 1) {
+    const next = current.replace(JSON_ESCAPE, (_whole, hex: string | undefined, letter: string | undefined) =>
+      hex !== undefined ? String.fromCharCode(parseInt(hex, 16)) : (ESCAPED[letter!] ?? letter!),
+    )
+    if (next === current || out.includes(next)) break
+    out.push(next)
+    current = next
+  }
+  return out
+}
+
+// A name or path that is safe to show: no control, line-breaking or bidi character, at most 100 of them.
+const NOT_PLAIN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
+
+/** The space as it may be shown: a name or path that is not plain shows as the space's RID. */
+export function plainSpace(space: FoundryNamespace): FoundryNamespace {
+  const shown = (value: string) => (value.length <= 100 && !NOT_PLAIN.test(value) ? value : space.rid)
+  return { rid: space.rid, name: shown(space.name), path: shown(space.path) }
+}
 
 /** One line, no control characters, at most 200 characters. */
 const cleanGoal = (text: string) =>
@@ -135,6 +168,12 @@ export function fileCandidates(args: readonly string[], cwd: string, home = ''):
       index += 1
       continue
     }
+    // A short flag with its file attached: -s@/work/schema.json is that file.
+    const attached = /^-[A-Za-z]=?@(.+)$/.exec(arg)
+    if (attached !== null) {
+      required.push(absolute(attached[1]!, cwd, home))
+      continue
+    }
     const joined = /^(--[a-z0-9-]+)=(.+)$/i.exec(arg)
     const raw = joined ? unquote(joined[2]!) : arg
     const value = raw.replace(/^@/, '')
@@ -176,11 +215,12 @@ export function takePlan(fde: FdeSession, signature: string): { fde: FdeSession;
   return { fde: { ...fde, plans: fde.plans.filter(plan => plan !== signature) }, taken: true }
 }
 
-/** Why a file the call reads is refused: it names another global branch or ontology. */
+/** Why a file the call reads is refused: it names another global branch or ontology, escaped or not. */
 export function foreignRids(fde: FdeSession, text: string): string | null {
-  const branches = new Set(text.match(GLOBAL_BRANCH_ANY) ?? [])
+  const decoded = decodings(text)
+  const branches = new Set(decoded.flatMap(copy => copy.match(GLOBAL_BRANCH_ANY) ?? []))
   branches.delete(fde.branchRid)
-  const ontologies = new Set(text.match(ONTOLOGY_RID) ?? [])
+  const ontologies = new Set(decoded.flatMap(copy => copy.match(ONTOLOGY_RID) ?? []))
   ontologies.delete(fde.ontologyRid)
   const found = [...branches, ...ontologies]
   return found.length === 0 ? null : `a file this call reads names ${found.join(', ')}; the session works on ${fde.branchRid} in ${fde.ontologyRid} only.`
@@ -209,19 +249,23 @@ export function fdeBind(
   if (profile !== fde.profile) {
     return { deny: `${tag}: the session's branch is on stack '${fde.profile}', but the active stack is '${profile}'. Switch back with /profile ${fde.profile}, or /fde end.` }
   }
+  if (fde.namespace !== null && path === 'space create') {
+    return { deny: `${tag}: the session works in ${fde.namespace.name} only, and a new space is outside it. The operator ends the mode with /fde end.` }
+  }
   if (path === 'global-branch create') {
     return { deny: `${tag}: this session works on ${fde.branchRid} only. Do not create another global branch; the operator ends the mode with /fde end.` }
   }
   if ((path.startsWith('global-branch ') && !GLOBAL_BRANCH_ALLOWED.has(path)) || path.startsWith('proposal ')) {
     return { deny: `${tag}: '${path}' changes branches or proposals, which is the operator's decision at handoff. Report that the work is ready instead.` }
   }
-  const foreign = new Set(words.flatMap(word => word.match(GLOBAL_BRANCH_ANY) ?? []))
+  const decoded = words.flatMap(word => decodings(word))
+  const foreign = new Set(decoded.flatMap(word => word.match(GLOBAL_BRANCH_ANY) ?? []))
   foreign.delete(fde.branchRid)
   if (foreign.size > 0) return { deny: `${tag}: this call names ${[...foreign].join(', ')}; the session works on ${fde.branchRid} only.` }
   if (path.startsWith('global-branch ') && !words.includes(fde.branchRid)) {
     return { deny: `${tag}: '${path}' must name the session's branch ${fde.branchRid}.` }
   }
-  const ontologies = new Set(words.flatMap(word => word.match(ONTOLOGY_RID) ?? []))
+  const ontologies = new Set(decoded.flatMap(word => word.match(ONTOLOGY_RID) ?? []))
   ontologies.delete(fde.ontologyRid)
   if (ontologies.size > 0) {
     return { deny: `${tag}: the branch belongs to ontology ${fde.ontologyRid}; this call names ${[...ontologies].join(', ')}.` }
@@ -244,10 +288,14 @@ export function normalizeFde(stored: unknown): FdeSession | null {
     isRecord(value) && typeof value.rid === 'string' && value.rid !== '' && typeof value.name === 'string' && typeof value.path === 'string'
       ? { rid: value.rid, name: value.name, path: value.path }
       : null
+  const plain = (value: unknown): FoundryNamespace | null => {
+    const found = space(value)
+    return found === null ? null : plainSpace(found)
+  }
   return {
     ...(stored as object as FdeSession),
-    namespace: space(stored.namespace),
-    spaces: Array.isArray(stored.spaces) ? stored.spaces.map(space).filter((entry): entry is FoundryNamespace => entry !== null) : [],
+    namespace: plain(stored.namespace),
+    spaces: Array.isArray(stored.spaces) ? stored.spaces.map(plain).filter((entry): entry is FoundryNamespace => entry !== null) : [],
   }
 }
 
@@ -262,9 +310,9 @@ const refusal = (fde: FdeSession, target: string, spaceRid: string): string => {
   )
 }
 
-/** The space `path` names, by whole segments: `/Acme` does not claim `/Acme Dev/x`. */
+/** The space `path` names, by whole segments: `/Acme` does not claim `/Acme Dev/x`. Only a real path places one: a RID or an empty path standing in for a path claims nothing. */
 const placePath = (fde: FdeSession, path: string): FoundryNamespace | undefined =>
-  fde.spaces.find(space => path === space.path || path.startsWith(space.path + '/'))
+  fde.spaces.find(space => space.path.startsWith('/') && (path === space.path || path.startsWith(space.path + '/')))
 
 /** The arg as a path: `--flag=/x` carries `/x`; anything that is not absolute is not a path. */
 const argPath = (arg: string): string => {
@@ -282,8 +330,8 @@ export function namespaceScan(fde: FdeSession, args: readonly string[], texts: r
   if (fde.namespace === null) return { lookup: [] }
   const skip = new Set([fde.branchRid, fde.ontologyRid, fde.namespace.rid])
   const found: string[] = []
-  for (const arg of args) found.push(...(unquote(arg).match(RESOURCE_RID) ?? []))
-  for (const text of texts) found.push(...(text.match(RESOURCE_RID) ?? []))
+  for (const arg of args) found.push(...decodings(unquote(arg)).flatMap(copy => copy.match(RESOURCE_RID) ?? []))
+  for (const text of texts) found.push(...decodings(text).flatMap(copy => copy.match(RESOURCE_RID) ?? []))
   const lookup: string[] = []
   for (const rid of new Set(found)) {
     if (skip.has(rid) || rid.startsWith(BRANCH_RID_PREFIX)) continue
@@ -292,8 +340,17 @@ export function namespaceScan(fde: FdeSession, args: readonly string[], texts: r
     if (named !== undefined) return { deny: refusal(fde, rid, named.rid) }
     lookup.push(rid)
   }
-  // Whole args are paths; inside an arg (inline JSON) or a file, only quoted strings are.
-  const paths = [...args.map(argPath), ...[...args, ...texts].flatMap(text => (text.match(QUOTED_PATH) ?? []).map(unquote))]
+  // Whole args are paths; inside an arg (inline JSON) or a file, only quoted strings
+  // and paths that open right after a quote are, in every decoding.
+  const paths = [
+    ...args.flatMap(arg => decodings(arg).map(argPath)),
+    ...[...args, ...texts].flatMap(text =>
+      decodings(text).flatMap(copy => [
+        ...(copy.match(QUOTED_PATH) ?? []).map(unquote),
+        ...Array.from(copy.matchAll(QUOTE_OPENED_PATH), match => match[1]!),
+      ]),
+    ),
+  ]
   for (const path of paths) {
     if (!path.startsWith('/')) continue
     const placed = placePath(fde, path)
@@ -319,8 +376,16 @@ export function spacesOf(data: unknown, asked: readonly string[]): Map<string, s
 /** Why this write names something outside the bound namespace; null when nothing looked-up is outside. */
 export function namespaceDeny(fde: FdeSession, spaces: ReadonlyMap<string, string | null>): string | null {
   if (fde.namespace === null) return null
+  const ns = fde.namespace
   for (const [rid, spaceRid] of spaces) {
-    if (spaceRid !== null && spaceRid !== fde.namespace.rid) return refusal(fde, rid, spaceRid)
+    if (spaceRid === null) {
+      if (!rid.startsWith(COMPASS_FOLDER_RID)) continue
+      return (
+        `FDE mode (${fde.branchName}): ${rid} is a Compass folder resource batch-get did not return, so it cannot be placed in ${ns.name}; ` +
+        `the session works in ${ns.name} only, and every resource a write names (in its arguments or the files it reads) must be in it.`
+      )
+    }
+    if (spaceRid !== ns.rid) return refusal(fde, rid, spaceRid)
   }
   return null
 }

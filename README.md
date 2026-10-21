@@ -109,12 +109,13 @@ included, to it. `/fde <goal>` does the same with a goal, which names the branch
 an open global branch on the selected ontology instead, whoever made it (a
 Foundry AI FDE branch is `ai-fde/<user>/<slug>`). The agent still creates only
 `agent/` branches, and a branch not named `agent/` is adopted only when you type
-the command yourself (the terminal, Remote Control or a `-p` run), not when a
-peer session, a relay, a channel, a trigger or another plugin sends it. Such a
-branch is flagged in the status, the prompt (others may have work on it) and
-the handoff, which leaves closing it to its owner; a name that is not a plain
-branch name shows as its RID, and an open proposal on it is named when it is
-adopted. While bound:
+the command yourself (the terminal or Remote Control; not a `-p` run or the
+Agent SDK), not when a peer session, a relay, a channel, a trigger or another
+plugin sends it. `/fde end` needs you to type it the same way, and so does
+`/fde resume` of a branch not named `agent/`. Such a branch is flagged in the
+status, the prompt (others may have work on it) and the handoff, which leaves
+closing it to its owner; a name that is not a plain branch name shows as its
+RID, and an open proposal on it is named when it is adopted. While bound:
 
 - Ontology writes go to that branch. A write that needs a branch and names none
   gets it; a call that names any other global branch, another ontology,
@@ -124,26 +125,33 @@ adopted. While bound:
 - The agent cannot create, close or merge global branches, or touch proposals,
   while bound; `global-branch add-repo` runs on the bound branch only.
 - Plan, then apply: an `--apply` runs only after a clean dry run of the same
-  call. The plan pins every file the call reads (`--*-file` values, `@file`,
-  and any path-like argument that reads as a file) by SHA-256, checked again
-  just before the call runs, and a file naming another global branch or
-  ontology is refused. Each dry run licenses one apply: the apply takes it
-  before running, so two identical applies in parallel cannot share it, and a
-  refused apply, or one Orthanc rejects as a usage error, gives it back; any
-  other failure keeps it spent, since Foundry may have changed. Directory
-  arguments are not hashed, and a file over 20 MB is refused.
+  call. The plan pins every file the call reads (`--*-file` values, `@file`, a
+  short flag with its file attached (`-s@schema.json`), and any path-like
+  argument that reads as a file) by SHA-256, checked again just before the call
+  runs, and a file naming another global branch or ontology is refused. Each
+  dry run licenses one apply: the apply takes it before running, so two
+  identical applies in parallel cannot share it, and a refused apply, or one
+  Orthanc rejects as a usage error, gives it back; any other failure keeps it
+  spent, since Foundry may have changed. Directory arguments are not hashed,
+  and a file over 20 MB is refused.
 - With a namespace in scope (`/namespace`), FDE mode holds the session to it.
   `/fde on` and `/fde --branch` first check that the ontology is in it, and
   refuse before any branch exists if it is not, if it is in no namespace, or
   if the check cannot run. While bound, every resource a write names, in its
   arguments or in the files it reads, inputs included, must be in that
-  namespace: a RID (looked up with `resource batch-get`, once per binding) or a
-  Compass path under another namespace is refused. RIDs `batch-get` does not
-  know (branches, transactions, malformed ones) pass. If the lookup itself
-  fails, the write asks the operator (`Run unchecked` or not) instead of
-  failing closed; with no one to ask, it does not run. Reads are not checked.
-  `/namespace`, `/scope clear` and the pane's clear button leave the namespace
-  as it is until `/fde end`.
+  namespace: a RID (looked up with `resource batch-get`, once per binding, but a
+  folder it did not return is looked up again at every write) or a
+  Compass path under another namespace is refused, and so is a Compass folder
+  `batch-get` does not return, since it sits in no namespace the session can
+  see. A RID or path written as JSON escapes (`\u002e`, `\/`, a string encoded
+  twice) is scanned as Orthanc reads it, and `space create` is refused: a new
+  space is outside the namespace. RIDs `batch-get` does not know (branches,
+  transactions, malformed ones) pass. If the lookup itself fails, the write
+  asks the operator, naming the RIDs it could not check (`Run unchecked` or
+  not) instead of failing closed; with no one to ask, it does not run. Reads
+  are not checked. A space name or path that is not plain shows as its RID.
+  `/namespace` and the pane's clear button leave the namespace as it is until
+  `/fde end`; `/scope clear` keeps it on the stack the session is bound to.
 - The goal, branch and namespace go into the system prompt and a band above
   the prompt, and every turn is traced (not only the ones that touch Foundry).
 
