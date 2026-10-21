@@ -8,9 +8,12 @@
 //  - no global-branch or proposal changes (but add-repo on the bound branch):
 //    closing or merging is the operator's;
 //  - --apply runs only after a clean dry run of the same call, with every file
-//    it reads pinned by SHA-256; each dry run licenses one apply.
+//    it reads pinned by SHA-256; each dry run licenses one apply;
+//  - when a namespace is bound, every resource a write names, in its arguments
+//    or the files it reads, must be in it (reads may look anywhere).
 
-import type { FdeSession } from '../types'
+import type { FdeSession, FoundryNamespace } from '../types'
+import { isRecord } from './orthanc'
 import { BRANCH_FLAGS, flagValues, requiresBranch, unquote, validateBranchName } from './policy'
 
 const PREFIX = 'agent/fde-'
@@ -20,6 +23,12 @@ const RECORD_MAX = 50
 const GLOBAL_BRANCH = /^ri\.branch\.\.branch\.[A-Za-z0-9-]+$/
 const GLOBAL_BRANCH_ANY = /ri\.branch\.\.branch\.[A-Za-z0-9-]+/g
 const ONTOLOGY_RID = /ri\.ontology\.main\.ontology\.[A-Za-z0-9-]+/g
+// Any Compass resource RID: RIDs a mutation names go to batch-get for their namespace.
+const RESOURCE_RID = /ri\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]+\.[A-Za-z0-9-]+/g
+// A quoted path in a file the call reads: an unquoted word in prose is not a path.
+const QUOTED_PATH = /(?:"[^"\n]*"|'[^'\n]*')/g
+const BRANCH_RID_PREFIX = 'ri.branch.'
+const BATCH_MAX = 1000
 // Flags that could be read as a branch flag by a lenient parser: a --br… prefix, or -b inside a bundle.
 const AMBIGUOUS_BRANCH_FLAG = /^(--br(?!anch(=|$))[a-z-]*(=.*)?|-[a-z]*b[a-z]+|-[a-z]+b)$/i
 const PROFILE_FLAG = /^--profile(=|$)/
@@ -223,6 +232,94 @@ export function fdeBind(
   return { deny: `${tag}: ontology writes go to ${fde.branchRid}; this call names --branch ${named}. Drop --branch and the mode supplies it.` }
 }
 
+/** A stored binding: junk is null, and a session from before namespaces has `namespace: null, spaces: []`. */
+export function normalizeFde(stored: unknown): FdeSession | null {
+  if (!isRecord(stored) || typeof stored.branchRid !== 'string') return null
+  const space = (value: unknown): FoundryNamespace | null =>
+    isRecord(value) && typeof value.rid === 'string' && value.rid !== '' && typeof value.name === 'string' && typeof value.path === 'string'
+      ? { rid: value.rid, name: value.name, path: value.path }
+      : null
+  return {
+    ...(stored as object as FdeSession),
+    namespace: space(stored.namespace),
+    spaces: Array.isArray(stored.spaces) ? stored.spaces.map(space).filter((entry): entry is FoundryNamespace => entry !== null) : [],
+  }
+}
+
+/** Why a write is refused: what it names, the namespace it is in, and that inputs count too. */
+const refusal = (fde: FdeSession, target: string, spaceRid: string): string => {
+  const ns = fde.namespace!
+  const listed = fde.spaces.find(space => space.rid === spaceRid)
+  const label = listed ? listed.name : `another namespace (${spaceRid})`
+  return (
+    `FDE mode (${fde.branchName}): ${target} is in ${label}, not ${ns.name}; the session works in ${ns.name} only, ` +
+    'and every resource a write names (in its arguments or the files it reads) must be in it.'
+  )
+}
+
+/** The space `path` names, by whole segments: `/Acme` does not claim `/Acme Dev/x`. */
+const placePath = (fde: FdeSession, path: string): FoundryNamespace | undefined =>
+  fde.spaces.find(space => path === space.path || path.startsWith(space.path + '/'))
+
+/** The arg as a path: `--flag=/x` carries `/x`; anything that is not absolute is not a path. */
+const argPath = (arg: string): string => {
+  const word = unquote(arg)
+  const joined = /^--[a-z0-9-]+=(.*)$/i.exec(word)
+  return joined ? unquote(joined[1]!) : word
+}
+
+/**
+ * What a write names that could sit outside the bound namespace: the RIDs left
+ * to look up, or why the call is refused now. Without a bound namespace nothing
+ * is checked; a path under no listed space is nobody's business.
+ */
+export function namespaceScan(fde: FdeSession, args: readonly string[], texts: readonly string[]): { deny: string } | { lookup: string[] } {
+  if (fde.namespace === null) return { lookup: [] }
+  const skip = new Set([fde.branchRid, fde.ontologyRid, fde.namespace.rid])
+  const found: string[] = []
+  for (const arg of args) found.push(...(unquote(arg).match(RESOURCE_RID) ?? []))
+  for (const text of texts) found.push(...(text.match(RESOURCE_RID) ?? []))
+  const lookup: string[] = []
+  for (const rid of new Set(found)) {
+    if (skip.has(rid) || rid.startsWith(BRANCH_RID_PREFIX)) continue
+    // batch-get never returns a namespace's own space, so a listed one is refused by the list.
+    const named = fde.spaces.find(space => space.rid === rid)
+    if (named !== undefined) return { deny: refusal(fde, rid, named.rid) }
+    lookup.push(rid)
+  }
+  // Whole args are paths; inside an arg (inline JSON) or a file, only quoted strings are.
+  const paths = [...args.map(argPath), ...[...args, ...texts].flatMap(text => (text.match(QUOTED_PATH) ?? []).map(unquote))]
+  for (const path of paths) {
+    if (!path.startsWith('/')) continue
+    const placed = placePath(fde, path)
+    if (placed !== undefined && placed.rid !== fde.namespace.rid) return { deny: refusal(fde, path, placed.rid) }
+  }
+  return { lookup }
+}
+
+/** `resource batch-get` argv for one call: at most 1000 RIDs each, in order. */
+export function batchGetArgs(rids: readonly string[]): string[][] {
+  const chunks: string[][] = []
+  for (let index = 0; index < rids.length; index += BATCH_MAX) chunks.push(['resource', 'batch-get', ...rids.slice(index, index + BATCH_MAX)])
+  return chunks
+}
+
+/** Each asked RID's spaceRid in a batch-get `data`, in asked order: null when batch-get left it out. */
+export function spacesOf(data: unknown, asked: readonly string[]): Map<string, string | null> {
+  const rows = isRecord(data) && Array.isArray(data.resources) ? data.resources.filter(isRecord) : []
+  const spaces = new Map(rows.flatMap(row => (typeof row.rid === 'string' && typeof row.spaceRid === 'string' ? [[row.rid, row.spaceRid] as [string, string]] : [])))
+  return new Map(asked.map(rid => [rid, spaces.get(rid) ?? null] as [string, string | null]))
+}
+
+/** Why this write names something outside the bound namespace; null when nothing looked-up is outside. */
+export function namespaceDeny(fde: FdeSession, spaces: ReadonlyMap<string, string | null>): string | null {
+  if (fde.namespace === null) return null
+  for (const [rid, spaceRid] of spaces) {
+    if (spaceRid !== null && spaceRid !== fde.namespace.rid) return refusal(fde, rid, spaceRid)
+  }
+  return null
+}
+
 /** The branch's name when `data` (global-branch get) is an OPEN agent/ branch of `ontologyRid`; why not otherwise. */
 export function adoptable(data: unknown, ontologyRid: string): { name: string } | string {
   const record = (data as { branch_record?: Record<string, unknown> } | null)?.branch_record
@@ -242,6 +339,7 @@ export function fdeContext(fde: FdeSession): string {
     '# FDE mode',
     `Goal: ${goalLabel(fde.goal)}${fde.goal === '' ? ' (the operator works with you turn by turn; /fde goal sets one)' : ''}`,
     `This session works on one global branch: ${fde.branchName} (${fde.branchRid}) on ontology ${fde.ontologyRid}, stack ${fde.profile}.`,
+    ...(fde.namespace ? [`Writes are limited to namespace ${fde.namespace.name} (${fde.namespace.path}): every resource a write names (in its arguments or the files it reads) must be in it, or the write is refused. Reads may look anywhere.`] : []),
     'Ontology writes are pinned to it: omit --branch and the mode adds it; any other branch, --profile or a new branch is refused. ' +
       'Pass --branch with that RID on reads you mean to see the branch (`ontology definition --object-type X --branch <rid>`); reads without it see main.',
     'Plan, then apply: run each write as a dry run (no --apply), read the plan, then repeat it with --apply and identical arguments. ' +
@@ -256,6 +354,7 @@ export function fdeStatus(fde: FdeSession): string {
     `FDE mode on · ${goalLabel(fde.goal)}`,
     `branch ${fde.branchName} (${fde.branchRid})`,
     `stack ${fde.profile} · ontology ${fde.ontologyRid} · since ${fde.startedAt}`,
+    ...(fde.namespace ? [`namespace ${fde.namespace.name} (${fde.namespace.path}): writes naming resources outside it are refused`] : []),
     `${fde.applied.length} applied · ${fde.plans.length} planned`,
     '/fde end hands off and leaves the branch open.',
   ].join('\n')
@@ -267,6 +366,7 @@ export function fdeHandoff(fde: FdeSession): string {
     '',
     `- Branch: ${fde.branchName} (${fde.branchRid}), still OPEN and not merged.`,
     `- Stack ${fde.profile}, ontology ${fde.ontologyRid}, started ${fde.startedAt}.`,
+    ...(fde.namespace ? [`- Namespace: ${fde.namespace.name} (${fde.namespace.path}).`] : []),
     `- Applied writes (${fde.applied.length}):`,
     ...appliedLines(fde).map(line => `  ${line}`),
     '',

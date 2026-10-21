@@ -316,7 +316,7 @@ function harness(on: On): Harness {
   return h
 }
 
-type Engine = Parameters<Parameters<typeof test>[1]>[0]
+type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 const run = (command: string, args: string) =>
   ({ command, args, origin: { kind: 'sdk' }, presentation: { isFullscreen: false, columns: 120 } }) as const
 const say = async ($: Engine, command: string, args = '') => (await $.command.run(run(command, args))).text ?? ''

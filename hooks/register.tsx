@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, Next, Register } from 'claude-code'
 
-import type { FdeSession, FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
+import type { FdeSession, FoundryNamed, FoundryNamespace, FoundryPicker, FoundryPickerKind, FoundryPickItem, FoundryResource, FoundryResourceKind, FoundryScope } from '../types'
 import {
   applyClear,
   blockedText,
@@ -31,6 +31,7 @@ import {
 } from './catalog'
 import {
   adoptable,
+  batchGetArgs,
   branchCreateArgs,
   foreignRids,
   goalLabel,
@@ -44,11 +45,15 @@ import {
   fdeStatus,
   fileCandidates,
   hasApply,
+  namespaceDeny,
+  namespaceScan,
+  normalizeFde,
   parseFdeArgs,
   planGate,
   planSignature,
   recordApply,
   recordPlan,
+  spacesOf,
 } from './fde'
 import {
   CLI_TIMEOUT_FLOOR_MS,
@@ -673,19 +678,82 @@ async function spill($: EngineInterface, command: unknown, envelope: Envelope): 
 // ---------- /fde ----------
 
 async function fdeState($: EngineInterface): Promise<FdeSession | null> {
-  return (await $.state.get(FDE)).value ?? null
+  return normalizeFde((await $.state.get(FDE)).value)
 }
 
 // The session's binding, mirrored to the store so the next session can offer /fde resume.
+// A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
+  spaceCache.clear()
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
-  const stored = await $.store.get('fdeOpen').catch(() => null)
-  return typeof stored === 'object' && stored !== null && typeof (stored as FdeSession).branchRid === 'string' ? (stored as FdeSession) : null
+  return normalizeFde(await $.store.get('fdeOpen').catch(() => null))
+}
+
+// rid -> the namespace it is in, for the lookups of one binding. Only a
+// successful batch-get is cached, so a failed one is looked up again, and the
+// operator's answer to a failed check is never remembered.
+const spaceCache = new Map<string, string | null>()
+const SPACE_CACHE_MAX = 10_000
+
+function rememberSpaces(spaces: ReadonlyMap<string, string | null>): void {
+  for (const [rid, spaceRid] of spaces) {
+    spaceCache.set(rid, spaceRid)
+    if (spaceCache.size <= SPACE_CACHE_MAX) continue
+    const oldest = spaceCache.keys().next().value
+    if (typeof oldest === 'string') spaceCache.delete(oldest)
+  }
+}
+
+/** While bound, the namespace in scope is the session's: nothing may move it. */
+const namespaceLocked = (fde: FdeSession) =>
+  `FDE mode (${fde.branchName}) holds this session to ${fde.namespace ? `namespace ${fde.namespace.name}` : 'no namespace'}; /fde end first.`
+
+/** `space list` as namespaces: rid, display name (or path) and path. */
+function spacesFrom(envelope: Envelope): FoundryNamespace[] {
+  return listItems(envelope, 'spaces').flatMap(entry => {
+    const rid = asString(entry.rid)
+    const path = asString(entry.path)
+    return rid === '' ? [] : [{ rid, name: asString(entry.display_name) || path, path }]
+  })
+}
+
+const couldNotBind = (ontology: FoundryNamed, namespace: FoundryNamespace, why: string) =>
+  `Could not check that the ontology ${ontology.name} is in ${namespace.name} (${why}). FDE mode stays off; try /fde on again.`
+
+/**
+ * Why a write names something outside the bound namespace, or null. A RID this
+ * session has not placed costs one batch-get, cached for the binding; a lookup
+ * that cannot run asks the operator rather than failing closed.
+ */
+async function namespaceCheck($: EngineInterface, fde: FdeSession, args: string[], texts: readonly string[]): Promise<string | null> {
+  const scanned = namespaceScan(fde, args, texts)
+  if ('deny' in scanned) return scanned.deny
+  const failures: string[] = []
+  for (const argv of batchGetArgs(scanned.lookup.filter(rid => !spaceCache.has(rid)))) {
+    const envelope = await runOrthanc($, argv, fde.profile, 60_000)
+    if (isErrorEnvelope(envelope)) failures.push(errorsOf(envelope))
+    else rememberSpaces(spacesOf(envelope.data, argv.slice(2)))
+  }
+  const denied = namespaceDeny(
+    fde,
+    new Map(scanned.lookup.map(rid => [rid, spaceCache.get(rid) ?? null] as [string, string | null])),
+  )
+  if (denied !== null || failures.length === 0 || fde.namespace === null) return denied
+  const error = failures.join('; ')
+  const unchecked = await $.ui
+    .ask(`FDE mode (${fde.branchName}): the namespace check could not run (${error}). Run this write anyway, unchecked against ${fde.namespace.name}?`, {
+      header: 'FDE',
+      options: ['Run unchecked', 'Do not run'],
+    })
+    .catch(() => null)
+  return unchecked === 'Run unchecked'
+    ? null
+    : `FDE mode (${fde.branchName}): the namespace check could not run (${error}), and the operator declined or could not be asked, so the call was not run.`
 }
 
 /**
@@ -712,8 +780,9 @@ async function filesSignature(
   command: string,
   args: string[],
   files: { required: string[]; optional: string[] },
-): Promise<string | { deny: string }> {
+): Promise<{ signature: string; texts: string[] } | { deny: string }> {
   const hashes: Record<string, string> = {}
+  const texts: string[] = []
   for (const file of [...files.required, ...files.optional]) {
     // Only regular files are read, and only up to a size, so a device or FIFO
     // argument cannot hang the gate.
@@ -727,8 +796,9 @@ async function filesSignature(
     const foreign = foreignRids(fde, text)
     if (foreign) return { deny: `FDE mode: ${foreign}` }
     hashes[file] = await contentHash(text)
+    texts.push(text)
   }
-  return planSignature(command, args, hashes)
+  return { signature: planSignature(command, args, hashes), texts }
 }
 
 async function fdeGate(
@@ -744,8 +814,11 @@ async function fdeGate(
   const next = { ...input, command: resolved.path, args: bound.args }
   if (!isMutation) return { input: next, plan: null }
   const files = fileCandidates(bound.args, await sessionCwd($), await homeDir($))
-  const signature = await filesSignature($, fde, resolved.path, bound.args, files)
-  if (typeof signature !== 'string') return signature
+  const pinned = await filesSignature($, fde, resolved.path, bound.args, files)
+  if ('deny' in pinned) return pinned
+  const outside = await namespaceCheck($, fde, bound.args, pinned.texts)
+  if (outside !== null) return { deny: outside }
+  const signature = pinned.signature
   const isApply = hasApply(bound.args)
   const gated = planGate(fde, signature, isApply)
   if (gated) return { deny: gated }
@@ -787,6 +860,10 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
       await $.store.set('fdeOpen', null)
       return `${open.reason} Not resumed; the earlier binding is forgotten.`
     }
+    // The prompt must show what the resumed session is held to, not what was in
+    // scope while the mode was off.
+    const bound = await currentScope($)
+    if (bound.namespace?.rid !== earlier.namespace?.rid) await saveScope($, namespaceChanged(bound, earlier.namespace))
     await setFde($, earlier)
     return `Resumed.\n${fdeStatus(earlier)}`
   }
@@ -794,6 +871,24 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
   const scope = await currentScope($)
   if (scope.profile === 'unknown') return 'No Foundry stack is active. Run /profile first.'
   if (scope.ontology === null) return 'Choose the ontology first (/ontology): the branch is made on it.'
+  // With a namespace in scope, the session holds it: nothing is made until the
+  // ontology is in it, so a refused start leaves no branch behind.
+  const namespace = scope.namespace
+  let spaces: FoundryNamespace[] = []
+  if (namespace !== null) {
+    const listed = await runOrthanc($, ['space', 'list'], scope.profile, 60_000)
+    if (isErrorEnvelope(listed)) return couldNotBind(scope.ontology, namespace, `space list failed: ${errorsOf(listed)}`)
+    spaces = spacesFrom(listed)
+    const located = await runOrthanc($, ['resource', 'batch-get', scope.ontology.rid], scope.profile, 60_000)
+    if (isErrorEnvelope(located)) return couldNotBind(scope.ontology, namespace, `batch-get failed: ${errorsOf(located)}`)
+    const spaceRid = spacesOf(located.data, [scope.ontology.rid]).get(scope.ontology.rid) ?? null
+    if (spaceRid === null)
+      return `The ontology ${scope.ontology.name} is not in any namespace, so FDE mode cannot hold the session to ${namespace.name}. /namespace clear runs FDE mode without one. FDE mode stays off.`
+    if (spaceRid !== namespace.rid) {
+      const found = spaces.find(space => space.rid === spaceRid)
+      return `The ontology ${scope.ontology.name} is in ${found ? found.name : `another namespace (${spaceRid})`}, not ${namespace.name}, the namespace in scope. Choose an ontology in ${namespace.name} (/ontology) or another namespace (/namespace). FDE mode stays off.`
+    }
+  }
   let branchRid: string
   let branchName: string
   if (parsed.kind === 'start') {
@@ -817,6 +912,8 @@ async function fdeCommand($: EngineInterface, args: string): Promise<string> {
     startedAt: new Date().toISOString(),
     plans: [],
     applied: [],
+    namespace: scope.namespace,
+    spaces,
   }
   await setFde($, fde)
   return `${fdeStatus(fde)}\nOntology writes in this session now go to this branch only, and each --apply needs its dry run first.`
@@ -888,13 +985,7 @@ async function pickerSource(
   if (kind === 'namespace') {
     const envelope = await runOrthanc($, ['space', 'list'], scope.profile, 60_000)
     if (isErrorEnvelope(envelope)) return `space list failed: ${errorsOf(envelope)}`
-    const rows = listItems(envelope, 'spaces')
-      .map(entry => ({
-        key: asString(entry.rid),
-        label: asString(entry.display_name) || asString(entry.path),
-        hint: asString(entry.path),
-      }))
-      .filter(entry => entry.key !== '')
+    const rows = spacesFrom(envelope).map(space => ({ key: space.rid, label: space.name, hint: space.path }))
     if (rows.length === 0) return 'No namespaces are visible on this stack. No selection was saved.'
     return {
       title: 'Namespace',
@@ -964,6 +1055,8 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     return `Ontology: ${pick.label}. Projects, types, functions and object instances were cleared.`
   }
   if (picker.kind === 'namespace') {
+    const bound = await fdeState($)
+    if (bound !== null) return namespaceLocked(bound)
     const pick = chosen[0]
     if (pick === undefined) return 'No namespace selected.'
     if (pick.key === '') {
@@ -1034,6 +1127,10 @@ async function openPicker($: EngineInterface, kind: FoundryPickerKind, source: S
 async function runPicker($: EngineInterface, kind: FoundryPickerKind, args: string, options: PickerOptions = {}): Promise<string> {
   const scope = await currentScope($)
   const query = args.trim()
+  if (kind === 'namespace') {
+    const bound = await fdeState($)
+    if (bound !== null) return namespaceLocked(bound)
+  }
   if (query === 'clear' && kind !== 'profile') {
     if (kind === 'ontology') await saveScope($, ontologyChanged(scope, null))
     if (kind === 'namespace') await saveScope($, namespaceChanged(scope, null))
@@ -1221,7 +1318,10 @@ async function treeText($: EngineInterface): Promise<string> {
 }
 
 async function clearFromTree($: EngineInterface, target: ClearTarget): Promise<void> {
-  await saveScope($, applyClear(await currentScope($), target))
+  const scope = await currentScope($)
+  // FDE mode holds the namespace: the pane's clear button clears nothing of it.
+  if (target.type === 'namespace' && (await fdeState($)) !== null) return
+  await saveScope($, applyClear(scope, target))
 }
 
 // ---------- registration ----------
@@ -1263,8 +1363,12 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string): 
       const wanted = args.trim()
       const scope = await currentScope($)
       if (wanted === 'clear') {
-        await saveScope($, emptyScope(scope.profile, scope.host))
-        return 'Foundry context cleared.'
+        const bound = await fdeState($)
+        const namespace = bound?.namespace ?? null
+        await saveScope($, { ...emptyScope(scope.profile, scope.host), namespace })
+        return namespace === null
+          ? 'Foundry context cleared.'
+          : `Foundry context cleared; the namespace ${namespace.name} stays: FDE mode holds it until /fde end.`
       }
       if (wanted === 'ontology') return runPicker($, 'ontology', '')
       const branch = (await $.state.get(BRANCH)).value ?? null
@@ -1382,7 +1486,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (plan !== null && plan.files.length > 0) {
     const args = Array.isArray(input.args) ? input.args.map(String) : []
     const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
-    if (now !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
+    if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
   }
   executed = true
   const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
@@ -1579,17 +1683,22 @@ export const register: Register = on => {
     )
   })
 
-  // FDE mode band: the goal and branch stay in view while the session is bound.
+  // FDE mode band: the goal and branch stay in view while the session is bound,
+  // above whatever the other plugins draw there.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const beneath = await next(e)
     const fde = await read($, fdeAtom)
-    if (fde === null || e.props.hasSurvey) return next(e)
+    if (fde === null || e.props.hasSurvey) return beneath
     const { Box, Text } = $.ui.resolve(e)
     return (
-      <Box>
-        <Text color="yellow" bold>
-          FDE
-        </Text>
-        <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+      <Box flexDirection="column">
+        {beneath}
+        <Box>
+          <Text color="yellow" bold>
+            FDE
+          </Text>
+          <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName}${fde.namespace ? ` · ${fde.namespace.name}` : ''} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+        </Box>
       </Box>
     )
   })

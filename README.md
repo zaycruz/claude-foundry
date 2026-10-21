@@ -95,8 +95,9 @@ mod never falls back to Foundry REST.
 `/project` and the Compass pickers list only its projects, `/search` stays under
 its path, and the prompt tells Claude to do the same. Choosing a different
 namespace clears the projects and Compass resources picked before; choosing
-the same one or clearing it keeps them. Like project scope it steers discovery;
-the gate does not deny writes outside it.
+the same one or clearing it keeps them. Outside FDE mode it steers discovery
+only; the gate does not deny writes outside it. FDE mode holds a session to it
+(below).
 
 ## FDE mode
 
@@ -123,10 +124,22 @@ an open agent branch instead. While bound:
   refused apply, or one Orthanc rejects as a usage error, gives it back; any
   other failure keeps it spent, since Foundry may have changed. Directory
   arguments are not hashed, and a file over 20 MB is refused.
-- The goal and branch go into the system prompt and a band above the prompt,
-  and every turn is traced (not only the ones that touch Foundry).
+- With a namespace in scope (`/namespace`), FDE mode holds the session to it.
+  `/fde on` and `/fde --branch` first check that the ontology is in it, and
+  refuse before any branch exists if it is not, if it is in no namespace, or
+  if the check cannot run. While bound, every resource a write names, in its
+  arguments or in the files it reads, inputs included, must be in that
+  namespace: a RID (looked up with `resource batch-get`, once per binding) or a
+  Compass path under another namespace is refused. RIDs `batch-get` does not
+  know (branches, transactions, malformed ones) pass. If the lookup itself
+  fails, the write asks the operator (`Run unchecked` or not) instead of
+  failing closed; with no one to ask, it does not run. Reads are not checked.
+  `/namespace`, `/scope clear` and the pane's clear button leave the namespace
+  as it is until `/fde end`.
+- The goal, branch and namespace go into the system prompt and a band above
+  the prompt, and every turn is traced (not only the ones that touch Foundry).
 
-`/fde end` prints a handoff (branch, applied writes, how to close it) and
+`/fde end` prints a handoff (branch, namespace, applied writes, how to close it) and
 leaves the branch open: merging or closing it is the operator's call. If a
 session ends while bound, the next one offers `/fde resume`. The mode only
 adds checks. The branch rule, the approval ladder and the destructive rule
