@@ -33,7 +33,8 @@
 //  D20 The session switched stacks after binding; writes go to a branch on another stack.
 //  D21 A write names another ontology than the one the branch belongs to.
 //  D22 FDE off changes nothing (the rest of the suite still holds).
-//  D23 The mode loosens a check: a bound write skips the ladder, or a delete stops asking.
+//  D23 The mode loosens a check: a bound write skips the ladder, or a delete stops asking
+//      outside yolo (in yolo nothing asks: yolo.test.ts Y1).
 //  D24 The prompt block, status or handoff omits the branch, or leaks something secret-shaped.
 //  D25 The handoff merges or closes the branch, or does not say it is still open.
 //  D26 Plan and apply records grow without bound.
@@ -206,12 +207,13 @@ test('D15 D16: the request file is part of the plan; an edit after the dry run v
   expect(await contentHash('same')).toBe(await contentHash('same'))
 })
 
-test('D23: a bound write still goes through the ladder; a delete still asks in yolo', async () => {
+test('D23: a bound write still goes through the ladder; a delete still asks outside yolo', async () => {
   const bound = bind('ontology object-type-delete', [ONT, 'T'])
   expect('args' in bound).toBe(true)
   const classified = classifyCall(CLI, { command: 'ontology object-type-delete', args: (bound as { args: string[] }).args }, MANIFEST, RID)
   expect(classified?.error).toBe(undefined)
-  expect(ladderDecision('yolo', classified!, { action: 'approve', reason: 'ok' }).outcome).toBe('ask')
+  expect(ladderDecision('allow-edits', classified!, { action: 'approve', reason: 'ok' }).outcome).toBe('ask')
+  expect(ladderDecision('yolo', classified!, { action: 'approve', reason: 'ok' }).outcome).toBe('run')
 })
 
 test('D26: plan and apply records are capped', async () => {

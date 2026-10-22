@@ -47,21 +47,22 @@ test('reads, clone and non-Foundry tools never reach the ladder', async () => {
   expect(classifyCall('Bash', { command: 'orthanc --agent ontology list' }, MANIFEST, null)).toBe(null)
 })
 
-test('destructive mutations ask in every mode, yolo included', async () => {
+test('destructive mutations ask in every mode but yolo, where they run', async () => {
   const deleting = classifyCall(CLI, { command: 'ontology object-type-delete', args: ['T', '--branch', GLOBAL] }, MANIFEST, 'agent/x')
   expect(deleting?.isDestructive).toBe(true)
-  for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  expect(ladderDecision('yolo', deleting!).outcome).toBe('run')
+  for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
     expect(ladderDecision(mode, deleting!, { action: 'approve', reason: 'ok' }).outcome).toBe('ask')
   }
   const forced = classifyCall(CLI, { command: 'dataset create', args: ['foo', '--force'] }, MANIFEST, 'agent/x')
   expect(forced?.isDestructive).toBe(true)
 })
 
-test('protected baselines ask unless yolo; branchless mutations skip the branch gate', async () => {
+test('protected baselines ask, and are refused in yolo; branchless mutations skip the branch gate', async () => {
   const onMain = classifyCall(CLI, { command: 'dataset create', args: ['--branch', 'main'] }, MANIFEST, 'agent/x')
   expect(onMain?.targetsProtected).toBe(true)
   expect(ladderDecision('allow-edits', onMain!).outcome).toBe('ask')
-  expect(ladderDecision('yolo', onMain!).outcome).toBe('run')
+  expect(ladderDecision('yolo', onMain!).outcome).toBe('block')
   const created = classifyCall(CLI, { command: 'dataset create', args: ['x'] }, MANIFEST, null)
   expect(created?.isBranchScoped).toBe(false)
   expect(ladderDecision('allow-edits', created!).outcome).toBe('run')
