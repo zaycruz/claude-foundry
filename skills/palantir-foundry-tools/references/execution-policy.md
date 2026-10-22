@@ -15,9 +15,9 @@ Use this policy whenever the Foundry tool decision flow reaches documentation, r
 All agent work happens on branches. The mod blocks anything else in every approval mode.
 
 1. Ontology: create a global branch (`global-branch create agent/<kebab-name>`) and pass its RID (`ri.branch..branch.…`) as `--branch` on every ontology write. An ontology branch RID is not enough: only a global branch is provably not main.
-2. Datasets, streams, builds, `cp`: pass one `--branch <work branch>`, never `master` or `main`. Create a dataset branch with `dataset branches create <dataset> agent-<kebab-name>`.
+2. Datasets, streams, builds, `cp`, connectivity imports and repository imports: pass one `--branch <work branch>`, never `master` or `main`. Create a dataset branch with `dataset branches create <dataset> agent-<kebab-name>`.
 3. Code: push to a work branch with `repository push <rid> refs/heads/<work> refs/heads/<work>` and open a pull request. Never `--allow-default-branch`, never raw `git push`.
-4. Promotion is the operator's: do not merge, accept or approve proposals. A release tag (`repository tag create --apply`) asks the operator in every mode: run it with orthanc_cli, and the operator approves or declines it in the dialog. `ontology object-upsert`, `object-upsert-batch` and `action-apply-with-overrides` cannot take a branch, so agents do not run them.
+4. Promotion is the operator's: do not merge, accept or approve proposals. A release tag (`repository tag create --apply`) asks the operator in every mode except yolo: run it with orthanc_cli, and the operator approves or declines it in the dialog (in yolo it runs at once). `ontology object-upsert`, `object-upsert-batch` and `action-apply-with-overrides` cannot take a branch, so agents do not run them.
 
 5. Writes go through `orthanc_cli` only. Bash may run Orthanc reads; an Orthanc write in Bash, in any wrapping, is blocked.
 
