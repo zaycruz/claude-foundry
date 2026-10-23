@@ -1,6 +1,6 @@
 {
   "name": "foundry",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Palantir Foundry for Claude Code: Orthanc tools, an approval ladder for Foundry mutations, scoped Foundry context, one slash command per Foundry resource and a /foundry context view",
   "author": { "name": "Zay Cruz", "url": "https://github.com/zaycruz" },
   "repository": "https://github.com/zaycruz/claude-foundry",

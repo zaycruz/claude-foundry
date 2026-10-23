@@ -47,21 +47,22 @@ test('reads, clone and non-Foundry tools never reach the ladder', async () => {
   expect(classifyCall('Bash', { command: 'orthanc --agent ontology list' }, MANIFEST, null)).toBe(null)
 })
 
-test('destructive mutations ask in every mode, yolo included', async () => {
+test('destructive mutations ask in every mode but yolo, where they run', async () => {
   const deleting = classifyCall(CLI, { command: 'ontology object-type-delete', args: ['T', '--branch', GLOBAL] }, MANIFEST, 'agent/x')
   expect(deleting?.isDestructive).toBe(true)
-  for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  expect(ladderDecision('yolo', deleting!).outcome).toBe('run')
+  for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
     expect(ladderDecision(mode, deleting!, { action: 'approve', reason: 'ok' }).outcome).toBe('ask')
   }
   const forced = classifyCall(CLI, { command: 'dataset create', args: ['foo', '--force'] }, MANIFEST, 'agent/x')
   expect(forced?.isDestructive).toBe(true)
 })
 
-test('protected baselines ask unless yolo; branchless mutations skip the branch gate', async () => {
+test('protected baselines ask in every mode, yolo included; branchless mutations skip the branch gate', async () => {
   const onMain = classifyCall(CLI, { command: 'dataset create', args: ['--branch', 'main'] }, MANIFEST, 'agent/x')
   expect(onMain?.targetsProtected).toBe(true)
   expect(ladderDecision('allow-edits', onMain!).outcome).toBe('ask')
-  expect(ladderDecision('yolo', onMain!).outcome).toBe('run')
+  expect(ladderDecision('yolo', onMain!).outcome).toBe('ask')
   const created = classifyCall(CLI, { command: 'dataset create', args: ['x'] }, MANIFEST, null)
   expect(created?.isBranchScoped).toBe(false)
   expect(ladderDecision('allow-edits', created!).outcome).toBe('run')
@@ -261,10 +262,12 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
   expect(cli('cp', ['ri.a', 'ri.f', '-b', 'agent-copy', '--apply'])?.error).toBe(undefined)
 })
 
-test('F21 F22: a tag apply asks in every mode (tag.test.ts); repository push reads its destination past boolean flags', async () => {
+// zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag runs there.
+test('F21 F22: a tag apply asks in every mode but yolo (tag.test.ts); repository push reads its destination past boolean flags', async () => {
   const tag = (args: string[]) => classifyCall(CLI, { command: 'repository tag create', args }, MANIFEST, null)
   const applied = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--apply'])
-  expect(MODES.every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  expect(MODES.filter(mode => mode !== 'yolo').every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  expect(ladderDecision('yolo', applied!, approve).outcome).toBe('run')
   expect(ladderDecision('yolo', tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40)])!).outcome).toBe('run')
   const push = (args: string[]) => classifyCall(CLI, { command: 'repository push', args }, MANIFEST, null)
   expect(blockedEverywhere(push(['--apply', 'ri.stemma.main.repository.x', 'refs/heads/a', 'refs/heads/main']))).toBe(true)
@@ -280,6 +283,34 @@ test('F24: the agent cannot write the operator rules', async () => {
   expect(rulesWriteReason('Read', { file_path: '.claude/foundry-rules.md' })).toBe(null)
   expect(rulesWriteReason('Bash', { command: 'cat .claude/foundry-rules.md' })).not.toBe(null)
   expect(rulesWriteReason('Write', { file_path: 'README.md' })).toBe(null)
+})
+
+// hooks-alp, ways this can fail, written before the code:
+//  A1  A shell write naming the plugin's own skill reference files in a
+//      worktree (skills/palantir-foundry-tools/references/*.md) is refused as
+//      an operator file, because `foundry` sits inside a longer directory name.
+//  A2  The fix stops refusing a relative path to the operator's directory after
+//      `cd ~/.claude`: foundry/rules.md, ./foundry/…, "foundry/…", foundry/x/../rules.md.
+test('F25: plugin source that names foundry inside a longer name is not an operator file (hooks-alp)', async () => {
+  const deny = (command: string) => rulesWriteReason('Bash', { command }, '/w', '/Users/x') !== null
+  for (const command of [
+    "sed -i '' 's/every mode/every mode but yolo/' skills/palantir-foundry-tools/references/execution-policy.md",
+    'git add skills/palantir-foundry-tools/references/execution-policy.md README.md',
+    'grep -n mode README.md skills/palantir-foundry-tools/references/execution-policy.md',
+    "python3 - <<'EOF'\nopen('docs/claude-foundry/notes.md', 'w').write('x')\nEOF",
+  ]) {
+    expect({ command, denied: deny(command) }).toEqual({ command, denied: false })
+  }
+  for (const command of [
+    'cd ~/.claude && echo x > foundry/rules.md',
+    'cd ~/.claude; cp x ./foundry/rules.md',
+    'cd ~/.claude; tee "foundry/rules.md" < x',
+    'cd ~/.claude && echo x >foundry/rules.md',
+    'cd ~/.claude && cp x foundry/sub/../rules.md',
+    'cd ~/.claude && cp x {foundry,tmp}/rules.md',
+  ]) {
+    expect({ command, denied: deny(command) }).toEqual({ command, denied: true })
+  }
 })
 
 test('round 3: substitutions, wrappers, help and false positives', async () => {

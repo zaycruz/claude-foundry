@@ -53,12 +53,17 @@ const BRANCH_REQUIRED_PATHS = new Set([
   'streams stream reset',
   'orchestration builds create',
   'cp',
+  // Imports whose output branch defaults to master.
+  'connectivity import create-file',
+  'connectivity import create-table',
+  'repository imports add',
+  'repository imports remove',
 ])
 export const requiresBranch = (path: string) => BRANCH_REQUIRED_PATHS.has(path)
 // Ontology writes Orthanc cannot branch: they change live data on main.
 const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-upsert-batch', 'ontology action-apply-with-overrides'])
 // Promotion into main is the operator's decision, not the agent's. A release
-// tag is not here: it asks the operator each time (see releaseTagCall).
+// tag is not here: it asks the operator outside yolo (see releaseTagCall).
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
@@ -80,6 +85,7 @@ export const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
 const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
   'configure list', 'alias list', 'alias show', 'alias resolve', 'alias export',
+  'ai-fde tools list', 'smoke schedule',
 ])
 
 export type GateClassification = {
@@ -90,7 +96,7 @@ export type GateClassification = {
   targetsProtected: boolean
   isDestructive: boolean
   proposedName?: string
-  /** The question to put to the operator for a release tag apply, in every mode. */
+  /** The question to put to the operator for a release tag apply, outside yolo. */
   release?: string
   error?: string
 }
@@ -118,7 +124,7 @@ function isDestructiveCommand(command: string): boolean {
 }
 
 /** True when any arg names one of these flags, in any case, with or without a
- * `=value` (`--force`, `-f`, `--APPLY`, `--apply=true`). Over-matching only asks more. */
+ * `=value` (`--force`, `--APPLY`, `--apply=true`). Over-matching only asks more. */
 function argsNameFlag(args: readonly string[], names: readonly string[]): boolean {
   return args.some(arg => {
     const flag = unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
@@ -126,8 +132,11 @@ function argsNameFlag(args: readonly string[], names: readonly string[]): boolea
   })
 }
 
-function argsHaveForce(args: readonly string[]): boolean {
-  return argsNameFlag(args, ['--force', '-f'])
+// The local commands where -f is --force. Elsewhere -f is --format or --folder.
+const SHORT_FORCE = new Set(['configure', 'configure profile create', 'configure delete', 'alias add', 'onboarding'])
+
+function argsHaveForce(command: string, args: readonly string[]): boolean {
+  return argsNameFlag(args, SHORT_FORCE.has(command) ? ['--force', '-f'] : ['--force'])
 }
 
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
@@ -261,10 +270,10 @@ export function branchRuleReason(command: string, args: readonly string[]): stri
   if (PROMOTIONS.has(command)) {
     return `'${command}' promotes work (a merge, an approval or a release). The operator does it; the agent does not.`
   }
+  if (argsNameFlag(args, ['--allow-default-branch'])) {
+    return `'${command} --allow-default-branch' writes the default branch. Use a work branch (and, for code, a pull request).`
+  }
   if (command === 'repository push') {
-    if (args.some(arg => unquote(arg).replace(/=.*$/, '').toLowerCase() === '--allow-default-branch')) {
-      return "'repository push --allow-default-branch' pushes to the default branch. Push to a work branch and open a pull request."
-    }
     const found = positionals(args)
     if (found.length !== 3) {
       return `'repository push' takes exactly <repository rid> <local ref> <destination ref>; found ${found.length} positionals, so the destination cannot be checked.`
@@ -325,7 +334,7 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
   }
   const linked = link === null ? '' : ` (linked to Foundry branch ${link})`
   return {
-    release: `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag is a release: the operator approves each one, in every mode.`,
+    release: `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag is a release: the operator approves each one.`,
   }
 }
 
@@ -338,7 +347,9 @@ function orthancClassification(
   const base = {
     command,
     hasWorkingBranch: branchIsWorking(workingBranch),
-    targetsProtected: targetsProtected(rawInput),
+    // `-b` is --branch in every command, so every spelling of it names the branch.
+    targetsProtected:
+      targetsProtected(rawInput) || flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue),
   }
   if (!BRANCH_CREATION_PATHS.includes(command)) {
     const refused = branchRuleReason(command, args)
@@ -350,7 +361,7 @@ function orthancClassification(
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
-      isDestructive: isDestructiveCommand(command) || argsHaveForce(args),
+      isDestructive: isDestructiveCommand(command) || argsHaveForce(command, args),
       ...(release !== null ? release : {}),
       ...(refused ? { error: refused } : {}),
     }
@@ -513,14 +524,34 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
   return null
 }
 
-/** One pass over a shell line as the shell reads it: the words of each simple
- * command, plus the command text the shell runs from inside words (`$(…)` and
- * backquotes in double quotes or an unquoted heredoc). Redirect targets are
- * data. A heredoc or here-string is data too, unless its command reads stdin
- * as code: then a shell's text is code, and an interpreter's text that
- * mentions orthanc makes the line `hidden`. Single-quoted text stays literal. */
-function shellWords(command: string): { segments: string[][]; code: string[]; hidden: boolean } {
-  const segments: string[][] = []
+/** One simple command: its words; fed: a heredoc or here-string feeds its stdin; split: it ended at an unquoted $( or backquote. */
+export type Segment = { words: string[]; fed: boolean; split: boolean }
+
+// Code that can start another process, per interpreter.
+const SPAWNS: [RegExp, RegExp][] = [
+  [/^python/, /subprocess|\bpty\b|ctypes|pexpect|plumbum|importlib|__import__|\brunpy\b|\bgetattr\b|\bbuiltins\b|\b(exec|eval|compile)\s*\(|\b(import|from)\s+(sh|commands)\b|\bos\s*\.\s*(system|popen|exec|spawn|posix_spawn|fork)|\b(system|popen[234]?|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?|forkpty)\s*\(|\bfrom\s+os\s+import\b[^\n;]*\b(system|popen|exec|spawn|posix_spawn|fork)/],
+  [/^(node|deno|bun)$/, /child_process|\bexec(Sync|File|FileSync)?\s*\(|\bspawn|\bfork\s*\(|Deno\s*\.\s*(Command|run)|Bun\s*\.\s*(spawn|\$)|\$\s*`|\beval\s*\(|\bFunction\s*\(|\bimport\s*\(|\brequire\s*\(\s*[^'"\s]|\bexeca\b|\bzx\b|process\s*\.\s*binding/],
+  [/^ruby$/, /\bsystem\b|\bexec\b|\bspawn\b|`|%x|\bpopen|Open3|\beval\b|\bfork\b|\bsyscall\b|\bPTY\b|\bsend\s*\(|\b(instance|class|module)_eval\b|\bKernel\b/],
+  [/^perl$/, /\bsystem\b|\bexec\b|`|\bqx\b|\bopen\b[^;]*\||\beval\b|\bfork\b|\bsyscall\b|IPC::|\bpipe\b/],
+  [/^awk$/, /\bsystem\s*\(|\bgetline\b|\|/],
+  [/^osascript$/, /do\s+(shell\s+)?script|doShellScript|NSTask|\bObjC\b/i],
+]
+
+/** True when `code`, run by `runner` (a CODE_RUNNERS basename), can start a process. Over-matching only refuses more. */
+function spawns(runner: string, code: string): boolean {
+  const entry = SPAWNS.find(([name]) => name.test(runner.toLowerCase()))
+  return entry === undefined || entry[1].test(code)
+}
+
+/** One pass over a shell line as the shell reads it: the segments of each
+ * simple command, plus the command text the shell runs from inside words
+ * (`$(…)` and backquotes in double quotes or an unquoted heredoc). Redirect
+ * targets are data. A heredoc or here-string is data too, unless its command
+ * reads stdin as code: then a shell's text is code, and an interpreter's text
+ * makes the line `hidden` when the line names orthanc and the text can start a
+ * process. Single-quoted text stays literal. */
+function shellWords(command: string): { segments: Segment[]; code: string[]; hidden: boolean } {
+  const segments: Segment[] = []
   const code: string[] = []
   const heredocs: { delimiter: string; expands: boolean; tabs: boolean; owner: string[] }[] = []
   // Text fed to a command's stdin, judged once its line is complete.
@@ -541,10 +572,10 @@ function shellWords(command: string): { segments: string[][]; code: string[]; hi
     word = ''
     quoted = false
   }
-  const endSegment = () => {
+  const endSegment = (split = false) => {
     endWord()
     target = null
-    if (words.length > 0) segments.push(words)
+    if (words.length > 0) segments.push({ words, fed: false, split })
     words = []
   }
   // At a newline: skip the bodies of the heredocs opened on the line that ends here.
@@ -592,7 +623,7 @@ function shellWords(command: string): { segments: string[][]; code: string[]; hi
       index = skipHeredocs(index)
     } else if (/\s/.test(char)) endWord()
     else if (char === '$' && command[index + 1] === '(') {
-      endSegment()
+      endSegment(true)
       index += 1
     } else if (char === '<' || char === '>' || (char === '&' && command[index + 1] === '>')) {
       // A file descriptor glued to the redirect (`2>`, `0<<`) is not a word.
@@ -612,15 +643,21 @@ function shellWords(command: string): { segments: string[][]; code: string[]; hi
         if (tabs) index += 1
         target = tabs ? 'heredoc-tabs' : 'heredoc'
       } else target = 'file'
-    } else if (SHELL_OPERATORS.includes(char)) endSegment()
+    } else if (SHELL_OPERATORS.includes(char)) endSegment(char === '`')
     else word += char
   }
   endSegment()
+  // A heredoc opened on the last line has no body to skip, but still feeds its owner.
+  const owners = new Set([...heredocs, ...fed].map(item => item.owner))
+  for (const segment of segments) segment.fed = owners.has(segment.words)
   let hidden = false
   for (const { owner, text } of fed) {
     const reader = stdinReader(owner)
     if (reader === 'shell') code.push(text)
-    else if (reader === 'interpreter' && MENTIONS_ORTHANC.test(text)) hidden = true
+    else if (reader === 'interpreter' && NAMES_ORTHANC.test(command)) {
+      const runner = basename(owner.find(word => CODE_RUNNERS.test(basename(word))))
+      if (spawns(runner, text)) hidden = true
+    }
   }
   return { segments, code, hidden }
 }
@@ -635,8 +672,8 @@ const LAUNCHERS = new Set([
   'exec', 'run', 'ssh', 'sudo', 'doas', 'env', 'xargs', 'nohup', 'timeout', 'nice', 'stdbuf', 'setsid', 'chroot',
   'unshare', 'nsenter', 'flock', 'time', 'command', 'caffeinate',
 ])
-// A segment hidesOrthanc refuses whenever the line mentions orthanc.
-const UNREADABLE = ['$']
+// A segment hidesOrthanc refuses whenever the line names orthanc.
+const UNREADABLE: Segment = { words: ['$'], fed: false, split: false }
 
 /** The words of a segment that the shell runs as code: the value after -c
  * (sh -c, bash -lc, su -c, npx -c), env -S, and everything after eval or ssh.
@@ -661,10 +698,10 @@ function codeWords(words: readonly string[]): string[] {
  * it (see codeWords and shellWords), so free text that mentions orthanc in a
  * commit message, a PR body or an echo stays text. Code nested past the limit
  * comes back as a `$` segment, which hidesOrthanc refuses. */
-export function commandSegments(command: string, depth = 0): string[][] {
+export function commandSegments(command: string, depth = 0): Segment[] {
   const { segments, code, hidden } = shellWords(command)
   const own = hidden ? [...segments, UNREADABLE] : segments
-  const nested = [...code, ...segments.flatMap(codeWords)].filter(item => item.trim() !== '')
+  const nested = [...code, ...segments.flatMap(segment => codeWords(segment.words))].filter(item => item.trim() !== '')
   if (nested.length === 0) return own
   if (depth >= NESTING_LIMIT) return [...own, UNREADABLE]
   return [...own, ...nested.flatMap(item => commandSegments(item, depth + 1))]
@@ -672,7 +709,8 @@ export function commandSegments(command: string, depth = 0): string[][] {
 
 const basename = (word: string | undefined) => (word ?? '').split('/').at(-1)?.replace(/^!/, '') ?? ''
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
-const MENTIONS_ORTHANC = /(^|[^\w/.-])orthanc([^\w.-]|$)|ORTHANC_BIN/i
+// orthanc as a word or the last segment of a path (`/opt/bin/orthanc`), not part of a longer name or a directory in a path.
+const NAMES_ORTHANC = /(?<![\w.-])orthanc(?![\w./-])|ORTHANC_BIN/i
 const isOrthancWord = (word: string) => basename(word).toLowerCase() === 'orthanc' || /\$\{?ORTHANC_BIN\}?/.test(word)
 const WRAPPERS = new Set([
   'env', 'command', 'exec', 'time', 'nohup', 'sudo', 'doas', 'xargs', 'nice', 'timeout', 'caffeinate',
@@ -688,53 +726,119 @@ const NON_EXECUTING = new Set([
   'nano', 'brew', 'mkdir', 'rm', 'cp', 'mv', 'touch', 'tree', 'du', 'diff', 'cargo', 'sed', 'awk',
 ])
 
-/** Where Orthanc starts in a segment: the command word, or the first orthanc
- * word after any head that can run another program (env, sudo, xargs, find
- * -exec, npx, ssh, `!`, …). -1 when the segment does not run Orthanc. */
-function orthancStart(words: readonly string[]): number {
+/** The index of the first word past the wrapper prefix: assignments, wrappers,
+ * their flags and the numbers they take (`timeout 5`, `nice -n 10`). */
+function commandHead(words: readonly string[]): number {
   let index = 0
-  while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1
-  if (index >= words.length) return -1
-  if (isOrthancWord(words[index]!)) return index
-  if (NON_EXECUTING.has(basename(words[index]))) return -1
-  return words.findIndex((word, position) => position > index && isOrthancWord(word))
-}
-
-/** True when a segment runs Orthanc in a form the parser cannot read: a
- * variable or eval as the command, code passed to an interpreter, or an
- * Orthanc command stored in a variable. `command` is the whole shell line. */
-function hidesOrthanc(words: readonly string[], command: string): boolean {
-  if (!MENTIONS_ORTHANC.test(command)) return false
-  let index = 0
-  // Wrappers, their flags and the numbers they take (`timeout 5`, `nice -n 10`).
   while (index < words.length && (ASSIGNMENT.test(words[index]!) || WRAPPERS.has(basename(words[index])) || words[index]!.startsWith('-') || /^[0-9.]+[smhd]?$/.test(words[index]!))) {
-    if (ASSIGNMENT.test(words[index]!) && MENTIONS_ORTHANC.test(words[index]!.replace(ASSIGNMENT, ''))) return true
     index += 1
   }
+  return index
+}
+
+// A path under a variable (`$X/orthanc-old`, `${X}/out`): an argument, not a command.
+const VARIABLE_PATH = /^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)\//
+
+/** True when the word after `at`, past Orthanc's global flags, starts a call: a
+ * first word of a manifest path (`groups`), a substitution, or a variable that
+ * is not a path. Without a manifest, any word that is not a flag. */
+function startsCall(words: readonly string[], at: number, groups: ReadonlySet<string>): boolean {
+  let index = at + 1
+  while (index < words.length) {
+    const word = words[index]!
+    if (word === '--agent' || word === '--non-interactive' || word.startsWith('--profile=')) index += 1
+    else if (word === '--profile') index += 2
+    else break
+  }
+  const next = words[index]
+  if (next === undefined) return false
+  if (groups.size === 0) return !next.startsWith('-')
+  return groups.has(next.toLowerCase()) || (next.startsWith('$') && !VARIABLE_PATH.test(next)) || next.startsWith('`')
+}
+
+/** True when `flags` make `runner` print and exit without reading code
+ * (`node --version`, `python3 -V`). Python's -v and a shell's -h read stdin. */
+function printsAndExits(runner: string, flags: readonly string[]): boolean {
+  return flags.some(
+    flag =>
+      /^--(version|help)$/.test(flag) ||
+      (/^python/.test(runner) && /^-[hV]$/.test(flag)) ||
+      (/^(node|bun|perl)$/.test(runner) && /^-[hv]$/.test(flag)),
+  )
+}
+
+/** Where Orthanc starts in a segment: the command word, or the first orthanc
+ * word after a head that can run another program (env, sudo, xargs, find
+ * -exec, npx, ssh, a wrapper script, …) when a call follows it. -1 when the
+ * segment does not run Orthanc: `--bin target/debug/orthanc` is an argument. */
+function orthancStart(segment: Segment, groups: ReadonlySet<string>): number {
+  const { words } = segment
+  const head = commandHead(words)
+  if (head >= words.length) return -1
+  if (isOrthancWord(words[head]!)) return head
+  if (NON_EXECUTING.has(basename(words[head]))) return -1
+  for (let position = head + 1; position < words.length; position += 1) {
+    if (!isOrthancWord(words[position]!)) continue
+    // The segment ended at a substitution: the call continues in it.
+    if (startsCall(words, position, groups) || (segment.split && position === words.length - 1)) return position
+  }
+  return -1
+}
+
+/** True when a segment runs Orthanc in a form the parser cannot read: an
+ * assignment of the binary, a variable that may run it, eval, or interpreter
+ * code that can start a process. `command` is the whole shell line;
+ * `assignments` holds every value the line gives each variable. */
+function hidesOrthanc(
+  segment: Segment,
+  command: string,
+  assignments: ReadonlyMap<string, string[]>,
+  groups: ReadonlySet<string>,
+): boolean {
+  if (!NAMES_ORTHANC.test(command)) return false
+  const { words } = segment
+  // Only assignments: `O=/opt/bin/orthanc` stores the binary to run later.
+  if (words.every(word => ASSIGNMENT.test(word))) {
+    return words.some(word => isOrthancWord(unquote(word.replace(ASSIGNMENT, '')).split(/\s+/)[0] ?? ''))
+  }
+  const index = commandHead(words)
   const head = words[index]
   if (head === undefined) return false
-  if (head.startsWith('$')) return true
+  if (head.startsWith('$')) {
+    // A variable run as a command: refused when it may hold the binary, or is run with an Orthanc command.
+    if (NAMES_ORTHANC.test(head)) return true
+    const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)/.exec(head)?.[1]
+    if (name === undefined || name.toUpperCase().includes('ORTHANC')) return true
+    const values = assignments.get(name) ?? []
+    if (values.some(value => NAMES_ORTHANC.test(value))) return true
+    if (values.length > 0 && values.every(value => value !== '' && !/[$`]/.test(value))) return false
+    return startsCall(words, index, groups)
+  }
   const rest = words.slice(index + 1)
-  if (INDIRECT.has(head)) return rest.some(word => MENTIONS_ORTHANC.test(word))
+  if (INDIRECT.has(head)) return rest.some(word => NAMES_ORTHANC.test(word))
   // A shell or interpreter in command position (the head, after `--`, or after
-  // a launcher such as `kubectl exec -i p -- bash`, `docker exec -i c sh`)
-  // reads its code from stdin when it has no script, a script of - or
-  // /dev/stdin, or (a shell) -s.
+  // a launcher such as `kubectl exec -i p -- bash`, `docker exec -i c sh`).
   const runner = words.findIndex(
     (word, position) =>
       position >= index &&
       (SHELLS.test(basename(word)) || CODE_RUNNERS.test(basename(word))) &&
       (position === index || words[position - 1] === '--' || words.slice(index, position).some(earlier => LAUNCHERS.has(basename(earlier)))),
   )
-  if (runner >= 0 && (runner === index || !NON_EXECUTING.has(basename(head)))) {
-    const after = words.slice(runner + 1)
+  if (runner < 0 || (runner !== index && NON_EXECUTING.has(basename(head)))) return false
+  const after = words.slice(runner + 1)
+  // It reads its code from stdin when it has no script (and is not only asked
+  // for its version), a script of - or /dev/stdin, or (a shell) -s. A heredoc
+  // or here-string was judged in shellWords.
+  if (!segment.fed) {
     const script = after.find(word => word === '-' || !word.startsWith('-'))
-    if (script === undefined || script === '-' || script === '/dev/stdin') return true
+    if (script === undefined && !printsAndExits(basename(words[runner]).toLowerCase(), after)) return true
+    if (script === '-' || script === '/dev/stdin') return true
     if (SHELLS.test(basename(words[runner])) && after.some(word => /^-[A-Za-z]*s[A-Za-z]*$/.test(word))) return true
   }
-  // Interpreter code inline (`python3 -c "…orthanc…"`): a word holding code, or the one after -c/-e.
-  return CODE_RUNNERS.test(basename(head)) &&
-    rest.some((word, position) => MENTIONS_ORTHANC.test(word) && (/[\s()'"\[\];]/.test(word) || /^-(c|e|-eval)$/.test(rest[position - 1] ?? '')))
+  // Interpreter code inline (`python3 -c "…"`): the word after -c/-e, or a word that holds code.
+  if (!CODE_RUNNERS.test(basename(words[runner]))) return false
+  const inline = after.filter((word, position) => /^(-c|-e|-E|--eval|-p|--print)$/.test(after[position - 1] ?? '') || /[\s()'"\[\];]/.test(word))
+  return inline.length > 0 && spawns(basename(words[runner]), inline.join('\n'))
 }
 
 /** The Orthanc command a Bash segment runs: global flags skipped, then the longest manifest path. */
@@ -779,14 +883,24 @@ function shellClassification(
     isDestructive: false,
     error,
   })
-  for (const words of commandSegments(command)) {
-    if (hidesOrthanc(words, command)) {
+  const segments = commandSegments(command)
+  // The first words of the manifest paths: what can follow `orthanc` as a call.
+  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
+  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
+  const assignments = new Map<string, string[]>()
+  for (const word of segments.flatMap(segment => segment.words)) {
+    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
+    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
+  }
+  for (const segment of segments) {
+    const { words } = segment
+    if (hidesOrthanc(segment, command, assignments, groups)) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    const start = orthancStart(words)
+    const start = orthancStart(segment, groups)
     if (start < 0) continue
     const call = orthancShellCall(words, start, manifest)
-    if (call.path === '' && !call.help && /\$|`/.test(command)) {
+    if (call.path === '' && !call.help && segment.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
     if (call.help || call.path === '' || call.path === 'repository clone') continue
@@ -871,7 +985,6 @@ export function ladderDecision(
   verdict?: GuardVerdict | null,
 ): LadderDecision {
   if (classification.error) return { outcome: 'block', reason: classification.error }
-  if (classification.release) return { outcome: 'ask', reason: classification.release }
   if (classification.kind === 'branch-creation') {
     if (mode === 'ask-always') {
       return {
@@ -883,16 +996,24 @@ export function ladderDecision(
   }
   const command = classification.command ?? '(foundry mcp write)'
   const note = verdict ? ` ${verdict.reason}` : ''
-  if (classification.isDestructive) {
-    return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode${note}` }
+  // Yolo asks only for a write naming main: no write lands on main without the operator.
+  if (mode === 'yolo' && classification.targetsProtected) {
+    return {
+      outcome: 'ask',
+      reason: `yolo mode: '${command}' names main, master or HEAD as its branch. It runs only if the operator approves; otherwise pass a work branch.`,
+    }
   }
-  if (classification.targetsProtected && mode !== 'yolo') {
+  if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
+  if (classification.release) return { outcome: 'ask', reason: classification.release }
+  if (classification.isDestructive) {
+    return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode but yolo${note}` }
+  }
+  if (classification.targetsProtected) {
     return {
       outcome: 'ask',
       reason: `'${command}' targets a protected baseline (main/master branch or the production ontology)${note}`,
     }
   }
-  if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: no guardrails outside destructive paths' }
   if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval` }
   if (mode === 'allow-edits') return { outcome: 'run', reason: 'allow-edits mode: non-protected mutations run' }
   if (!verdict) return { outcome: 'ask', reason: `'${command}': guard unavailable; failing closed to a human decision` }
@@ -906,10 +1027,14 @@ export function modeGuidance(mode: ApprovalMode): string {
     'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
-    'Release tags (repository tag create --apply) ask the operator in every mode. ' +
-    `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
-    'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
-    'the call is blocked — report it, do not retry blindly.'
+    (mode === 'yolo'
+      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes, --force writes and release tags run at once, ' +
+        'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
+        'if the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
+      : 'Release tags (repository tag create --apply) ask the operator in every mode except yolo. ' +
+        `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
+        'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
+        'the call is blocked — report it, do not retry blindly.')
   )
 }
 
@@ -1012,8 +1137,9 @@ const PROTECTED_FILE = /(^|\/)\.claude\/(foundry-rules\.md|foundry(\/|$))/
 const SECRET_DIR = /(^|\/)\.claude\/foundry(\/|$)/
 // Any shell mention of these is denied, read or write.
 const SHELL_PROTECTED = /\.claude\/+(\.\/+)*foundry\b|foundry-rules|otel\.env|\.claude\/*\*/i
-// A loose mention (a relative foundry/…md path) is denied with a writer.
-const SHELL_MENTION = /\bfound\S*\/\S*\.md/i
+// A loose mention (a relative foundry/…md path) is denied with a writer. The
+// directory starts a path component: skills/palantir-foundry-tools/… is not it.
+const SHELL_MENTION = /(^|[\s'"=/:<>|;&(){},])found\S*\/\S*\.md/i
 const SHELL_WRITES =
   /(>|\btee\b|\bsed\b|\bmv\b|\bcp\b|\brm\b|\bln\b|\btruncate\b|\binstall\b|\bdd\b|\btouch\b|\bperl\b|\bpython[0-9.]*\b|\bnode\b|\bruby\b|\bed\b|\bex\b|\bvim?\b|\bnvim\b|\bcurl\b|\bwget\b|\bchmod\b|\bunlink\b|\brsync\b|\bbun\b|\bdeno\b|\bphp\b|\bawk\b|\blua\b|\bswift\b|\bosascript\b|\btar\b|\bunzip\b|\bcpio\b|\bditto\b|\bpatch\b|\bgit\b|\b(ba|z|da|k|c|tc|fi)?sh\b)/
 // Removing or moving ~/.claude itself removes the operator's rules with it.
