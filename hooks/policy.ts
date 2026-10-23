@@ -996,14 +996,14 @@ export function ladderDecision(
   }
   const command = classification.command ?? '(foundry mcp write)'
   const note = verdict ? ` ${verdict.reason}` : ''
-  // Yolo asks no one: a write naming main is refused, anything else runs.
+  // Yolo asks only for a write naming main: no write lands on main without the operator.
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
-      outcome: 'block',
-      reason: `yolo mode: '${command}' names main, master or HEAD as its branch. Work stays on branches that are not main: pass a work branch.`,
+      outcome: 'ask',
+      reason: `yolo mode: '${command}' names main, master or HEAD as its branch. It runs only if the operator approves; otherwise pass a work branch.`,
     }
   }
-  if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing asks; work stays on branches that are not main' }
+  if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
   if (classification.release) return { outcome: 'ask', reason: classification.release }
   if (classification.isDestructive) {
     return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode but yolo${note}` }
@@ -1028,8 +1028,9 @@ export function modeGuidance(mode: ApprovalMode): string {
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator: deletes, --force writes and release tags run at once, ' +
-        'and the loop guard is off. A write that names main or master as its branch is refused.'
+      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes, --force writes and release tags run at once, ' +
+        'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
+        'if the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Release tags (repository tag create --apply) ask the operator in every mode except yolo. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +

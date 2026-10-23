@@ -14,8 +14,11 @@
 //  Y2  In yolo a release tag apply asks, or does not run when no one can be asked.
 //  Y3  Another mode loosens: ask-always, allow-edits and auto stop asking for a
 //      delete, a --force write or a tag apply.
-//  Y4  In yolo a write that names main, master or HEAD as its branch runs (it did
-//      in 0.5.0) or asks. It is refused, and no one is asked. Any spelling counts
+//  Y4  In any mode a write that names main, master or HEAD as its branch runs
+//      without the operator's approval (in yolo it ran in 0.5.0). zay,
+//      2026-10-23: "we dont want to ever run against the default branch ... unless
+//      we approve runs on master or main". So yolo asks for it, the one dialog yolo
+//      keeps; declined, or no one to ask, it is refused. Any spelling counts
 //      (--branch=main, -b master, -bmain, the args inside the command string);
 //      in 0.5.0 allow-edits ran those without asking. A base, fallback or parent
 //      branch of master (a pull request, a build, a new branch) still runs.
@@ -197,16 +200,24 @@ const ON_MAIN: [string, string[]][] = [
   ['dataset create /Tester/scratch/x -b master --apply', []],
 ]
 
-test('Y4: in yolo a write naming main, master or HEAD as its branch is refused and asks no one', async ($, on) => {
+test('Y4: in yolo a write naming main, master or HEAD as its branch asks; it runs only when approved', async ($, on) => {
   const h = harness(on)
-  for (const [command, args] of ON_MAIN) {
-    const wrote = await write($, command, args)
-    expect({ command, args, denied: typeof wrote.deny === 'string' }).toEqual({ command, args, denied: true })
+  for (const answer of ['Decline', 'throw'] as Answer[]) {
+    h.answer = answer
+    for (const [command, args] of ON_MAIN) {
+      const before = h.asked.length
+      const wrote = await write($, command, args)
+      expect({ answer, command, args, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ answer, command, args, denied: true, asked: 1 })
+    }
+    expect(ran(h, 'dataset create')).toEqual([])
   }
-  expect(h.asked).toEqual([])
-  expect(ran(h, 'dataset create')).toEqual([])
-  expect((await write($, 'dataset create', ['/Tester/scratch/x', '--branch', 'agent-scratch', '--apply'])).deny).toBe(undefined)
+  h.answer = 'Approve'
+  const asked = h.asked.length
+  expect((await write($, 'dataset create', ['/Tester/scratch/x', '--branch', 'main', '--apply'])).deny).toBe(undefined)
+  expect(h.asked.length).toBe(asked + 1)
   expect(ran(h, 'dataset create').length).toBe(1)
+  expect((await write($, 'dataset create', ['/Tester/scratch/x', '--branch', 'agent-scratch', '--apply'])).deny).toBe(undefined)
+  expect(h.asked.length).toBe(asked + 1)
 })
 
 for (const mode of OTHER_MODES) {
@@ -312,9 +323,9 @@ test('Y9: the yolo prompt says nothing asks and what stays refused', async ($, o
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   const text = await prompt($)
   expect(text).toContain('Foundry approval mode: yolo')
-  expect(text).toContain('Nothing asks the operator')
+  expect(text).toContain('Nothing asks the operator except a write on main')
   expect(text).toContain('Writes without a branch, merges and default-branch pushes are blocked in every mode')
-  expect(text).toContain('A write that names main or master as its branch is refused')
+  expect(text).toContain('A write that names main or master as its branch asks the operator')
   expect(text.includes('ask the operator in every mode')).toBe(false)
 })
 

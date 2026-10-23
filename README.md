@@ -16,9 +16,11 @@ says so instead of falling back to REST.
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
   judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
   delete, `--force`) and release tags ask, protected branches ask, and a call
-  repeated three times is blocked. In `yolo` nothing asks: deletes, `--force`
-  writes and release tags run at once, the loop guard is off, and a write
-  naming `main`, `master` or `HEAD` as its branch is refused instead of asked.
+  repeated three times is blocked. In `yolo` only a write on main asks:
+  deletes, `--force` writes and release tags run at once, and the loop guard
+  is off. A write naming `main`, `master` or `HEAD` as its branch runs only
+  when the operator approves it, in every mode; with no one to ask it is
+  refused.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied.
 - **A branch rule** that no approval mode can turn off: agent work happens on

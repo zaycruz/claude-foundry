@@ -58,11 +58,11 @@ test('destructive mutations ask in every mode but yolo, where they run', async (
   expect(forced?.isDestructive).toBe(true)
 })
 
-test('protected baselines ask, and are refused in yolo; branchless mutations skip the branch gate', async () => {
+test('protected baselines ask in every mode, yolo included; branchless mutations skip the branch gate', async () => {
   const onMain = classifyCall(CLI, { command: 'dataset create', args: ['--branch', 'main'] }, MANIFEST, 'agent/x')
   expect(onMain?.targetsProtected).toBe(true)
   expect(ladderDecision('allow-edits', onMain!).outcome).toBe('ask')
-  expect(ladderDecision('yolo', onMain!).outcome).toBe('block')
+  expect(ladderDecision('yolo', onMain!).outcome).toBe('ask')
   const created = classifyCall(CLI, { command: 'dataset create', args: ['x'] }, MANIFEST, null)
   expect(created?.isBranchScoped).toBe(false)
   expect(ladderDecision('allow-edits', created!).outcome).toBe('run')
