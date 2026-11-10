@@ -4,7 +4,15 @@
 
 /** One option of a manifest command, as Orthanc's agent-manifest lists it. */
 export type ManifestFlag = { flag: string; takesValue: boolean; default?: string }
-export type ManifestCommand = { path: string; kind?: string; auth?: string; input?: string; flags?: ManifestFlag[] }
+export type ManifestCommand = {
+  path: string
+  kind?: string
+  auth?: string
+  input?: string
+  flags?: ManifestFlag[]
+  /** The entry's raw `operator_approval`, unread: operatorApprovalQuestion reads it, failing closed. */
+  operatorApproval?: unknown
+}
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 export type ApprovalMode = (typeof APPROVAL_MODES)[number]
@@ -92,6 +100,8 @@ export type GateClassification = {
   proposedName?: string
   /** The question to put to the operator for a release tag apply, in every mode. */
   release?: string
+  /** The question to put to the operator for a write the manifest marks operator_approval, in every mode. */
+  operatorApproval?: string
   error?: string
 }
 
@@ -128,6 +138,44 @@ function argsNameFlag(args: readonly string[], names: readonly string[]): boolea
 
 function argsHaveForce(args: readonly string[]): boolean {
   return argsNameFlag(args, ['--force', '-f'])
+}
+
+// A flag as the manifest may list it in when_all_flags.
+const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
+const QUESTION_ARGS_MAX = 600
+
+/** The every-mode question for a call whose manifest entry carries
+ * `operator_approval`, or null. `{when_all_flags: [...]}` asks when every
+ * listed flag is given (argsNameFlag: any case, `=value`, any order);
+ * `"always"` asks on every call. Anything else is unreadable and asks on every
+ * call: a condition the guard cannot read never lets a call through. */
+export function operatorApprovalQuestion(
+  path: string,
+  args: readonly string[],
+  manifest: readonly ManifestCommand[],
+): string | null {
+  const entry = manifest.find(found => found.path === path)
+  if (entry === undefined || entry.operatorApproval === undefined) return null
+  const value = entry.operatorApproval
+  // JSON escapes newlines and quotes, so an arg cannot forge lines in the question.
+  const shown = JSON.stringify(args)
+  const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
+  const ask = (why: string) => `'${path}' ${cut} weakens a governance control: ${why} The operator approves it in every mode.`
+  if (value === 'always') return ask("Orthanc's agent manifest marks it operator_approval.")
+  const condition = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  const flags = condition?.when_all_flags
+  const readable =
+    condition !== null &&
+    Object.keys(condition).length === 1 &&
+    Array.isArray(flags) &&
+    flags.length > 0 &&
+    flags.every(flag => typeof flag === 'string' && APPROVAL_FLAG.test(flag))
+  if (!readable) {
+    return ask("Orthanc's agent manifest marks it operator_approval in a form the Foundry guard cannot read, so it asks on every call.")
+  }
+  const listed = (flags as string[]).map(flag => flag.toLowerCase())
+  if (!listed.every(flag => argsNameFlag(args, [flag]))) return null
+  return ask(`Orthanc's agent manifest marks it operator_approval when ${listed.join(' ')} are given.`)
 }
 
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
@@ -334,6 +382,7 @@ function orthancClassification(
   args: readonly string[],
   rawInput: unknown,
   workingBranch: string | null,
+  manifest: readonly ManifestCommand[],
 ): GateClassification {
   const base = {
     command,
@@ -346,12 +395,14 @@ function orthancClassification(
       refused === null && command === 'repository tag create' && argsNameFlag(args, ['--apply'])
         ? releaseTagCall(args)
         : null
+    const approval = operatorApprovalQuestion(command, args, manifest)
     return {
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
       isDestructive: isDestructiveCommand(command) || argsHaveForce(args),
       ...(release !== null ? release : {}),
+      ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(refused ? { error: refused } : {}),
     }
   }
@@ -793,7 +844,8 @@ function shellClassification(
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
-    if (classifyOrthancCommand(call.path, manifest) === 'read') continue
+    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null
@@ -845,8 +897,9 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read') return null
-    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch)
+    // A read whose entry also asks for the operator is not let through as a read.
+    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
+    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest)
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {
@@ -872,6 +925,7 @@ export function ladderDecision(
 ): LadderDecision {
   if (classification.error) return { outcome: 'block', reason: classification.error }
   if (classification.release) return { outcome: 'ask', reason: classification.release }
+  if (classification.operatorApproval) return { outcome: 'ask', reason: classification.operatorApproval }
   if (classification.kind === 'branch-creation') {
     if (mode === 'ask-always') {
       return {
@@ -907,6 +961,7 @@ export function modeGuidance(mode: ApprovalMode): string {
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'Release tags (repository tag create --apply) ask the operator in every mode. ' +
+    'So do writes the agent manifest marks operator_approval, such as turning branch protection off. ' +
     `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
     'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
     'the call is blocked — report it, do not retry blindly.'
