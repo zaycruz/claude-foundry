@@ -35,6 +35,25 @@
 //  R11 No manifest could ever be read (no orthanc at start): a later call
 //      after orthanc is installed still fails.
 //
+// From the Opus review of 0a3d8f3 (claude-foundry #9), written before the fixes:
+//  R12 A read that a later-started read overtook gives its caller the older
+//      binary's list after the newer one loaded.
+//  R13 A command's kind changes between versions and the call is judged by
+//      the old kind.
+//  R14 The binary is replaced while the operator approves a call: the call
+//      runs on the new binary, judged by the old one's list.
+//  R15 The binary is deleted, or its new manifest is unreadable: orthanc_cli
+//      keeps judging calls by the old list (for 60 s, again and again), and a
+//      command the new binary marks as a mutation runs as a read.
+//  R16 The spawn finds the binary again by name, so it can start another file
+//      than the one the stat judged.
+//  R17 The 60 s retry counts from the start of a slow failed read, so the
+//      broken binary is started again sooner than 60 s after it failed.
+//  R18 With no binary and no manifest, every call starts two processes that
+//      fail; orthanc_cli tries to read a manifest on its own.
+//  R19 A binary that does not report its version gives a notice that reads
+//      "changed from 0.6.0 to of unknown version".
+//
 // Synthetic binaries and a synthetic file system only.
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
@@ -49,7 +68,16 @@ const envelope = (data: unknown, errors: unknown[] = []) =>
   JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors, meta: {}, warnings: [], artifacts: [], pagination: null })
 
 /** A stand-in orthanc: its version, its command groups, and how its manifest reads. */
-type Binary = { version: string; groups: string[]; manifest?: 'ok' | 'garbage' | 'empty' | 'error' }
+type Binary = {
+  /** null: `version` answers with no version. */
+  version: string | null
+  groups: string[]
+  manifest?: 'ok' | 'garbage' | 'empty' | 'error'
+  /** Extra commands, with their kind. */
+  extra?: { path: string; kind: string }[]
+  /** agent-manifest of this binary takes this long. */
+  delayMs?: number
+}
 type File = { size: number; mtimeMs: number; target?: string }
 
 type Harness = {
@@ -64,6 +92,13 @@ type Harness = {
   stats: string[]
   /** agent-manifest takes this long. */
   manifestMs: number
+  /** argv[0] of every process started. */
+  argv0s: string[]
+  /** Every question put to the operator. */
+  asks: string[]
+  /** Runs while the operator is asked (the wait an approval takes). */
+  onAsk?: () => void
+  store: Map<string, unknown>
 }
 
 const realOf = (h: Harness, path: string) => {
@@ -88,10 +123,13 @@ function launched(h: Harness, argv0: string): string | undefined {
 }
 
 function commandsOf(binary: Binary) {
-  return binary.groups.flatMap(group => [
-    { path: `${group} list`, kind: 'read-only', args: [] },
-    { path: `${group} status`, kind: 'read-only', args: [] },
-  ])
+  return [
+    ...binary.groups.flatMap(group => [
+      { path: `${group} list`, kind: 'read-only', args: [] },
+      { path: `${group} status`, kind: 'read-only', args: [] },
+    ]),
+    ...(binary.extra ?? []).map(command => ({ ...command, args: [] })),
+  ]
 }
 
 function harness(on: On) {
@@ -103,8 +141,12 @@ function harness(on: On) {
     runs: [],
     stats: [],
     manifestMs: 0,
+    argv0s: [],
+    asks: [],
+    store: new Map<string, unknown>([['approvalMode', 'yolo']]),
   }
   on('process.run', async (_$, e) => {
+    h.argv0s.push(e.argv[0] ?? '')
     const real = launched(h, e.argv[0] ?? '')
     if (real === undefined) return { deny: `cannot start ${e.argv[0]}: spawn ${e.argv[0]} ENOENT` }
     const binary = h.binaries.get(real)!
@@ -114,14 +156,15 @@ function harness(on: On) {
     h.runs.push(`${real} ${line}`)
     const reply = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (line === 'agent-manifest') {
-      if (h.manifestMs > 0) await clock.sleep(h.manifestMs)
+      const delay = binary.delayMs ?? h.manifestMs
+      if (delay > 0) await clock.sleep(delay)
       const how = binary.manifest ?? 'ok'
       if (how === 'garbage') return reply('Segmentation fault')
       if (how === 'empty') return reply(envelope({ commands: [] }))
       if (how === 'error') return reply(envelope(null, [{ type: 'internal', message: 'manifest broke' }]))
       return reply(envelope({ commands: commandsOf(binary) }))
     }
-    if (line === 'version') return reply(envelope({ version: binary.version }))
+    if (line === 'version') return reply(envelope(binary.version === null ? {} : { version: binary.version }))
     if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
     if (e.argv.includes('--help')) return reply(`usage of ${line} from orthanc ${binary.version}`)
     return reply(envelope({ ran: line, by: binary.version }))
@@ -139,10 +182,9 @@ function harness(on: On) {
     else h.env.set(e.name, e.value)
     return { value: undefined }
   })
-  const store = new Map<string, unknown>([['approvalMode', 'yolo']])
-  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
-    store.set(e.key, e.value)
+    h.store.set(e.key, e.value)
     return { value: undefined }
   })
   on('fs.read', (_$, e) => {
@@ -153,13 +195,21 @@ function harness(on: On) {
   on('ui.log', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('classic.SubagentStart', () => ({}))
-  on('tool.call', () => ({ result: 'ran' }) as never)
+  // $.ui.ask reaches the operator as an AskUserQuestion call (as in tag.test.ts).
+  on('tool.call', (_$, e) => {
+    const asked = e as unknown as { tool: string; questions?: { question: string }[] }
+    if (asked.tool !== 'AskUserQuestion') return { result: 'ran' } as never
+    const question = asked.questions?.[0]?.question ?? ''
+    h.asks.push(question)
+    h.onAsk?.()
+    return { result: { questions: asked.questions, answers: { [question]: 'Approve' } } } as never
+  })
   return { h, clock }
 }
 
 /** Installs another release at `path`, the way install.sh does: new contents, new mtime. */
 function install(h: Harness, path: string, binary: Binary, at = 200) {
-  h.files.set(path, { size: 1000 + binary.version.length * 7 + binary.groups.length, mtimeMs: at })
+  h.files.set(path, { size: 1000 + (binary.version ?? '').length * 7 + binary.groups.length, mtimeMs: at })
   h.binaries.set(path, binary)
 }
 
@@ -224,11 +274,14 @@ test('R3: an unchanged binary is not started again, and each call checks it once
     '/home/tester/.local/shim/orthanc', SYSTEM,
     '/home/tester/.local/shim/orthanc', SYSTEM,
   ])
-  // orthanc_cli: the guard and the executor share one check.
+  // orthanc_cli: the guard checks once and the executor stats again just
+  // before the spawn (review of #9, SHOULD 1). Two walks, no process but the call.
   h.stats.length = 0
+  const runs = h.runs.length
   const out = await cli($, 'ontology list')
   expect(out.errors).toEqual([])
-  expect(h.stats.filter(path => path === SYSTEM).length).toBe(1)
+  expect(h.stats.filter(path => path === SYSTEM).length).toBe(2)
+  expect(h.runs.slice(runs)).toEqual([`${SYSTEM} ontology list`])
 })
 
 test('R5: a deleted binary keeps the old list, says why, and starts nothing', async ($, on) => {
@@ -337,4 +390,125 @@ test('R11: with no orthanc at first, a call after it is installed works', async 
   expect(none.includes('ontology (2)')).toBe(false)
   install(h, SYSTEM, NEW)
   expect(await help($)).toContain('automate (2)')
+})
+
+test('R12: a read overtaken by a later one gives its caller the newer list', async ($, on) => {
+  const { h, clock } = harness(on)
+  await help($)
+  install(h, SYSTEM, { version: '0.7.0', groups: ['configure', 'ontology', 'seven'], delayMs: 5000 }, 200)
+  const slow = help($)
+  await clock.advance(10)
+  install(h, SYSTEM, { version: '0.8.0', groups: ['configure', 'eight', 'ontology'] }, 300)
+  const fast = await help($, { group: 'eight' })
+  expect(fast).toContain("Orthanc group 'eight': 2 commands")
+  await clock.advance(5000)
+  await clock.settle()
+  const late = await slow
+  expect(late).toContain('eight (2)')
+  expect(late.includes('seven')).toBe(false)
+  // The overtaken read did not replace the newer list either.
+  expect(await help($, { query: 'seven' })).toContain('No Orthanc commands matched')
+})
+
+test('R13: a command whose kind changes between versions is judged by the new kind', async ($, on) => {
+  const { h } = harness(on)
+  h.store.set('approvalMode', 'ask-always')
+  h.binaries.set(SYSTEM, { version: '0.6.0', groups: ['ontology'], extra: [{ path: 'thing run', kind: 'read-only' }] })
+  expect((await cli($, 'thing run')).errors).toEqual([])
+  expect(h.asks).toEqual([])
+  install(h, SYSTEM, { version: '0.7.1', groups: ['ontology'], extra: [{ path: 'thing run', kind: 'mutation' }] })
+  const out = await cli($, 'thing run')
+  expect(out.errors).toEqual([])
+  expect(out.data).toEqual({ ran: 'thing run', by: '0.7.1' })
+  expect(h.asks.length).toBe(1)
+  expect(h.asks[0]).toContain('thing run')
+})
+
+test('R14: a binary replaced while the operator approves is not run', async ($, on) => {
+  const { h } = harness(on)
+  h.store.set('approvalMode', 'ask-always')
+  h.binaries.set(SYSTEM, { version: '0.6.0', groups: ['ontology'], extra: [{ path: 'thing apply', kind: 'mutation' }] })
+  await help($)
+  h.onAsk = () => install(h, SYSTEM, { version: '0.7.1', groups: ['ontology'], extra: [{ path: 'thing apply', kind: 'mutation' }] })
+  const out = await cli($, 'thing apply')
+  expect(out.errors[0]?.type).toBe('orthanc-binary-changed')
+  expect(String(out.errors[0]?.message)).toContain('changed after this call was checked')
+  expect(h.runs.filter(run => run.endsWith('thing apply'))).toEqual([])
+  // Called again, it is judged by the new binary's list and runs there.
+  h.onAsk = undefined
+  const again = await cli($, 'thing apply')
+  expect(again.data).toEqual({ ran: 'thing apply', by: '0.7.1' })
+})
+
+test('R15: with an unreadable new manifest or a deleted binary, orthanc_cli runs nothing', async ($, on) => {
+  const { h, clock } = harness(on)
+  h.binaries.set(SYSTEM, { version: '0.6.0', groups: ['ontology'], extra: [{ path: 'thing run', kind: 'read-only' }] })
+  await help($)
+  // The new binary marks it a mutation, but its manifest cannot be read.
+  install(h, SYSTEM, { version: '0.7.1', groups: ['ontology'], extra: [{ path: 'thing run', kind: 'mutation' }], manifest: 'garbage' })
+  const broken = await cli($, 'thing run')
+  expect(broken.errors[0]?.type).toBe('orthanc-binary-changed')
+  expect(String(broken.errors[0]?.message)).toContain('could not be read')
+  await clock.advance(30_000)
+  expect((await cli($, 'ontology list')).errors[0]?.type).toBe('orthanc-binary-changed')
+  expect(h.runs.filter(run => run.endsWith('thing run') || run.endsWith('ontology list'))).toEqual([])
+  // Deleted: refused, and nothing starts.
+  h.files.delete(SYSTEM)
+  const before = h.argv0s.length
+  const gone = await cli($, 'thing run')
+  expect(gone.errors[0]?.type).toBe('orthanc-binary-changed')
+  expect(String(gone.errors[0]?.message)).toContain('not found')
+  expect(h.argv0s.length).toBe(before)
+})
+
+test('R16: every process starts the file the stat found', async ($, on) => {
+  const { h } = harness(on)
+  await help($, { command: 'ontology list' })
+  await cli($, 'ontology list')
+  expect(h.argv0s.length > 2).toBe(true)
+  expect([...new Set(h.argv0s)]).toEqual([SYSTEM])
+  h.files.set(DEV, { size: 4242, mtimeMs: 500 })
+  h.binaries.set(DEV, { version: '0.8.0-dev', groups: ['ontology'] })
+  h.env.set('ORTHANC_BIN', DEV)
+  h.argv0s.length = 0
+  await cli($, 'ontology list')
+  expect([...new Set(h.argv0s)]).toEqual([DEV])
+})
+
+test('R17: a failed read is tried again 60 s after it failed, not after it started', async ($, on) => {
+  const { h, clock } = harness(on)
+  await help($)
+  install(h, SYSTEM, { version: '0.7.1', groups: ['automate'], manifest: 'garbage', delayMs: 30_000 })
+  const failing = help($, { query: 'ontology' })
+  await clock.advance(30_000)
+  await clock.settle()
+  expect(await failing).toContain('could not be read')
+  expect(manifestRuns(h).length).toBe(2)
+  await clock.advance(45_000)
+  await help($)
+  expect(manifestRuns(h).length).toBe(2)
+  await clock.advance(20_000)
+  void help($, { group: 'ontology' })
+  await clock.settle()
+  expect(manifestRuns(h).length).toBe(3)
+})
+
+test('R18: with no binary and no manifest, later calls start nothing and orthanc_cli reads nothing', async ($, on) => {
+  const { h } = harness(on)
+  h.files.delete(SYSTEM)
+  await help($)
+  const tried = h.argv0s.length
+  await help($, { query: 'ontology' })
+  const out = (await $.tool.call({ tool: CLI, command: 'ontology list', args: [] } as never)) as Reply
+  expect(String(out.result ?? '') + String(out.deny ?? '')).not.toContain('"ran"')
+  expect(h.argv0s.length).toBe(tried)
+})
+
+test('R19: a binary that does not report its version gets a plain notice', async ($, on) => {
+  const { h } = harness(on)
+  await help($)
+  install(h, SYSTEM, { version: null, groups: ['automate', 'ontology'] })
+  const notice = (await help($)).split('\n')[0]!
+  expect(notice).toContain('from orthanc 0.6.0 to an orthanc that did not report its version')
+  expect(notice.includes('of unknown version')).toBe(false)
 })
