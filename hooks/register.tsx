@@ -61,7 +61,7 @@ import {
 } from './fde'
 import {
   CLI_TIMEOUT_FLOOR_MS,
-  cliTimeoutMs,
+  cliWait,
   type Envelope,
   failure,
   guideEnvelope,
@@ -72,11 +72,14 @@ import {
   listItems,
   manifestFrom,
   normalizeCommand,
+  notRunFailure,
+  overCapFailure,
   parseEnvelope,
   renderCommand,
   renderListing,
   rowsOf,
   serialize,
+  withStoppedHint,
 } from './orthanc'
 import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
@@ -142,18 +145,40 @@ async function orthancBin($: EngineInterface): Promise<string> {
   return (await $.env.get('ORTHANC_BIN'))?.trim() || 'orthanc'
 }
 
-// $.process.run stops at ten minutes: a longer wait streams under its own deadline.
-async function runLong($: EngineInterface, command: readonly string[], timeoutMs: number): Promise<ProcessOutput> {
+// $.process.run stops at ten minutes: a longer wait streams under its own
+// deadline. `stop.byTimer` is set when that deadline fires.
+async function runLong($: EngineInterface, command: readonly string[], timeoutMs: number, stop: { byTimer: boolean }): Promise<ProcessOutput> {
   let expire = () => {}
   const expired = new Promise<void>(resolve => {
     expire = resolve
   })
-  const timer = $.clock.after(timeoutMs, () => expire())
+  const timer = $.clock.after(timeoutMs, () => {
+    stop.byTimer = true
+    expire()
+  })
   try {
     return await readToExit($.process.spawn({ argv: command }), expired, timeoutMs)
   } finally {
     timer.cancel()
   }
+}
+
+// The time for an elapsed count; the wall clock when $.clock cannot answer.
+const clockNow = ($: EngineInterface) => $.clock.now().catch(() => Date.now())
+
+// A stop this close to the timer is the timer's, whatever the host's error says.
+const TIMER_SLACK_MS = 1000
+
+/**
+ * Why a call that threw was stopped: 'timeout' when orthanc_cli's timer fired
+ * (the streamed deadline's flag, or the time ran out), 'cancelled' when it
+ * was aborted before that, undefined for a failure to launch. The host's
+ * wording is only the fallback.
+ */
+function stopReason(message: string, byTimer: boolean, elapsedMs: number, timeoutMs: number): 'timeout' | 'cancelled' | undefined {
+  if (byTimer || elapsedMs >= timeoutMs - TIMER_SLACK_MS) return 'timeout'
+  if (message.includes('still running after')) return 'timeout'
+  return /\baborted\b/.test(message) ? 'cancelled' : undefined
 }
 
 // orthanc in agent mode, argv only, no shell; any failure comes back as an
@@ -165,9 +190,11 @@ async function runOrthanc(
   timeoutMs = CLI_TIMEOUT_FLOOR_MS,
 ): Promise<Envelope> {
   const full = ['--agent', '--non-interactive', ...(profile ? ['--profile', profile] : []), ...argv]
+  const started = await clockNow($)
+  const stop = { byTimer: false }
   try {
     const command = [await orthancBin($), ...full]
-    const ran = timeoutMs > PROCESS_RUN_MAX_MS ? await runLong($, command, timeoutMs) : await $.process.run(command, { timeoutMs })
+    const ran = timeoutMs > PROCESS_RUN_MAX_MS ? await runLong($, command, timeoutMs, stop) : await $.process.run(command, { timeoutMs })
     return (
       parseEnvelope(ran.stdout) ??
       failure('orthanc-launch-error', `orthanc exited ${ran.exitCode} with no foundry-agent-v1 envelope`, argv.join(' '), {
@@ -176,8 +203,18 @@ async function runOrthanc(
       })
     )
   } catch (error) {
-    return failure('orthanc-launch-error', error instanceof Error ? error.message : String(error), argv.join(' '), {
-      timeout_seconds: timeoutMs / 1000,
+    const message = error instanceof Error ? error.message : String(error)
+    const elapsedMs = (await clockNow($)) - started
+    const elapsed = Math.round(elapsedMs / 1000)
+    const timer = timeoutMs / 1000
+    const reason = stopReason(message, stop.byTimer, elapsedMs, timeoutMs)
+    const said =
+      reason === 'cancelled'
+        ? `The call was stopped after ${elapsed} s, before its ${timer} s limit, from outside orthanc_cli's timer: ${message}`
+        : message
+    return failure('orthanc-launch-error', said, argv.join(' '), {
+      timeout_seconds: timer,
+      ...(reason ? { reason, elapsed_seconds: elapsed } : {}),
     })
   }
 }
@@ -228,7 +265,9 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
       command.path,
     )
   }
-  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, cliTimeoutMs(command, resolved.args))
+  const wait = cliWait(command, resolved.args)
+  if (wait.overCap) return overCapFailure(command, wait)
+  const envelope = withStoppedHint(await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, wait.timeoutMs), command)
   return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path) : null)
 }
 
@@ -643,8 +682,8 @@ async function askOperator($: EngineInterface, reason: string): Promise<boolean>
   }
 }
 
-// `notRun` is a failure Orthanc refused before reaching Foundry (a usage error);
-// any other failure may have changed something.
+// `notRun` is a failure that never reached Foundry (a usage error, or a call
+// orthanc_cli refused itself); any other failure may have changed something.
 async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>): Promise<{ out: EventResult<'tool.call'>; failed: boolean; notRun: boolean }> {
   if (tool === ORTHANC_HELP) {
     return { failed: false, notRun: false, out: {
@@ -662,7 +701,7 @@ async function serveTool($: EngineInterface, tool: string, input: Record<string,
     profile: profileArg(scope),
   })
   const failed = isErrorEnvelope(envelope)
-  return { failed, notRun: failed && isUsageError(envelope), out: { result: serialize(envelope, await spill($, input.command, envelope)), ...(failed ? { context: ['The Orthanc call returned errors; read them before retrying.'] } : {}) } }
+  return { failed, notRun: failed && notRunFailure(envelope), out: { result: serialize(envelope, await spill($, input.command, envelope)), ...(failed ? { context: ['The Orthanc call returned errors; read them before retrying.'] } : {}) } }
 }
 
 // Writes an oversized envelope where the model can read it whole; undefined when
@@ -1509,6 +1548,20 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     if ('deny' in gated) return gated
     input = gated.input
     plan = gated.plan
+  }
+  // A call over the cap is refused here, before the ladder can ask the operator
+  // to approve it and before an apply takes its dry run. executeCli checks again.
+  if (tool === ORTHANC_CLI) {
+    const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
+    const command = manifest.find(entry => entry.path === resolved.path)
+    const wait = command ? cliWait(command, resolved.args) : null
+    if (command && wait?.overCap) {
+      note.foundry = true
+      note.command = command.path
+      note.outcome = 'block'
+      note.reason = 'timeout-over-cap'
+      return { result: serialize(overCapFailure(command, wait)), context: ['orthanc_cli refused the call before it ran; read the error for a way that fits.'] }
+    }
   }
   // An apply takes its dry run now, in one step, so a parallel twin finds it gone.
   // If the call then does not run, or fails, the plan is put back.

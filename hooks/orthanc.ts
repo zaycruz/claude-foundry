@@ -66,18 +66,37 @@ function flagsFrom(args: unknown): ManifestFlag[] {
 }
 
 // orthanc_cli's process timer. Waiting commands (repository checks wait,
-// ontology branch-index-status --wait, sql wait, …) run as long as their own
-// --timeout, plus --publish-grace after the checks pass. The timer gives them
-// that wait, one poll interval (Orthanc can overshoot its deadline by one) and
-// a margin, so Orthanc reports its own timeout instead of being killed. The
-// floor is the old fixed 300 s; the cap is Orthanc's longest default wait
-// (branch-index-status, 1800 s) plus the margin.
+// ontology branch-index-status --wait, sql wait, ai-fde run, …) run as long as
+// their own --timeout, plus --publish-grace after the checks pass. The timer
+// gives them that wait, any fixed time Orthanc adds around it, one poll
+// interval (Orthanc can overshoot its deadline by one) and a margin, so Orthanc
+// reports its own timeout instead of being killed. The floor is the old fixed
+// 300 s; the cap is Orthanc's longest default wait (ai-fde run: 1800 s plus
+// 370 s around it) plus the margin, or more for a command whose own defaults
+// need more, so a call with its defaults is never refused. A call that would
+// need more is refused before Orthanc starts.
 const CLI_MARGIN_S = 120
-const CLI_LONGEST_WAIT_S = 1800
 export const CLI_TIMEOUT_FLOOR_MS = 300_000
-export const CLI_TIMEOUT_CAP_MS = (CLI_LONGEST_WAIT_S + CLI_MARGIN_S) * 1000
 const WAIT_FLAGS = ['--timeout', '--publish-grace']
 const POLL_FLAGS = ['--interval', '--poll-interval']
+
+// What the manifest cannot say about a command's wait (orthanc-source
+// src/ai_fde_web.rs): ai-fde run's --timeout is 1800 s when absent but the
+// flag carries no manifest default, and around it Orthanc gives the browser
+// worker 300 s to start, stops it up to 60 s past the timeout and waits 10 s
+// for it to exit. A manifest default, when one appears, wins over `defaults`.
+type WaitExtra = { defaults: Record<string, string>; aroundS: number; detachHint: string; stoppedHint: string }
+const AI_FDE_RUN_EXTRA: WaitExtra = {
+  defaults: { '--timeout': '1800' },
+  aroundS: 300 + 60 + 10,
+  detachHint: "or pass --detach and read the run later with 'ai-fde status <thread>' and 'ai-fde result <thread>'",
+  stoppedHint:
+    "The run may still be going in the AI FDE web app: find its thread with 'ai-fde threads list' and read it with " +
+    "'ai-fde status <thread>' and 'ai-fde result <thread>'. For a long run, pass --detach next time.",
+}
+const WAIT_EXTRAS: Readonly<Record<string, WaitExtra>> = { 'ai-fde run': AI_FDE_RUN_EXTRA }
+const CLI_LONGEST_WAIT_S = 1800 + AI_FDE_RUN_EXTRA.aroundS
+export const CLI_TIMEOUT_CAP_MS = (CLI_LONGEST_WAIT_S + CLI_MARGIN_S) * 1000
 
 /** The last value given for `flag` (`--flag v` or `--flag=v`); '' when it dangles, undefined when absent. */
 function flagArgument(args: readonly string[], flag: string): string | undefined {
@@ -89,23 +108,121 @@ function flagArgument(args: readonly string[], flag: string): string | undefined
   return value
 }
 
-/** How long orthanc_cli lets `command` run with `args` (the resolved args, flags included), in ms. */
-export function cliTimeoutMs(command: ManifestCommand | undefined, args: readonly string[]): number {
+export type CliWait = {
+  timeoutMs: number
+  neededMs: number
+  /** The cap for this command: the general cap, or what its own defaults need when that is more. */
+  capMs: number
+  overCap: boolean
+  /** The largest --timeout that fits, when one does. */
+  maxTimeoutS?: number
+  /** The flags the call passed that put it over the cap, --timeout when one smaller would fit. */
+  overFlags?: string[]
+}
+
+const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
+
+/**
+ * orthanc_cli's timer for `command` with `args` (the resolved args, flags
+ * included): `timeoutMs` the timer, cut to the cap; `overCap` when the call
+ * would need more, then with the largest `maxTimeoutS` that fits, and the
+ * flags to make smaller.
+ */
+export function cliWait(command: ManifestCommand | undefined, args: readonly string[]): CliWait {
   const flags = command?.flags ?? []
+  const extra = command ? WAIT_EXTRAS[command.path] : undefined
   const declares = (flag: string) => flags.some(entry => entry.flag === flag)
-  const passes = (flag: string) => args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
-  const seconds = (flag: string) => {
-    const raw = flagArgument(args, flag) ?? flags.find(entry => entry.flag === flag)?.default
+  // A switch is on when passed bare or with a value other than false/0/no/off.
+  const passes = (flag: string) =>
+    args.some(arg => arg === flag || (arg.startsWith(`${flag}=`) && !OFF_VALUES.has(arg.slice(flag.length + 1).trim().toLowerCase())))
+  const given = (flag: string) => args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
+  const parse = (raw: string | undefined) => {
     const value = raw === undefined || raw.trim() === '' ? NaN : Number(raw)
-    return Number.isFinite(value) && value > 0 ? value : 0
+    return Number.isFinite(value) && value >= 0 ? value : undefined
   }
-  // A command with a --wait switch only waits when it is passed; --no-wait never waits.
-  const waits = !passes('--no-wait') && (!declares('--wait') || passes('--wait'))
-  const wait = waits ? WAIT_FLAGS.reduce((sum, flag) => sum + seconds(flag), 0) : 0
-  if (wait === 0) return CLI_TIMEOUT_FLOOR_MS
-  const poll = Math.max(...POLL_FLAGS.map(seconds))
-  const total = (wait + poll + CLI_MARGIN_S) * 1000
-  return Math.min(CLI_TIMEOUT_CAP_MS, Math.max(CLI_TIMEOUT_FLOOR_MS, total))
+  const defaultSeconds = (flag: string) =>
+    parse(flags.find(entry => entry.flag === flag)?.default ?? extra?.defaults[flag]) ?? 0
+  // A value orthanc will reject counts as the default, so the timer is never
+  // shorter than the wait orthanc would run.
+  const seconds = (flag: string) => parse(flagArgument(args, flag)) ?? defaultSeconds(flag)
+  // A command with a --wait switch only waits when it is passed; --no-wait never
+  // waits; --detach returns once the job exists; without --apply it is a plan.
+  const waits =
+    !passes('--no-wait') &&
+    !passes('--detach') &&
+    (!declares('--apply') || passes('--apply')) &&
+    (!declares('--wait') || passes('--wait'))
+  const totalOf = (secondsOf: (flag: string) => number) => {
+    const wait = WAIT_FLAGS.reduce((sum, flag) => sum + secondsOf(flag), 0)
+    return wait === 0 ? 0 : wait + (extra?.aroundS ?? 0) + Math.max(...POLL_FLAGS.map(secondsOf)) + CLI_MARGIN_S
+  }
+  const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
+  const totalS = waits ? totalOf(seconds) : 0
+  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false }
+  const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
+  const overCap = neededMs > capMs
+  if (!overCap) return { timeoutMs: neededMs, neededMs, capMs, overCap }
+  const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
+  // When no --timeout fits, the other passed flags are what to make smaller.
+  const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== '--timeout' && given(flag) && seconds(flag) > 0)
+  const overFlags = fits > 0 ? ['--timeout'] : others
+  return {
+    timeoutMs: capMs,
+    neededMs,
+    capMs,
+    overCap,
+    ...(fits > 0 ? { maxTimeoutS: fits } : {}),
+    ...(overFlags.length > 0 ? { overFlags } : {}),
+  }
+}
+
+/** How long orthanc_cli lets `command` run with `args`, in ms. */
+export const cliTimeoutMs = (command: ManifestCommand | undefined, args: readonly string[]) => cliWait(command, args).timeoutMs
+
+/** The refusal of a call that would run past the cap; Orthanc did not start. */
+export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelope {
+  const cap = wait.capMs / 1000
+  const needed = Math.ceil(wait.neededMs / 1000)
+  const smaller = wait.overFlags?.length ? wait.overFlags.join(' or ') : '--timeout'
+  const ways = [
+    wait.maxTimeoutS === undefined ? `Pass a smaller ${smaller}` : `Pass --timeout ${wait.maxTimeoutS} or less`,
+    WAIT_EXTRAS[command.path]?.detachHint,
+    command.kind === 'read-only' ? 'and call it again if it times out: the wait is a read' : undefined,
+  ].filter(Boolean)
+  return failure(
+    'timeout-over-cap',
+    `'${command.path}' could run for ${needed} s; orthanc_cli runs a call for at most ${cap} s, so it did not start. ${ways.join(', ')}.`,
+    command.path,
+    { cap_seconds: cap, needed_seconds: needed, ...(wait.maxTimeoutS === undefined ? {} : { max_timeout_seconds: wait.maxTimeoutS }) },
+  )
+}
+
+// Refusals orthanc_cli makes itself, before orthanc starts.
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command'])
+
+/** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
+export function notRunFailure(envelope: Envelope): boolean {
+  const [first] = Array.isArray(envelope.errors) ? envelope.errors : []
+  return (isRecord(first) && typeof first.type === 'string' && NOT_RUN_TYPES.has(first.type)) || isUsageError(envelope)
+}
+
+/** The next step after orthanc_cli's timer stopped a call, or the call was cancelled. */
+function stoppedHint(command: ManifestCommand, reason: 'timeout' | 'cancelled'): string {
+  const extra = WAIT_EXTRAS[command.path]
+  if (extra) return extra.stoppedHint
+  if (command.kind === 'read-only') {
+    return reason === 'timeout'
+      ? 'It is a read: call it again to keep waiting, with a --timeout that fits.'
+      : 'It is a read: call it again to keep waiting.'
+  }
+  return 'Read the matching Foundry state before any retry.'
+}
+
+/** Adds the next step to a launch error whose call was stopped (its `reason`). */
+export function withStoppedHint(envelope: Envelope, command: ManifestCommand): Envelope {
+  const [first, ...rest] = Array.isArray(envelope.errors) ? envelope.errors : []
+  if (!isRecord(first) || (first.reason !== 'timeout' && first.reason !== 'cancelled')) return envelope
+  return { ...envelope, errors: [{ ...first, hint: stoppedHint(command, first.reason) }, ...rest] }
 }
 
 export const normalizeCommand = (command: string) => command.trim().replace(/\s+/g, ' ')
