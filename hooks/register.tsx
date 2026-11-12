@@ -81,7 +81,7 @@ import {
   serialize,
   withStoppedHint,
 } from './orthanc'
-import { binaryIdentity, ManifestCache } from './manifest'
+import { type BinaryIdentity, binaryIdentity, type LoadedManifest, ManifestCache, named } from './manifest'
 import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
   APPROVAL_MODES,
@@ -191,12 +191,13 @@ async function runOrthanc(
   argv: readonly string[],
   profile?: string,
   timeoutMs = CLI_TIMEOUT_FLOOR_MS,
+  bin?: string,
 ): Promise<Envelope> {
   const full = ['--agent', '--non-interactive', ...(profile ? ['--profile', profile] : []), ...argv]
   const started = await clockNow($)
   const stop = { byTimer: false }
   try {
-    const command = [await orthancBin($), ...full]
+    const command = [bin ?? (await orthancBin($)), ...full]
     const ran = timeoutMs > PROCESS_RUN_MAX_MS ? await runLong($, command, timeoutMs, stop) : await $.process.run(command, { timeoutMs })
     return (
       parseEnvelope(ran.stdout) ??
@@ -222,36 +223,65 @@ async function runOrthanc(
   }
 }
 
-// agent-manifest and version of the orthanc that runs now; throws when the
+/** The executable to start for `identity`: the file the stat found, else the name as given. */
+const spawnPath = (identity: BinaryIdentity) => identity.path ?? identity.bin
+
+// agent-manifest and version of the binary `identity` found; throws when the
 // manifest has no commands, so the cache keeps the one it had.
-async function readManifest($: EngineInterface): Promise<{ commands: readonly ManifestCommand[]; version: string }> {
-  const [manifest, version] = await Promise.all([runOrthanc($, ['agent-manifest'], undefined, 30_000), runOrthanc($, ['version'], undefined, 15_000)])
+async function readManifest($: EngineInterface, identity: BinaryIdentity): Promise<{ commands: readonly ManifestCommand[]; version: string | null }> {
+  const bin = spawnPath(identity)
+  const [manifest, version] = await Promise.all([
+    runOrthanc($, ['agent-manifest'], undefined, 30_000, bin),
+    runOrthanc($, ['version'], undefined, 15_000, bin),
+  ])
   const commands = manifestFrom(manifest)
   if (commands.length === 0) {
     throw new Error(isErrorEnvelope(manifest) ? `orthanc agent-manifest failed: ${errorsOf(manifest)}` : 'orthanc agent-manifest returned no commands')
   }
   const data = version.data as { version?: unknown } | null | undefined
-  return { commands, version: typeof data?.version === 'string' ? data.version : 'of unknown version' }
+  return { commands, version: typeof data?.version === 'string' && data.version.trim() !== '' ? data.version.trim() : null }
 }
+
+/** The manifest the cache holds, and the identity of the binary a call would start now. */
+type ManifestSnapshot = { loaded: LoadedManifest; current: BinaryIdentity }
 
 /**
- * The manifest of the orthanc a call would start now: one stat walk per call,
- * and a read only when the binary changed. The --help cache follows the binary.
+ * One stat walk, and a read only when the binary changed. `loaded` can be
+ * another binary's (a failed read, a deleted binary): a caller that runs
+ * anything compares `loaded.identity.key` with `current.key` first. Throws
+ * when no manifest was ever read. The --help cache follows the binary.
  */
-async function loadManifest($: EngineInterface): Promise<readonly ManifestCommand[]> {
-  const identity = await binaryIdentity($)
-  if (identity.key !== helpKey) {
+async function manifestSnapshot($: EngineInterface): Promise<ManifestSnapshot> {
+  const current = await binaryIdentity($)
+  if (current.key !== helpKey) {
     helpCache.clear()
-    helpKey = identity.key
+    helpKey = current.key
   }
-  return (await manifestCache.get(identity, await clockNow($), () => readManifest($))).commands
+  const loaded = await manifestCache.get(current, () => clockNow($), () => readManifest($, current))
+  return { loaded, current }
 }
 
-async function helpText($: EngineInterface, path: string): Promise<string | null> {
+async function loadManifest($: EngineInterface): Promise<readonly ManifestCommand[]> {
+  return (await manifestSnapshot($)).loaded.commands
+}
+
+/** orthanc_cli's refusal when the binary that would start is not the one its list came from. */
+function binaryChangedFailure(loaded: LoadedManifest, current: BinaryIdentity, operation: string, when: 'before' | 'after'): Envelope {
+  const from = `${named(loaded.version)} at ${spawnPath(loaded.identity)}`
+  const message =
+    current.path === null
+      ? `orthanc is not found (${current.bin === 'orthanc' ? 'not on PATH' : `ORTHANC_BIN=${current.bin}`}), so the call was not run. The command list is from ${from}.`
+      : when === 'after'
+        ? `orthanc at ${current.path} changed after this call was checked, so it was not run: it was judged by the command list of ${from}. Call it again.`
+        : `orthanc at ${current.path} changed, and its command list could not be read, so the call was not run: the list orthanc_cli holds is from ${from}. orthanc_help says why; reinstall orthanc or wait for the next read.`
+  return failure('orthanc-binary-changed', message, operation)
+}
+
+async function helpText($: EngineInterface, path: string, identity: BinaryIdentity): Promise<string | null> {
   const cached = helpCache.get(path)
   if (cached !== undefined) return cached
   try {
-    const ran = await $.process.run([await orthancBin($), ...path.split(' '), '--help'], { timeoutMs: 15_000 })
+    const ran = await $.process.run([spawnPath(identity), ...path.split(' '), '--help'], { timeoutMs: 15_000 })
     const text = `${ran.stdout}${ran.stderr}`.trim()
     if (text === '') return null
     helpCache.set(path, text)
@@ -262,20 +292,26 @@ async function helpText($: EngineInterface, path: string): Promise<string | null
 }
 
 async function renderHelp($: EngineInterface, input: { group?: string; command?: string; query?: string }): Promise<string> {
-  const commands = await loadManifest($)
+  const { loaded, current } = await manifestSnapshot($)
+  const commands = loaded.commands
   const notes = manifestCache.takeNotes()
   const withNotes = (text: string) => (notes.length === 0 ? text : `${notes.join('\n')}\n\n${text}`)
   if (!input.command) return withNotes(renderListing(commands, input))
   const path = normalizeCommand(input.command)
   const command = commands.find(entry => entry.path === path)
   if (command === undefined) return withNotes(`Unknown Orthanc command '${path}'. Use orthanc_help with query to search commands.`)
-  return withNotes(renderCommand(command, await helpText($, command.path)))
+  return withNotes(renderCommand(command, await helpText($, command.path, current)))
 }
 
-// `checked` is the manifest the guard read for this call, so one call checks
-// the binary once; an empty one (the guard's read failed) is read again.
-async function executeCli($: EngineInterface, input: { command: string; args: string[]; profile?: string }, checked: readonly ManifestCommand[] = []): Promise<Envelope> {
-  const commands = checked.length > 0 ? checked : await loadManifest($)
+// `checked` is the manifest the guard judged this call by. The binary is
+// stat'ed again just before the spawn, and the call is refused when it is no
+// longer the one that manifest came from; the spawn names that file. With no
+// manifest (the guard's read failed) the call is refused, never read afresh.
+async function executeCli($: EngineInterface, input: { command: string; args: string[]; profile?: string }, checked: LoadedManifest | undefined): Promise<Envelope> {
+  if (checked === undefined) {
+    return failure('orthanc-manifest-unavailable', 'orthanc_cli has no Orthanc command list for this call, so it was not run. Call orthanc_help to see why.', input.command)
+  }
+  const commands = checked.commands
   // The same resolution the guard classified, so what runs is what was judged.
   const resolved = resolveOrthancCommand(input.command, input.args, commands)
   const command = commands.find(entry => entry.path === resolved.path)
@@ -291,8 +327,10 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
   }
   const wait = cliWait(command, resolved.args)
   if (wait.overCap) return overCapFailure(command, wait)
-  const envelope = withStoppedHint(await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, wait.timeoutMs), command)
-  return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path) : null)
+  const now = await binaryIdentity($)
+  if (now.key !== checked.identity.key) return binaryChangedFailure(checked, now, command.path, 'after')
+  const envelope = withStoppedHint(await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, wait.timeoutMs, spawnPath(now)), command)
+  return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path, now) : null)
 }
 
 async function storedScopes($: EngineInterface): Promise<Record<string, unknown>> {
@@ -708,7 +746,7 @@ async function askOperator($: EngineInterface, reason: string): Promise<boolean>
 
 // `notRun` is a failure that never reached Foundry (a usage error, or a call
 // orthanc_cli refused itself); any other failure may have changed something.
-async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>, manifest: readonly ManifestCommand[] = []): Promise<{ out: EventResult<'tool.call'>; failed: boolean; notRun: boolean }> {
+async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>, manifest: LoadedManifest | undefined): Promise<{ out: EventResult<'tool.call'>; failed: boolean; notRun: boolean }> {
   if (tool === ORTHANC_HELP) {
     return { failed: false, notRun: false, out: {
       result: await renderHelp($, {
@@ -1564,7 +1602,17 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     }
   }
 
-  const manifest = tool === ORTHANC_CLI || tool === 'Bash' ? await loadManifest($).catch(() => []) : []
+  const snapshot = tool === ORTHANC_CLI || tool === 'Bash' ? await manifestSnapshot($).catch(() => null) : null
+  const manifest = snapshot?.loaded.commands ?? []
+  // orthanc_cli never judges a call by another binary's list: a deleted
+  // binary, or a changed one whose manifest could not be read, runs nothing.
+  if (tool === ORTHANC_CLI && snapshot !== null && snapshot.loaded.identity.key !== snapshot.current.key) {
+    note.foundry = true
+    note.outcome = 'block'
+    note.reason = 'orthanc-binary-changed'
+    const failed = binaryChangedFailure(snapshot.loaded, snapshot.current, normalizeCommand(asString(input.command)), 'before')
+    return { result: serialize(failed), context: ['orthanc_cli refused the call before it ran; read the error.'] }
+  }
   const fde = tool === ORTHANC_CLI ? await fdeState($) : null
   let plan: FdePlan | null = null
   if (fde !== null) {
@@ -1639,7 +1687,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
   }
   executed = true
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, manifest).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
+  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
   if (plan !== null && !failed) {
     const done = plan
     let latest: FdeSession | null = null
