@@ -35,11 +35,28 @@
 //  W11 A manifest that one day carries ai-fde run's --timeout default counts
 //      the wait twice.
 //  W12 A launch failure (no orthanc binary) reads as cancelled or timed out.
+//
+// From the Opus review of bf6b644 (claude-foundry #8), written before the fixes:
+//  W13 A stop by orthanc_cli's timer reads as cancelled when the host words
+//      its error differently (the label rests on the host's text); a cancel
+//      names a cause nobody confirmed.
+//  W14 A call over the cap goes up the approval ladder first: the operator
+//      approves a call that is then refused.
+//  W15 A refusal that never reached orthanc (over the cap, a credential
+//      command, an unknown command) counts as maybe-run, so FDE mode drops
+//      the dry run the apply was taken from.
+//  W16 An over-cap call caused by --publish-grace or --interval is told to
+//      pass a smaller --timeout.
+//  W17 --detach=false or --apply=false counts as passed; a bad --timeout
+//      value on a waiting call drops it to the 300 s floor instead of the
+//      default wait.
+//  W18 orthanc raises a command's default wait past the cap and every call
+//      with that default is refused.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait } from './orthanc'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, notRunFailure } from './orthanc'
 import type { ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
@@ -131,6 +148,49 @@ test('W11: a manifest default for ai-fde run --timeout is used once, not added t
   expect(seconds(cliTimeoutMs(declared, ['do it', '--apply']))).toBe(600 + AI_FDE_OVERHEAD_S + MARGIN_S)
 })
 
+test('W15: a refusal that never reached orthanc counts as not run; a launch error or a Foundry error does not', async () => {
+  for (const type of ['timeout-over-cap', 'credential-command-denied', 'unknown-command']) {
+    expect({ type, notRun: notRunFailure(failure(type, 'refused', 'x')) }).toEqual({ type, notRun: true })
+  }
+  expect(notRunFailure(failure('usage', "error: unexpected argument '--nope' found", 'x'))).toBe(true)
+  expect(notRunFailure(failure('orthanc-launch-error', 'still running after 600 s; stopped', 'x'))).toBe(false)
+  expect(notRunFailure(failure('foundry-api-error', 'HTTP 409 conflict', 'x'))).toBe(false)
+})
+
+test('W16: an over-cap call caused by another flag names that flag, not --timeout', async () => {
+  // 60 + 3000 grace + 10 interval + 120 margin: no --timeout fits.
+  const grace = cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '60', '--publish-grace', '3000'])
+  expect({ overCap: grace.overCap, max: grace.maxTimeoutS, flags: grace.overFlags }).toEqual({ overCap: true, max: undefined, flags: ['--publish-grace'] })
+  const interval = cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '60', '--interval', '3000'])
+  expect({ overCap: interval.overCap, max: interval.maxTimeoutS, flags: interval.overFlags }).toEqual({ overCap: true, max: undefined, flags: ['--interval'] })
+  // --timeout is what is too big: it alone is named.
+  expect(cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '5000']).overFlags).toEqual(['--timeout'])
+})
+
+test('W17: a switch spelled =false is not passed; a bad --timeout value counts as the default wait', async () => {
+  expect(seconds(cliTimeoutMs(AI_FDE_RUN, ['do it', '--apply', '--detach=false']))).toBe(1800 + AI_FDE_OVERHEAD_S + MARGIN_S)
+  expect(cliTimeoutMs(AI_FDE_RUN, ['do it', '--apply=false', '--timeout', '1200'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+  expect(seconds(cliTimeoutMs(IMPORT_RUN, ['ri.c', '--wait=true', '--apply']))).toBe(600 + MARGIN_S)
+  expect(cliTimeoutMs(IMPORT_RUN, ['ri.c', '--wait=0', '--apply'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+  for (const value of ['abc', '-5', '', 'NaN', 'Infinity']) {
+    const ms = cliTimeoutMs(AI_FDE_RUN, ['do it', '--apply', '--timeout', value])
+    expect({ value, s: seconds(ms) }).toEqual({ value, s: 1800 + AI_FDE_OVERHEAD_S + MARGIN_S })
+  }
+})
+
+test('W18: a manifest default above the fallback raises the cap for that command, and no other', async () => {
+  const declared: ManifestCommand = {
+    ...AI_FDE_RUN,
+    flags: (AI_FDE_RUN.flags ?? []).map(flag => (flag.flag === '--timeout' ? { ...flag, default: '3600' } : flag)),
+  }
+  const byDefault = cliWait(declared, ['do it', '--apply'])
+  expect({ overCap: byDefault.overCap, s: seconds(byDefault.timeoutMs) }).toEqual({ overCap: false, s: 3600 + AI_FDE_OVERHEAD_S + MARGIN_S })
+  const over = cliWait(declared, ['do it', '--apply', '--timeout', '5000'])
+  expect({ overCap: over.overCap, cap: seconds(over.capMs), max: over.maxTimeoutS }).toEqual({ overCap: true, cap: 4090, max: 3600 })
+  // Other commands keep the 2290 s cap.
+  expect(seconds(cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '5000']).capMs)).toBe(2290)
+})
+
 // ---------- through the tool: the plugin loaded, orthanc faked, the clock mocked ----------
 
 const envelope = (data: unknown) =>
@@ -145,7 +205,7 @@ const MANIFEST = envelope({
   ],
 })
 
-type Child = 'finish' | 'hang' | { abortAfterMs: number }
+type Child = 'finish' | 'hang' | 'hang-reworded' | { abortAfterMs: number }
 type Harness = {
   /** The timeoutMs of every $.process.run of a Foundry command. */
   runs: { line: string; timeoutMs: number }[]
@@ -157,6 +217,10 @@ type Harness = {
   child: Child
   /** A missing orthanc binary. */
   missing: boolean
+  /** Every approval question put to the operator. */
+  asks: string[]
+  /** The approval mode the plugin reads. */
+  mode: string
 }
 
 const lineOf = (argv: readonly string[]) => {
@@ -167,7 +231,7 @@ const lineOf = (argv: readonly string[]) => {
 
 function harness(on: On) {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const h: Harness = { runs: [], spawns: [], stopped: [], child: 'finish', missing: false }
+  const h: Harness = { runs: [], spawns: [], stopped: [], child: 'finish', missing: false, asks: [], mode: 'yolo' }
   const done = (line: string) => envelope({ ran: line })
   on('process.run', async (_$, e) => {
     const line = lineOf(e.argv)
@@ -184,6 +248,11 @@ function harness(on: On) {
       await clock.sleep(e.init?.timeoutMs ?? 30_000)
       return { deny: `aborted: still running after ${e.init?.timeoutMs}ms` }
     }
+    if (h.child === 'hang-reworded') {
+      // The host's timer, worded some other way one day.
+      await clock.sleep(e.init?.timeoutMs ?? 30_000)
+      return { deny: 'process exceeded its deadline and was aborted' }
+    }
     await clock.sleep(h.child.abortAfterMs)
     return { deny: 'aborted' }
   })
@@ -196,7 +265,7 @@ function harness(on: On) {
       yield { stream: 'stdout' as const, text: done(line) }
       return { value: { code: 0, signal: null } }
     }
-    if (h.child === 'hang') {
+    if (h.child === 'hang' || h.child === 'hang-reworded') {
       await clock.sleep(10 * CLI_TIMEOUT_CAP_MS)
       return { value: { code: 0, signal: null } }
     }
@@ -210,8 +279,12 @@ function harness(on: On) {
     else env.set(e.name, e.value)
     return { value: undefined }
   })
-  const store = new Map<string, unknown>([['approvalMode', 'yolo']])
-  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  const store = new Map<string, unknown>()
+  on('store.get', (_$, e) => ({ value: e.key === 'approvalMode' ? h.mode : store.get(e.key) }))
+  on('ui.ask', (_$, e) => {
+    h.asks.push(String((e as { question?: unknown }).question ?? ''))
+    return { value: 'Approve' }
+  })
   on('store.set', (_$, e) => {
     store.set(e.key, e.value)
     return { value: undefined }
@@ -318,6 +391,9 @@ test('W8: through the tool, a call stopped before its timer says it was cancelle
   expect(error.elapsed_seconds).toBe(1170)
   expect(error.timeout_seconds).toBe(1470)
   expect(String(error.message)).toContain('before its 1470 s limit')
+  // W13: no cause is named; nobody confirmed one.
+  expect(String(error.message)).toContain("from outside orthanc_cli's timer")
+  expect(String(error.message).includes('interrupted turn')).toBe(false)
   expect(String(error.hint)).toContain('call it again')
 })
 
@@ -352,4 +428,27 @@ test('W12: a launch failure is neither cancelled nor timed out', async ($, on) =
   expect(error.type).toBe('orthanc-launch-error')
   expect(error.reason).toBe(undefined)
   expect(error.hint).toBe(undefined)
+})
+
+test('W13: a stop at the timer reads as a timeout whatever the host calls it', async ($, on) => {
+  const { h, clock } = harness(on)
+  h.child = 'hang-reworded'
+  const running = call($, 'repository checks wait', ['ri.r', 'v1', '--timeout', '60'])
+  // 60 + 120 grace + 10 interval + 120 margin = 310 s, under $.process.run.
+  expect(await after(clock, running, 310_000)).toBe(true)
+  const error = parsed(await running).errors[0]!
+  expect({ reason: error.reason, elapsed: error.elapsed_seconds, timer: error.timeout_seconds }).toEqual({ reason: 'timeout', elapsed: 310, timer: 310 })
+  expect(String(error.hint)).toContain('--timeout that fits')
+})
+
+test('W14: an over-cap call is refused before the approval ladder asks the operator', async ($, on) => {
+  const { h } = harness(on)
+  h.mode = 'ask-always'
+  const out = parsed(await call($, 'ai-fde run', ['do it', '--apply', '--timeout', '3600']))
+  expect(out.errors[0]!.type).toBe('timeout-over-cap')
+  expect({ asks: h.asks, spawns: h.spawns, runs: h.runs }).toEqual({ asks: [], spawns: [], runs: [] })
+  // The control: a call that fits is asked about once, then runs.
+  parsed(await call($, 'ai-fde run', ['do it', '--apply', '--detach']))
+  expect(h.asks.length).toBe(1)
+  expect(h.runs.map(run => run.line)).toEqual(['ai-fde run do it --apply --detach'])
 })
