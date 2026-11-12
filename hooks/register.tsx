@@ -81,6 +81,7 @@ import {
   serialize,
   withStoppedHint,
 } from './orthanc'
+import { binaryIdentity, ManifestCache } from './manifest'
 import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
   APPROVAL_MODES,
@@ -134,8 +135,10 @@ const TREE_ROWS = 8
 const ROOT_CONCURRENCY = 6
 
 let loop: { identity: string; streak: number } | null = null
-let manifestCache: readonly ManifestCommand[] | undefined
+const manifestCache = new ManifestCache()
+// --help text of the binary whose identity is helpKey; cleared when it changes.
 const helpCache = new Map<string, string>()
+let helpKey = ''
 const refusedCommands: string[] = []
 
 const asString = (value: unknown) => (typeof value === 'string' ? value : '')
@@ -219,12 +222,29 @@ async function runOrthanc(
   }
 }
 
+// agent-manifest and version of the orthanc that runs now; throws when the
+// manifest has no commands, so the cache keeps the one it had.
+async function readManifest($: EngineInterface): Promise<{ commands: readonly ManifestCommand[]; version: string }> {
+  const [manifest, version] = await Promise.all([runOrthanc($, ['agent-manifest'], undefined, 30_000), runOrthanc($, ['version'], undefined, 15_000)])
+  const commands = manifestFrom(manifest)
+  if (commands.length === 0) {
+    throw new Error(isErrorEnvelope(manifest) ? `orthanc agent-manifest failed: ${errorsOf(manifest)}` : 'orthanc agent-manifest returned no commands')
+  }
+  const data = version.data as { version?: unknown } | null | undefined
+  return { commands, version: typeof data?.version === 'string' ? data.version : 'of unknown version' }
+}
+
+/**
+ * The manifest of the orthanc a call would start now: one stat walk per call,
+ * and a read only when the binary changed. The --help cache follows the binary.
+ */
 async function loadManifest($: EngineInterface): Promise<readonly ManifestCommand[]> {
-  if (manifestCache !== undefined) return manifestCache
-  const loaded = manifestFrom(await runOrthanc($, ['agent-manifest'], undefined, 30_000))
-  if (loaded.length === 0) throw new Error('orthanc agent-manifest returned no commands')
-  manifestCache = loaded
-  return loaded
+  const identity = await binaryIdentity($)
+  if (identity.key !== helpKey) {
+    helpCache.clear()
+    helpKey = identity.key
+  }
+  return (await manifestCache.get(identity, await clockNow($), () => readManifest($))).commands
 }
 
 async function helpText($: EngineInterface, path: string): Promise<string | null> {
@@ -243,15 +263,19 @@ async function helpText($: EngineInterface, path: string): Promise<string | null
 
 async function renderHelp($: EngineInterface, input: { group?: string; command?: string; query?: string }): Promise<string> {
   const commands = await loadManifest($)
-  if (!input.command) return renderListing(commands, input)
+  const notes = manifestCache.takeNotes()
+  const withNotes = (text: string) => (notes.length === 0 ? text : `${notes.join('\n')}\n\n${text}`)
+  if (!input.command) return withNotes(renderListing(commands, input))
   const path = normalizeCommand(input.command)
   const command = commands.find(entry => entry.path === path)
-  if (command === undefined) return `Unknown Orthanc command '${path}'. Use orthanc_help with query to search commands.`
-  return renderCommand(command, await helpText($, command.path))
+  if (command === undefined) return withNotes(`Unknown Orthanc command '${path}'. Use orthanc_help with query to search commands.`)
+  return withNotes(renderCommand(command, await helpText($, command.path)))
 }
 
-async function executeCli($: EngineInterface, input: { command: string; args: string[]; profile?: string }): Promise<Envelope> {
-  const commands = await loadManifest($)
+// `checked` is the manifest the guard read for this call, so one call checks
+// the binary once; an empty one (the guard's read failed) is read again.
+async function executeCli($: EngineInterface, input: { command: string; args: string[]; profile?: string }, checked: readonly ManifestCommand[] = []): Promise<Envelope> {
+  const commands = checked.length > 0 ? checked : await loadManifest($)
   // The same resolution the guard classified, so what runs is what was judged.
   const resolved = resolveOrthancCommand(input.command, input.args, commands)
   const command = commands.find(entry => entry.path === resolved.path)
@@ -684,7 +708,7 @@ async function askOperator($: EngineInterface, reason: string): Promise<boolean>
 
 // `notRun` is a failure that never reached Foundry (a usage error, or a call
 // orthanc_cli refused itself); any other failure may have changed something.
-async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>): Promise<{ out: EventResult<'tool.call'>; failed: boolean; notRun: boolean }> {
+async function serveTool($: EngineInterface, tool: string, input: Record<string, unknown>, manifest: readonly ManifestCommand[] = []): Promise<{ out: EventResult<'tool.call'>; failed: boolean; notRun: boolean }> {
   if (tool === ORTHANC_HELP) {
     return { failed: false, notRun: false, out: {
       result: await renderHelp($, {
@@ -699,7 +723,7 @@ async function serveTool($: EngineInterface, tool: string, input: Record<string,
     command: normalizeCommand(asString(input.command)),
     args: Array.isArray(input.args) ? input.args.map(String) : [],
     profile: profileArg(scope),
-  })
+  }, manifest)
   const failed = isErrorEnvelope(envelope)
   return { failed, notRun: failed && notRunFailure(envelope), out: { result: serialize(envelope, await spill($, input.command, envelope)), ...(failed ? { context: ['The Orthanc call returned errors; read them before retrying.'] } : {}) } }
 }
@@ -1465,7 +1489,7 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
       const manifest = await loadManifest($).catch(() => [])
       return [
         renderChecks(checks),
-        `orthanc commands: ${manifest.length} in the agent manifest`,
+        `orthanc commands: ${manifest.length} in the agent manifest${manifestCache.version ? ` of orthanc ${manifestCache.version}` : ''}`,
         `tools: mcp__foundry__orthanc_help, mcp__foundry__orthanc_cli`,
         refusedCommands.length > 0 ? `commands Claude Code refused: ${refusedCommands.join(', ')}` : 'all foundry slash commands registered',
       ].join('\n')
@@ -1615,7 +1639,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
   }
   executed = true
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
+  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, manifest).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
   if (plan !== null && !failed) {
     const done = plan
     let latest: FdeSession | null = null

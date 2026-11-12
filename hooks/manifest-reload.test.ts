@@ -190,10 +190,11 @@ test('R1 R4: a binary replaced mid-session is read again, and orthanc_help says 
   expect(notice).toContain('0.6.0')
   expect(notice).toContain('0.7.1')
   expect(notice.indexOf('0.6.0') < notice.indexOf('0.7.1')).toBe(true)
-  // Once: the next call does not repeat it.
-  const again = await help($)
+  // Once: the next call does not repeat it. (Never three identical calls in a
+  // row in these tests: the loop guard blocks the third.)
+  const again = await help($, { group: 'automate' })
   expect(again.includes('0.6.0')).toBe(false)
-  expect(again).toContain('automate (2)')
+  expect(again).toContain("Orthanc group 'automate': 2 commands")
 })
 
 test('R2: a link pointed at another release is read again', async ($, on) => {
@@ -239,7 +240,7 @@ test('R5: a deleted binary keeps the old list, says why, and starts nothing', as
   expect(out).toContain('ontology (2)')
   expect(out).toContain('not found')
   expect(out).toContain('0.6.0')
-  await help($)
+  expect(await help($, { query: 'ontology' })).toContain('not found')
   expect(h.runs.length).toBe(runs)
   // Put back as a newer release: read again.
   install(h, SYSTEM, NEW, 300)
@@ -260,8 +261,8 @@ for (const broken of ['garbage', 'empty', 'error'] as const) {
     expect(out).toContain('0.6.0')
     expect(manifestRuns(h).length).toBe(2)
     // Not on every call.
-    const warned = await help($)
-    expect(warned).toContain('ontology (2)')
+    const warned = await help($, { group: 'ontology' })
+    expect(warned).toContain('ontology list')
     expect(warned).toContain('0.6.0')
     expect(manifestRuns(h).length).toBe(2)
     // Later, once.
@@ -282,8 +283,8 @@ test('R7: ORTHANC_BIN set, changed and unset each read that binary', async ($, o
   h.files.set(DEV, { size: 4242, mtimeMs: 500 })
   h.binaries.set(DEV, { version: '0.8.0-dev', groups: ['devops', 'ontology'] })
   h.env.set('ORTHANC_BIN', DEV)
-  const dev = await help($)
-  expect(dev).toContain('devops (2)')
+  const dev = await help($, { group: 'devops' })
+  expect(dev).toContain("Orthanc group 'devops': 2 commands")
   expect(dev.split('\n')[0]).toContain('0.8.0-dev')
   h.env.delete('ORTHANC_BIN')
   const system = await help($)
@@ -293,7 +294,7 @@ test('R7: ORTHANC_BIN set, changed and unset each read that binary', async ($, o
 
 test('R8: calls that arrive during a reload share one agent-manifest and all see the new list', async ($, on) => {
   const { h, clock } = harness(on)
-  await help($)
+  await help($, { query: 'ontology' })
   install(h, SYSTEM, NEW)
   h.manifestMs = 2000
   const calls = [help($), help($), help($, { group: 'automate' }), help($, { query: 'workshop' }), cli($, 'automate status')]
@@ -306,7 +307,7 @@ test('R8: calls that arrive during a reload share one agent-manifest and all see
   expect(group).toContain("Orthanc group 'automate': 2 commands")
   expect(query).toContain('workshop list')
   expect((ran as Awaited<ReturnType<typeof cli>>).errors).toEqual([])
-  const notices = [one, two, group, query].filter(text => text.includes('0.6.0'))
+  const notices = ([one, two, group, query] as string[]).filter(text => text.includes('0.6.0'))
   expect(notices.length).toBe(1)
 })
 
