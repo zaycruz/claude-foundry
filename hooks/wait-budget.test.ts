@@ -237,6 +237,7 @@ function harness(on: On) {
     const line = lineOf(e.argv)
     const reply = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (line === 'agent-manifest') return reply(MANIFEST)
+    if (line === 'version') return reply(envelope({ version: '0.0.0-test' }))
     if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
     if (line === 'ontology list') return reply(envelope({ data: [] }))
     if (e.argv.includes('--help')) return reply('usage')

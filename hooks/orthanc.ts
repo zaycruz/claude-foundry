@@ -198,7 +198,7 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
 }
 
 // Refusals orthanc_cli makes itself, before orthanc starts.
-const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command'])
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
 
 /** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
 export function notRunFailure(envelope: Envelope): boolean {

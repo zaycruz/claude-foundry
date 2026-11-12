@@ -325,7 +325,8 @@ const write = ($: Engine, args: string[], command = 'dataset create') =>
 const ran = (h: Harness, line: string) => h.calls.includes(line)
 const prompt = async ($: Engine) =>
   ((await $.classic.SubagentStart({ agent_id: 'n', agent_type: 'foundry:foundry-scout' } as never)).additionalContext ?? []).join('\n')
-const quiet = (calls: string[]) => calls.filter(call => call !== 'agent-manifest' && call !== 'configure list')
+// A manifest read runs `version` beside `agent-manifest` (orthanc-0hzh).
+const quiet = (calls: string[]) => calls.filter(call => call !== 'agent-manifest' && call !== 'version' && call !== 'configure list')
 
 /** /profile, /ontology, /namespace (unless null), `beforeOn`, then /fde on. */
 async function bind(
