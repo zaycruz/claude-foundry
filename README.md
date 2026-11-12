@@ -10,11 +10,12 @@ says so instead of falling back to REST.
   A waiting command (`repository checks wait`, `ontology branch-index-status
   --wait`, `sql wait`, `ai-fde run --apply`) runs as long as its own `--timeout`
   and `--publish-grace`, plus the time Orthanc adds around the wait (370 s for
-  `ai-fde run`) and a margin, from 300 s up to 2,290 s. A call that would need
-  more is refused before it starts, with the largest `--timeout` that fits
-  (for `ai-fde run`, also `--detach` with `ai-fde status` and `ai-fde result`).
-  A call stopped before its timer (an interrupted turn, a plugin reload) says
-  `reason: cancelled`, not a timeout.
+  `ai-fde run`) and a margin, from 300 s up to 2,290 s (more for a command
+  whose own defaults need more). A call that would need more is refused before
+  it starts and before any approval prompt, with the largest `--timeout` that
+  fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
+  `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
+  says `reason: cancelled`; a stop by the timer says `reason: timeout`.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a

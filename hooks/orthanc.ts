@@ -72,8 +72,9 @@ function flagsFrom(args: unknown): ManifestFlag[] {
 // interval (Orthanc can overshoot its deadline by one) and a margin, so Orthanc
 // reports its own timeout instead of being killed. The floor is the old fixed
 // 300 s; the cap is Orthanc's longest default wait (ai-fde run: 1800 s plus
-// 370 s around it) plus the margin. A call that would need more is refused
-// before Orthanc starts.
+// 370 s around it) plus the margin, or more for a command whose own defaults
+// need more, so a call with its defaults is never refused. A call that would
+// need more is refused before Orthanc starts.
 const CLI_MARGIN_S = 120
 export const CLI_TIMEOUT_FLOOR_MS = 300_000
 const WAIT_FLAGS = ['--timeout', '--publish-grace']
@@ -107,24 +108,43 @@ function flagArgument(args: readonly string[], flag: string): string | undefined
   return value
 }
 
-export type CliWait = { timeoutMs: number; neededMs: number; overCap: boolean; maxTimeoutS?: number }
+export type CliWait = {
+  timeoutMs: number
+  neededMs: number
+  /** The cap for this command: the general cap, or what its own defaults need when that is more. */
+  capMs: number
+  overCap: boolean
+  /** The largest --timeout that fits, when one does. */
+  maxTimeoutS?: number
+  /** The flags the call passed that put it over the cap, --timeout when one smaller would fit. */
+  overFlags?: string[]
+}
+
+const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
 
 /**
  * orthanc_cli's timer for `command` with `args` (the resolved args, flags
  * included): `timeoutMs` the timer, cut to the cap; `overCap` when the call
- * would need more, then with the largest `maxTimeoutS` that fits when the
- * call passes --timeout.
+ * would need more, then with the largest `maxTimeoutS` that fits, and the
+ * flags to make smaller.
  */
 export function cliWait(command: ManifestCommand | undefined, args: readonly string[]): CliWait {
   const flags = command?.flags ?? []
   const extra = command ? WAIT_EXTRAS[command.path] : undefined
   const declares = (flag: string) => flags.some(entry => entry.flag === flag)
-  const passes = (flag: string) => args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
-  const seconds = (flag: string) => {
-    const raw = flagArgument(args, flag) ?? flags.find(entry => entry.flag === flag)?.default ?? extra?.defaults[flag]
+  // A switch is on when passed bare or with a value other than false/0/no/off.
+  const passes = (flag: string) =>
+    args.some(arg => arg === flag || (arg.startsWith(`${flag}=`) && !OFF_VALUES.has(arg.slice(flag.length + 1).trim().toLowerCase())))
+  const given = (flag: string) => args.some(arg => arg === flag || arg.startsWith(`${flag}=`))
+  const parse = (raw: string | undefined) => {
     const value = raw === undefined || raw.trim() === '' ? NaN : Number(raw)
-    return Number.isFinite(value) && value > 0 ? value : 0
+    return Number.isFinite(value) && value >= 0 ? value : undefined
   }
+  const defaultSeconds = (flag: string) =>
+    parse(flags.find(entry => entry.flag === flag)?.default ?? extra?.defaults[flag]) ?? 0
+  // A value orthanc will reject counts as the default, so the timer is never
+  // shorter than the wait orthanc would run.
+  const seconds = (flag: string) => parse(flagArgument(args, flag)) ?? defaultSeconds(flag)
   // A command with a --wait switch only waits when it is passed; --no-wait never
   // waits; --detach returns once the job exists; without --apply it is a plan.
   const waits =
@@ -132,18 +152,27 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     !passes('--detach') &&
     (!declares('--apply') || passes('--apply')) &&
     (!declares('--wait') || passes('--wait'))
-  const wait = waits ? WAIT_FLAGS.reduce((sum, flag) => sum + seconds(flag), 0) : 0
-  if (wait === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, overCap: false }
-  const poll = Math.max(...POLL_FLAGS.map(seconds))
-  const totalS = wait + (extra?.aroundS ?? 0) + poll + CLI_MARGIN_S
+  const totalOf = (secondsOf: (flag: string) => number) => {
+    const wait = WAIT_FLAGS.reduce((sum, flag) => sum + secondsOf(flag), 0)
+    return wait === 0 ? 0 : wait + (extra?.aroundS ?? 0) + Math.max(...POLL_FLAGS.map(secondsOf)) + CLI_MARGIN_S
+  }
+  const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
+  const totalS = waits ? totalOf(seconds) : 0
+  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false }
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
-  const overCap = neededMs > CLI_TIMEOUT_CAP_MS
-  const fits = Math.floor(CLI_TIMEOUT_CAP_MS / 1000 - (totalS - seconds('--timeout')))
+  const overCap = neededMs > capMs
+  if (!overCap) return { timeoutMs: neededMs, neededMs, capMs, overCap }
+  const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
+  // When no --timeout fits, the other passed flags are what to make smaller.
+  const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== '--timeout' && given(flag) && seconds(flag) > 0)
+  const overFlags = fits > 0 ? ['--timeout'] : others
   return {
-    timeoutMs: Math.min(CLI_TIMEOUT_CAP_MS, neededMs),
+    timeoutMs: capMs,
     neededMs,
+    capMs,
     overCap,
-    ...(overCap && passes('--timeout') && fits > 0 ? { maxTimeoutS: fits } : {}),
+    ...(fits > 0 ? { maxTimeoutS: fits } : {}),
+    ...(overFlags.length > 0 ? { overFlags } : {}),
   }
 }
 
@@ -152,10 +181,11 @@ export const cliTimeoutMs = (command: ManifestCommand | undefined, args: readonl
 
 /** The refusal of a call that would run past the cap; Orthanc did not start. */
 export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelope {
-  const cap = CLI_TIMEOUT_CAP_MS / 1000
+  const cap = wait.capMs / 1000
   const needed = Math.ceil(wait.neededMs / 1000)
+  const smaller = wait.overFlags?.length ? wait.overFlags.join(' or ') : '--timeout'
   const ways = [
-    wait.maxTimeoutS === undefined ? 'Pass a smaller --timeout' : `Pass --timeout ${wait.maxTimeoutS} or less`,
+    wait.maxTimeoutS === undefined ? `Pass a smaller ${smaller}` : `Pass --timeout ${wait.maxTimeoutS} or less`,
     WAIT_EXTRAS[command.path]?.detachHint,
     command.kind === 'read-only' ? 'and call it again if it times out: the wait is a read' : undefined,
   ].filter(Boolean)
@@ -165,6 +195,15 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
     command.path,
     { cap_seconds: cap, needed_seconds: needed, ...(wait.maxTimeoutS === undefined ? {} : { max_timeout_seconds: wait.maxTimeoutS }) },
   )
+}
+
+// Refusals orthanc_cli makes itself, before orthanc starts.
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command'])
+
+/** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
+export function notRunFailure(envelope: Envelope): boolean {
+  const [first] = Array.isArray(envelope.errors) ? envelope.errors : []
+  return (isRecord(first) && typeof first.type === 'string' && NOT_RUN_TYPES.has(first.type)) || isUsageError(envelope)
 }
 
 /** The next step after orthanc_cli's timer stopped a call, or the call was cancelled. */

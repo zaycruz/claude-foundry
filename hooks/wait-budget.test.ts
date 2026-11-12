@@ -281,10 +281,6 @@ function harness(on: On) {
   })
   const store = new Map<string, unknown>()
   on('store.get', (_$, e) => ({ value: e.key === 'approvalMode' ? h.mode : store.get(e.key) }))
-  on('ui.ask', (_$, e) => {
-    h.asks.push(String((e as { question?: unknown }).question ?? ''))
-    return { value: 'Approve' }
-  })
   on('store.set', (_$, e) => {
     store.set(e.key, e.value)
     return { value: undefined }
@@ -298,7 +294,14 @@ function harness(on: On) {
   on('ui.log', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('classic.SubagentStart', () => ({}))
-  on('tool.call', () => ({ result: 'ran' }) as never)
+  // $.ui.ask reaches the operator as an AskUserQuestion call (as in tag.test.ts).
+  on('tool.call', (_$, e) => {
+    const asked = e as unknown as { tool: string; questions?: { question: string }[] }
+    if (asked.tool !== 'AskUserQuestion') return { result: 'ran' } as never
+    const question = asked.questions?.[0]?.question ?? ''
+    h.asks.push(question)
+    return { result: { questions: asked.questions, answers: { [question]: 'Approve' } } } as never
+  })
   return { h, clock }
 }
 
