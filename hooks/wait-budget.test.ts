@@ -176,33 +176,32 @@ function harness(on: On) {
     if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
     if (line === 'ontology list') return reply(envelope({ data: [] }))
     if (e.argv.includes('--help')) return reply('usage')
-    h.runs.push({ line, timeoutMs: e.timeoutMs ?? 30_000 })
-    if (h.missing) throw new Error('foundry: $.process.run(orthanc) failed: spawn orthanc ENOENT')
+    h.runs.push({ line, timeoutMs: e.init?.timeoutMs ?? 30_000 })
+    // A refusal stands in for the host's rejection, with the host's wording.
+    if (h.missing) return { deny: 'cannot start orthanc: spawn orthanc ENOENT' }
     if (h.child === 'finish') return reply(done(line))
     if (h.child === 'hang') {
-      await clock.sleep(e.timeoutMs ?? 30_000)
-      throw new Error(`foundry: $.process.run(orthanc) aborted: still running after ${e.timeoutMs}ms`)
+      await clock.sleep(e.init?.timeoutMs ?? 30_000)
+      return { deny: `aborted: still running after ${e.init?.timeoutMs}ms` }
     }
     await clock.sleep(h.child.abortAfterMs)
-    throw new Error('foundry: $.process.run(orthanc) aborted')
+    return { deny: 'aborted' }
   })
-  on('process.spawn', async function* (_$, e) {
+  on('process.spawn', async function* (_$, e, next) {
     const line = lineOf(e.argv)
     h.spawns.push(line)
-    try {
-      if (h.child === 'finish') {
-        yield { stream: 'stdout' as const, text: done(line) }
-        return { code: 0, signal: null }
-      }
-      if (h.child === 'hang') {
-        await clock.sleep(10 * CLI_TIMEOUT_CAP_MS)
-        return { code: 0, signal: null }
-      }
-      await clock.sleep(h.child.abortAfterMs)
-      throw new Error('$.process.spawn aborted')
-    } finally {
-      h.stopped.push(line)
+    // The caller leaving the stream aborts the dispatch: the child is killed.
+    next.signal.addEventListener('abort', () => void h.stopped.push(line))
+    if (h.child === 'finish') {
+      yield { stream: 'stdout' as const, text: done(line) }
+      return { value: { code: 0, signal: null } }
     }
+    if (h.child === 'hang') {
+      await clock.sleep(10 * CLI_TIMEOUT_CAP_MS)
+      return { value: { code: 0, signal: null } }
+    }
+    await clock.sleep(h.child.abortAfterMs)
+    return { deny: '$.process.spawn aborted' }
   })
   const env = new Map<string, string>([['HOME', '/home/tester']])
   on('env.get', (_$, e) => ({ value: env.get(e.name) }))
@@ -250,7 +249,8 @@ test('W3: through the tool, ai-fde run --timeout 1200 is not stopped at the 300 
   const running = call($, 'ai-fde run', ['do it', '--apply', '--timeout', '1200'])
   expect(await after(clock, running, 301_000)).toBe(false)
   expect(await after(clock, running, 1_200_000)).toBe(false)
-  expect(h.spawns).toEqual(['ai-fde run do it --apply --timeout 1200'])
+  expect({ spawns: h.spawns, runs: h.runs }).toEqual({ spawns: ['ai-fde run do it --apply --timeout 1200'], runs: [] })
+  expect(h.stopped).toEqual([])
   // 1200 + 370 + 120 = 1690 s: stopped there and not before.
   expect(await after(clock, running, (1690 - 1501) * 1000 - 1000)).toBe(false)
   expect(await after(clock, running, 2000)).toBe(true)
@@ -324,7 +324,7 @@ test('W8: through the tool, a call stopped before its timer says it was cancelle
 test('W8: a short call cancelled under $.process.run says the same', async ($, on) => {
   const { h, clock } = harness(on)
   h.child = { abortAfterMs: 42_000 }
-  const running = call($, 'ontology list', [])
+  const running = call($, 'repository checks wait', ['ri.r', 'v1', '--timeout', '60'])
   expect(await after(clock, running, 42_000)).toBe(true)
   const error = parsed(await running).errors[0]!
   expect(error.reason).toBe('cancelled')
@@ -348,7 +348,7 @@ test('W9 W10: a stopped ai-fde run says how to find the run, and stays an uncert
 test('W12: a launch failure is neither cancelled nor timed out', async ($, on) => {
   const { h } = harness(on)
   h.missing = true
-  const error = parsed(await call($, 'ontology list', [])).errors[0]!
+  const error = parsed(await call($, 'repository checks wait', ['ri.r', 'v1', '--timeout', '60'])).errors[0]!
   expect(error.type).toBe('orthanc-launch-error')
   expect(error.reason).toBe(undefined)
   expect(error.hint).toBe(undefined)

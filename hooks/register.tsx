@@ -61,7 +61,7 @@ import {
 } from './fde'
 import {
   CLI_TIMEOUT_FLOOR_MS,
-  cliTimeoutMs,
+  cliWait,
   type Envelope,
   failure,
   guideEnvelope,
@@ -72,11 +72,13 @@ import {
   listItems,
   manifestFrom,
   normalizeCommand,
+  overCapFailure,
   parseEnvelope,
   renderCommand,
   renderListing,
   rowsOf,
   serialize,
+  withStoppedHint,
 } from './orthanc'
 import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
@@ -156,6 +158,9 @@ async function runLong($: EngineInterface, command: readonly string[], timeoutMs
   }
 }
 
+// The time for an elapsed count; the wall clock when $.clock cannot answer.
+const clockNow = ($: EngineInterface) => $.clock.now().catch(() => Date.now())
+
 // orthanc in agent mode, argv only, no shell; any failure comes back as an
 // envelope so callers handle one shape.
 async function runOrthanc(
@@ -165,6 +170,7 @@ async function runOrthanc(
   timeoutMs = CLI_TIMEOUT_FLOOR_MS,
 ): Promise<Envelope> {
   const full = ['--agent', '--non-interactive', ...(profile ? ['--profile', profile] : []), ...argv]
+  const started = await clockNow($)
   try {
     const command = [await orthancBin($), ...full]
     const ran = timeoutMs > PROCESS_RUN_MAX_MS ? await runLong($, command, timeoutMs) : await $.process.run(command, { timeoutMs })
@@ -176,8 +182,19 @@ async function runOrthanc(
       })
     )
   } catch (error) {
-    return failure('orthanc-launch-error', error instanceof Error ? error.message : String(error), argv.join(' '), {
-      timeout_seconds: timeoutMs / 1000,
+    const message = error instanceof Error ? error.message : String(error)
+    const elapsed = Math.round(((await clockNow($)) - started) / 1000)
+    const timer = timeoutMs / 1000
+    // The timer's stop says "still running after"; any other abort came from
+    // outside orthanc_cli (an interrupted turn, a plugin reload), before the timer.
+    const reason = message.includes('still running after') ? 'timeout' : /\baborted\b/.test(message) ? 'cancelled' : undefined
+    const said =
+      reason === 'cancelled'
+        ? `The call was stopped after ${elapsed} s, before its ${timer} s limit, by something other than orthanc_cli's timer (an interrupted turn or a plugin reload): ${message}`
+        : message
+    return failure('orthanc-launch-error', said, argv.join(' '), {
+      timeout_seconds: timer,
+      ...(reason ? { reason, elapsed_seconds: elapsed } : {}),
     })
   }
 }
@@ -228,7 +245,9 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
       command.path,
     )
   }
-  const envelope = await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, cliTimeoutMs(command, resolved.args))
+  const wait = cliWait(command, resolved.args)
+  if (wait.overCap) return overCapFailure(command, wait)
+  const envelope = withStoppedHint(await runOrthanc($, [...command.path.split(' '), ...resolved.args], input.profile, wait.timeoutMs), command)
   return guideEnvelope(envelope, command, isUsageError(envelope) ? await helpText($, command.path) : null)
 }
 

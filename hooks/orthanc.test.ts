@@ -71,7 +71,8 @@ test('T1 T4 T5 T6: the timer follows --timeout, both spellings, plus publish gra
 test('T2: a waiting command with no flags gets its own default wait', async () => {
   expect(seconds(cliTimeoutMs(CHECKS_WAIT, ['ri.r', 'refs/heads/master']))).toBe(600 + 120 + 120 + 10)
   expect(seconds(cliTimeoutMs(SQL_WAIT, ['q']))).toBe(420)
-  expect(cliTimeoutMs(INDEX_STATUS, ['ri.o', '--branch', 'ri.b', '--wait'])).toBe(CLI_TIMEOUT_CAP_MS)
+  // 1800 + one 15 s poll + 120 margin: under the cap since ai-fde run set it (orthanc-jjtk).
+  expect(seconds(cliTimeoutMs(INDEX_STATUS, ['ri.o', '--branch', 'ri.b', '--wait']))).toBe(1800 + 15 + 120)
   expect(seconds(cliTimeoutMs(INDEX_STATUS, ['ri.o', '--branch', 'ri.b', '--wait', '--timeout', '600']))).toBe(600 + 120 + 15)
 })
 
@@ -82,9 +83,10 @@ test('T3: --wait and --no-wait decide whether --timeout is a wait at all', async
   expect(seconds(cliTimeoutMs(SDK_GENERATE, ['ri.app', '--timeout', '900']))).toBe(1020)
 })
 
-test('T7 T8: the floor is 300 s, the cap is 1800 s plus the margin, garbage counts as no wait', async () => {
+test('T7 T8: the floor is 300 s, the cap is the longest default wait plus the margin, garbage counts as no wait', async () => {
   expect(seconds(CLI_TIMEOUT_FLOOR_MS)).toBe(300)
-  expect(seconds(CLI_TIMEOUT_CAP_MS)).toBe(1920)
+  // ai-fde run: 1800 s plus 370 s around it, plus the 120 s margin (orthanc-jjtk).
+  expect(seconds(CLI_TIMEOUT_CAP_MS)).toBe(2290)
   expect(cliTimeoutMs(LIST, ['ri.o'])).toBe(CLI_TIMEOUT_FLOOR_MS)
   expect(cliTimeoutMs(undefined, [])).toBe(CLI_TIMEOUT_FLOOR_MS)
   expect(cliTimeoutMs(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '99999'])).toBe(CLI_TIMEOUT_CAP_MS)
