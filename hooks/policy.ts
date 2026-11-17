@@ -90,7 +90,7 @@ const POSITIONAL_BRANCH_WRITES = new Set([
 ])
 // Promotion into main is the operator's decision, not the agent's. A release
 // tag is not here: it asks the operator outside yolo (see releaseTagCall).
-const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve'])
+const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'global-branch deploy', 'repository pull-request merge'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
 // Orthanc flags that take no value, so the word after one is a positional.

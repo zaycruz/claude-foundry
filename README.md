@@ -37,7 +37,8 @@ says so instead of falling back to REST.
   `--branch <global branch RID>`; dataset, stream and build writes must name a
   work branch; code goes to a work branch through `orthanc repository push` and
   a pull request. Branchless writes, `--allow-default-branch`, proposal
-  merges and approvals, default-branch pushes, raw `git push` to a Foundry
+  merges and approvals, `global-branch deploy`, `repository pull-request
+  merge`, default-branch pushes, raw `git push` to a Foundry
   repository and Foundry writes outside Orthanc are blocked. A write naming
   `main`/`master` asks the operator (above). Writes whose branch defaults to
   main or master must name a branch too: connectivity imports, repository
