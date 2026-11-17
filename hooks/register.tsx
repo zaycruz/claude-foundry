@@ -104,6 +104,9 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
+  branchesIn,
+  STORED_BRANCH_RUNS,
+  storedBranchReads,
 } from './policy'
 import {
   domainPatterns,
@@ -1573,8 +1576,27 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
   }
 }
 
+// A run of a stored schedule or import builds the branch stored in it: read it
+// first. Null when no read answered (the ladder then asks); undefined when the
+// call is not such a run.
+async function storedBranches($: EngineInterface, tool: string, input: Record<string, unknown>, manifest: readonly ManifestCommand[]): Promise<string[] | null | undefined> {
+  if (tool !== ORTHANC_CLI) return undefined
+  const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
+  if (!STORED_BRANCH_RUNS.has(resolved.path)) return undefined
+  const profile = profileArg(await currentScope($))
+  let answered = false
+  const found: string[] = []
+  for (const argv of storedBranchReads(resolved.path, resolved.args)) {
+    const envelope = await runOrthanc($, argv, profile, 60_000).catch(() => null)
+    if (envelope === null || isErrorEnvelope(envelope)) continue
+    answered = true
+    found.push(...branchesIn(envelope.data))
+  }
+  return answered ? found : null
+}
+
 // The guard, then the tools this mod serves: compass check → rules files →
-// git push → ladder → loop guard → serve. `note` records the gate's outcome for tracing.
+// git push → ladder → loop guard (off in yolo) → serve. `note` records the gate's outcome for tracing.
 async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<'tool.call'>, note: GateNote): Promise<EventResult<'tool.call'>> {
   const tool = String(e.tool)
   const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...raw } =
@@ -1653,12 +1675,13 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   let notRun = false
   try {
   const branch = (await $.state.get(BRANCH)).value ?? null
-  const classification = classifyCall(tool, input, manifest, branch)
+  const classification = classifyCall(tool, input, manifest, branch, await storedBranches($, tool, input, manifest))
   note.outcome = undefined
+  // Read once. A call outside the ladder needs it only for the loop guard: a store that cannot answer leaves the guard on.
+  const mode = classification ? await approvalMode($) : await approvalMode($).catch(() => DEFAULT_APPROVAL_MODE)
   if (classification) {
     note.foundry = true
     note.command = classification.command ?? undefined
-    const mode = await approvalMode($)
     const verdict =
       mode === 'auto' && classification.kind === 'mutation'
         ? await guardVerdict($, tool, input, classification).catch(() => null)
@@ -1673,11 +1696,14 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     }
   }
 
-  const looped = loopStep(loop, tool, input)
-  loop = looped.next
-  if (looped.reason) {
-    note.outcome = 'block'
-    return { deny: looped.reason }
+  // The loop guard is off in yolo.
+  if (mode !== 'yolo') {
+    const looped = loopStep(loop, tool, input)
+    loop = looped.next
+    if (looped.reason) {
+      note.outcome = 'block'
+      return { deny: looped.reason }
+    }
   }
 
   // The ladder may have waited on the operator: the files the call reads must still be the planned ones.

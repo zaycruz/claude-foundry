@@ -3,14 +3,17 @@
 // zay, 2026-10-21, on "'repository tag create' promotes work (a merge, an
 // approval or a release). The operator does it; the agent does not.": "lets
 // patch this too". A tag still publishes a release from a commit, so it is not
-// a plain write: `repository tag create --apply` asks the operator in every
-// approval mode, yolo included, the way a delete does. Merges, accepts and
-// approvals stay the operator's.
+// a plain write: `repository tag create --apply` asks the operator the way a
+// delete does. Merges, accepts and approvals stay the operator's.
+//
+// zay, 2026-10-22, on yolo: "nohting refused but still siloed to a branch that
+// is not main". In yolo a tag apply runs with no dialog, as a delete does
+// (yolo.test.ts Y2); every other mode still asks.
 //
 // Ways this can fail, written before the code:
 //  G1  A tag apply is still refused outright in some mode: the agent cannot tag.
-//  G2  A tag apply runs without the operator in some mode (ask-always,
-//      allow-edits, auto, yolo).
+//  G2  A tag apply runs without the operator in ask-always, allow-edits or
+//      auto mode, or asks in yolo.
 //  G3  The question does not say what is approved: the tag, the commit and the
 //      repository, and the Foundry branch when the tag is linked to one.
 //  G4  A tag, commit, repository or branch value that is not plain (a newline,
@@ -24,7 +27,8 @@
 //      spelled --APPLY or --apply=true. Each must ask.
 //  G7  A dry run (no --apply) asks or is refused, though it only prints a plan.
 //  G8  Promotion loosens: proposal merge, accept or approve runs or asks.
-//  G9  The prompt still calls tags the operator's, or does not say they ask.
+//  G9  The prompt still calls tags the operator's, or does not say they ask
+//      outside yolo.
 //  G10 In FDE mode a tag links to another branch, or applies with no dry run.
 //  G11 orthanc repository tag create in Bash runs, or asks.
 //
@@ -121,7 +125,7 @@ const tagged = (h: Harness) => h.calls.filter(call => call.startsWith('repositor
 const prompt = async ($: Engine) =>
   ((await $.classic.SubagentStart({ agent_id: 'a', agent_type: 'foundry:foundry-scout' } as never)).additionalContext ?? []).join('\n')
 
-for (const mode of MODES) {
+for (const mode of MODES.filter(mode => mode !== 'yolo')) {
   test(`G1 G2 G3: in ${mode} mode a tag apply asks once, names what it publishes, and runs on Approve`, async ($, on) => {
     const h = harness(on, mode)
     const wrote = await write($, 'repository tag create', tagArgs('--apply'))
@@ -132,8 +136,16 @@ for (const mode of MODES) {
   })
 }
 
-test('G3: a tag linked to a Foundry branch names the branch in the question', async ($, on) => {
+test('G1 G2: in yolo mode a tag apply runs and asks no one', async ($, on) => {
   const h = harness(on)
+  h.answer = 'throw'
+  expect((await write($, 'repository tag create', tagArgs('--apply'))).deny).toBe(undefined)
+  expect(h.asked).toEqual([])
+  expect(tagged(h)).toEqual([`repository tag create ${tagArgs('--apply').join(' ')}`])
+})
+
+test('G3: a tag linked to a Foundry branch names the branch in the question', async ($, on) => {
+  const h = harness(on, 'allow-edits')
   expect((await write($, 'repository tag create', tagArgs('--foundry-branch-rid', OTHER, '--apply'))).deny).toBe(undefined)
   expect(h.asked[0]).toContain(OTHER)
   expect(tagged(h).length).toBe(1)
@@ -164,7 +176,7 @@ for (const [label, args] of [
 
 for (const answer of ['Decline', 'yes', 'throw'] as Answer[]) {
   test(`G5: answered ${answer}, the tag does not run`, async ($, on) => {
-    const h = harness(on)
+    const h = harness(on, 'allow-edits')
     h.answer = answer
     const wrote = await write($, 'repository tag create', tagArgs('--apply'))
     expect(typeof wrote.deny).toBe('string')
@@ -181,7 +193,7 @@ for (const [label, command, args] of [
   ['--apply=true', 'repository tag create', tagArgs('--apply=true')],
 ] as [string, string, string[]][]) {
   test(`G6: ${label} still asks`, async ($, on) => {
-    const h = harness(on)
+    const h = harness(on, 'allow-edits')
     h.answer = 'Decline'
     expect(typeof (await write($, command, args)).deny).toBe('string')
     expect(h.asked.length).toBe(1)
@@ -208,15 +220,15 @@ for (const mode of MODES) {
   })
 }
 
-test('G9: the prompt says tags ask the operator and merges stay blocked', async ($, on) => {
-  harness(on)
+test('G9: the prompt says tags ask the operator outside yolo and merges stay blocked', async ($, on) => {
+  harness(on, 'allow-edits')
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   const text = await prompt($)
-  expect(text).toContain('Release tags (repository tag create --apply) ask the operator in every mode')
+  expect(text).toContain('Release tags (repository tag create --apply) ask the operator in every mode except yolo')
   expect(text).toContain('merges and default-branch pushes are blocked in every mode')
 })
 
-test('G10: in FDE mode a tag links only to the session branch, and applies only after its dry run', async ($, on) => {
+test('G10: in FDE mode under yolo a tag links only to the session branch, and applies only after its dry run, with no dialog', async ($, on) => {
   const h = harness(on)
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
@@ -226,7 +238,7 @@ test('G10: in FDE mode a tag links only to the session branch, and applies only 
   expect(h.asked).toEqual([])
   expect((await write($, 'repository tag create', tagArgs('--foundry-branch-rid', MADE))).deny).toBe(undefined)
   expect((await write($, 'repository tag create', tagArgs('--foundry-branch-rid', MADE, '--apply'))).deny).toBe(undefined)
-  expect(h.asked.length).toBe(1)
+  expect(h.asked).toEqual([])
   expect(tagged(h).filter(call => call.includes('--apply'))).toEqual([
     `repository tag create ${tagArgs('--foundry-branch-rid', MADE, '--apply').join(' ')}`,
   ])
