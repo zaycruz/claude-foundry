@@ -11,7 +11,10 @@
 // Ways this can fail, written before the code:
 //  Y1  In yolo a delete, or a write with --force, opens a dialog, or does not run
 //      when no one can be asked (a subagent, a -p run).
-//  Y2  In yolo a release tag apply asks, or does not run when no one can be asked.
+//  Y2  In yolo a release tag apply on a global branch (--branch ri.branch..branch.…)
+//      asks, or does not run when no one can be asked. A tag with no branch
+//      publishes on main, so it asks in yolo too (orthanc-source CONTRACTS.md OA4,
+//      operator_approval_scope; approval-scope.test.ts S3, S9).
 //  Y3  Another mode loosens: ask-always, allow-edits and auto stop asking for a
 //      delete, a --force write or a tag apply.
 //  Y4  In any mode a write that names main, master or HEAD as its branch runs
@@ -255,7 +258,7 @@ const ASKING: [string, string[]][] = [
   ['ontology object-type-delete', ['T', '--branch', GLOBAL, '--apply']],
   ['resource delete', [FOLDER, '--apply']],
   ['orchestration builds create', [TARGET, '--branch', 'agent-rebuild', '--force', '--apply']],
-  ['repository tag create', [REPO, TAG, '--commit-hash', COMMIT, '--apply']],
+  ['repository tag create', [REPO, TAG, '--commit-hash', COMMIT, '--branch', GLOBAL, '--apply']],
 ]
 
 test('Y1 Y2: in yolo a delete, a --force write and a tag apply run with no dialog, even with no one to ask', async ($, on) => {
@@ -436,7 +439,7 @@ test('Y9: the auto prompt still says release tags ask', async ($, on) => {
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   const text = await prompt($)
   expect(text).toContain('Foundry approval mode: auto')
-  expect(text).toContain('Release tags (repository tag create --apply) ask the operator in every mode except yolo')
+  expect(text).toContain('Release tags (repository tag create --apply) and writes Orthanc marks operator_approval ask the operator in every mode; in yolo only those on main ask')
 })
 
 test('Y10: in FDE mode under yolo an apply still needs its dry run; then a bound delete runs with no dialog', async ($, on) => {

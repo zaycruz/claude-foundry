@@ -7,8 +7,9 @@
 // delete does. Merges, accepts and approvals stay the operator's.
 //
 // zay, 2026-10-22, on yolo: "nohting refused but still siloed to a branch that
-// is not main". In yolo a tag apply runs with no dialog, as a delete does
-// (yolo.test.ts Y2); every other mode still asks.
+// is not main". In yolo a tag apply on a global branch runs with no dialog, as
+// a delete does (yolo.test.ts Y2); a tag with no branch publishes on main and
+// asks (orthanc-source CONTRACTS.md OA4). Every other mode still asks.
 //
 // Ways this can fail, written before the code:
 //  G1  A tag apply is still refused outright in some mode: the agent cannot tag.
@@ -136,12 +137,21 @@ for (const mode of MODES.filter(mode => mode !== 'yolo')) {
   })
 }
 
-test('G1 G2: in yolo mode a tag apply runs and asks no one', async ($, on) => {
+test('G1 G2: in yolo mode a tag apply on a global branch runs and asks no one', async ($, on) => {
   const h = harness(on)
   h.answer = 'throw'
-  expect((await write($, 'repository tag create', tagArgs('--apply'))).deny).toBe(undefined)
+  expect((await write($, 'repository tag create', tagArgs('--branch', OTHER, '--apply'))).deny).toBe(undefined)
   expect(h.asked).toEqual([])
-  expect(tagged(h)).toEqual([`repository tag create ${tagArgs('--apply').join(' ')}`])
+  expect(tagged(h)).toEqual([`repository tag create ${tagArgs('--branch', OTHER, '--apply').join(' ')}`])
+})
+
+// orthanc-source CONTRACTS.md OA4: a tag with no branch publishes on main, so it asks in yolo too.
+test('G2: in yolo mode a tag apply with no branch asks, and does not run when no one can be asked', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  expect(typeof (await write($, 'repository tag create', tagArgs('--apply'))).deny).toBe('string')
+  expect(h.asked.length).toBe(1)
+  expect(tagged(h)).toEqual([])
 })
 
 test('G3: a tag linked to a Foundry branch names the branch in the question', async ($, on) => {
@@ -224,7 +234,7 @@ test('G9: the prompt says tags ask the operator outside yolo and merges stay blo
   harness(on, 'allow-edits')
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   const text = await prompt($)
-  expect(text).toContain('Release tags (repository tag create --apply) ask the operator in every mode except yolo')
+  expect(text).toContain('Release tags (repository tag create --apply) and writes Orthanc marks operator_approval ask the operator in every mode; in yolo only those on main ask')
   expect(text).toContain('merges and default-branch pushes are blocked in every mode')
 })
 

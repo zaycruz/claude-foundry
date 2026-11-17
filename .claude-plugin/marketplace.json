@@ -1,7 +1,8 @@
 {
   "name": "claude-foundry",
   "owner": { "name": "Zay Cruz", "url": "https://github.com/zaycruz" },
+  "description": "The foundry plugin: Palantir Foundry for Claude Code through the Orthanc CLI, with an approval ladder and a branch rule on every write",
   "plugins": [
-    { "name": "foundry", "version": "0.6.0", "source": "./", "description": "Palantir Foundry for Claude Code through the Orthanc CLI" }
+    { "name": "foundry", "version": "0.6.1", "source": "./", "description": "Palantir Foundry for Claude Code through the Orthanc CLI" }
   ]
 }
