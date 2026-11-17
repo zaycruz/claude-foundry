@@ -55,7 +55,7 @@ function harness(on: On, mode: (typeof MODES)[number] = 'yolo', entries: unknown
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/home/tester' : undefined }))
-  on('env.set', () => ({ value: undefined }))
+  on('env.set', () => ({ value: {} }))
   on('store.get', (_$, e) => ({ value: store.get(e.key) }))
   on('store.set', (_$, e) => {
     store.set(e.key, e.value)
