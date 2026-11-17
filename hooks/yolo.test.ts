@@ -72,6 +72,10 @@
 //      unprotects main, with no ask: in yolo for all of them, in allow-edits
 //      for the ones that are not deletes. Each must ask in every mode; a work
 //      branch runs in yolo with no ask.
+//  Y19 A promotion into main other than a proposal (global-branch deploy, which
+//      deploys a proposal to main; repository pull-request merge) runs in
+//      yolo or allow-edits. Promotions are the operator's: refused in every
+//      mode, asking no one, like proposal merge.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
@@ -122,6 +126,8 @@ const COMMANDS: [string, string][] = [
   ['branch-protection repo protect', 'mutation'],
   ['branch-protection repo policy set', 'mutation'],
   ['branch-protection repo unprotect', 'mutation'],
+  ['global-branch deploy', 'mutation'],
+  ['repository pull-request merge', 'mutation'],
   ['ontology object-upsert', 'mutation'],
   ['resource delete', 'mutation'],
   ['dataset create', 'mutation'],
@@ -529,6 +535,7 @@ test('Y15: in yolo a new module or a paused automation, which change nothing on 
 const Y16_MANIFEST: ManifestCommand[] = [
   { path: 'dataset schema set', kind: 'mutation' },
   { path: 'orchestration builds create', kind: 'mutation' },
+  { path: 'repository checks rerun', kind: 'mutation' },
 ]
 const casings = (name: string) => [name.toLowerCase(), name.toUpperCase(), name[0]!.toUpperCase() + name.slice(1).toLowerCase()]
 const PREFIXES = ['', 'refs/heads/', 'heads/', './', '+', ':', '+refs/heads/', 'refs//heads//']
@@ -636,3 +643,36 @@ test('Y18: in yolo the same writes on a work branch run with no ask', async ($, 
   }
   expect(h.asked).toEqual([])
 })
+
+test('Y16: on a command the branch rule does not cover, no spelling of main runs', async () => {
+  const ran: string[] = []
+  let checked = 0
+  for (const name of ['main', 'master', 'HEAD'])
+    for (const cased of casings(name))
+      for (const prefix of PREFIXES)
+        for (const suffix of SUFFIXES)
+          for (const form of flagForms(`${prefix}${cased}${suffix}`))
+            for (const mode of ALL_MODES) {
+              checked += 1
+              const args = [REPO, ...form, '--apply']
+              const outcome = decide(mode, 'repository checks rerun', args)
+              if (outcome === 'run') ran.push(`${mode} ${args.join(' ')}`)
+            }
+  expect({ ran: ran.length, first: ran.slice(0, 10) }).toEqual({ ran: 0, first: [] })
+  expect(checked).toBe(3 * 3 * PREFIXES.length * SUFFIXES.length * 10 * ALL_MODES.length)
+})
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y19: in ${mode} mode a promotion into main is refused and asks no one`, async ($, on) => {
+    const h = harness(on, mode)
+    for (const [command, args] of [
+      ['global-branch deploy', [GLOBAL, '--proposal', 'ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply', '--yes']],
+      ['repository pull-request merge', [REPO, '7', '--apply', '--yes']],
+    ] as [string, string[]][]) {
+      const wrote = await write($, command, args)
+      expect({ command, denied: typeof wrote.deny === 'string' }).toEqual({ command, denied: true })
+    }
+    expect(h.asked).toEqual([])
+    expect(h.calls.filter(call => !SETUP_CALLS.includes(call))).toEqual([])
+  })
+}
