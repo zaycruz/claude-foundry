@@ -76,6 +76,18 @@ const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-ups
 // Writes that change main and take no branch: each is a write on main, so it
 // asks the operator in every mode, yolo too.
 const MAIN_WRITES = new Set(['workshop module publish'])
+// Writes that name their branch as a positional. Any positional naming main
+// counts (a flag the guard does not know can shift the positions), so these
+// ask for main in every mode; over-reading only asks more.
+const POSITIONAL_BRANCH_WRITES = new Set([
+  'dataset branches delete',
+  'repository branch delete',
+  'repository checks required set',
+  'repository checks required remove',
+  'branch-protection repo protect',
+  'branch-protection repo policy set',
+  'branch-protection repo unprotect',
+])
 // Promotion into main is the operator's decision, not the agent's. A release
 // tag is not here: it asks the operator outside yolo (see releaseTagCall).
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve'])
@@ -366,6 +378,7 @@ function orthancClassification(
     // `-b` is --branch in every command, so every spelling of it names the branch.
     targetsProtected:
       MAIN_WRITES.has(command) ||
+      (POSITIONAL_BRANCH_WRITES.has(command) && args.some(arg => !unquote(arg).startsWith('-') && isProtectedValue(unquote(arg)))) ||
       targetsProtected(rawInput) ||
       flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue),
   }

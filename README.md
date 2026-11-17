@@ -25,8 +25,10 @@ says so instead of falling back to REST.
   repeated three times is blocked. In `yolo` only a write on main asks:
   deletes, `--force` writes and release tags run at once, and the loop guard
   is off. A write naming `main`, `master` or `HEAD` as its branch (any
-  spelling: `--branch=main`, `-b master`, `-bmain`), and `workshop module
-  publish`, which works on main only, run only when the operator approves
+  spelling: `--branch=main`, `-b master`, `-bmain`, or as a positional, as in
+  `dataset branches delete <dataset> master` or `branch-protection repo
+  unprotect <repo> main`), and `workshop module publish`, which works on main
+  only, run only when the operator approves
   them, in every mode; with no one to ask they are refused.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied.
