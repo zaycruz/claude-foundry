@@ -10,8 +10,11 @@ Parity with Orthanc 0.7.7 and orthanc-source main (operator_approval_scope).
     `--flag=value`, any order). `--yes` alone is not the marked change.
   - Scope `always` asks in every mode, yolo included (branch protection off or
     weakened, project policies).
-  - Scope `work-branch` runs in yolo and asks in other modes
-    (`global-branch roles set`, `remove-resources`, `remove-repo`).
+  - Scope `work-branch` runs in yolo when the branch positional is a global
+    branch RID, and asks in other modes (`global-branch roles set`,
+    `remove-resources`, `remove-repo`).
+  - Orthanc 0.7.7 as released lists the markers but no scopes, so there every
+    marker is `always` and asks in yolo too, as the contract says.
   - Scope `{work_branch_flag, flag_aliases}` runs in yolo only when that flag
     (or an alias) names one global branch RID.
   - A marker or scope the guard cannot read is `always`; an unreadable

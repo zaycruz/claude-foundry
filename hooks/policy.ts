@@ -460,7 +460,12 @@ export function operatorApprovalAsk(
     const values = flagValues(args, names)
     return values.length === 1 && GLOBAL_BRANCH_RID_VALUE.test(values[0] ?? '')
   }
-  const yoloSkips = scope.kind === 'work-branch' || (scope.kind === 'flag' && onWorkBranch(scope.flags))
+  // "work-branch" commands take the global branch as their first positional (OA2,
+  // OA7). Orthanc refuses main there, but an older binary may not: the guard checks too.
+  const branchPositional = positionals(args)[0] ?? ''
+  const yoloSkips =
+    (scope.kind === 'work-branch' && GLOBAL_BRANCH_RID_VALUE.test(branchPositional)) ||
+    (scope.kind === 'flag' && onWorkBranch(scope.flags))
   const where = yoloSkips ? 'It stays on a work branch: in yolo it runs without asking.' : 'It can land on main or change what guards main, so it asks in every mode.'
   return {
     question: `'${path}' ${cut} needs the operator: Orthanc's agent manifest marks it operator_approval when ${listed.join(' ')} are given. ${where}`,
@@ -1158,9 +1163,14 @@ export function classifyCall(
     // A read whose entry also asks for the operator is not let through as a read.
     if (classifyOrthancCommand(resolved.path, manifest) === 'read' && approval === null) return null
     const classified = orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, stored)
-    // The release tag's own question covers its marker; every other marker adds its ask.
-    if (approval === null || classified.release !== undefined || classified.kind !== 'mutation') return classified
-    return { ...classified, operatorApproval: approval }
+    if (approval === null) return classified
+    // The release tag's own question covers its marker, but yolo skips it only when
+    // the tag check and the marker's scope both say it stays off main.
+    if (classified.release !== undefined) {
+      return { ...classified, releaseOnWorkBranch: classified.releaseOnWorkBranch === true && approval.yoloSkips }
+    }
+    // A marker on a branch creation does not loosen it: it asks like a write.
+    return { ...classified, kind: 'mutation', operatorApproval: approval }
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {

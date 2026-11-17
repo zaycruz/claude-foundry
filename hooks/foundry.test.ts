@@ -268,7 +268,8 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
   expect(cli('cp', ['ri.a', 'ri.f', '-b', 'agent-copy', '--apply'])?.error).toBe(undefined)
 })
 
-// zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag runs there.
+// zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag on a
+// global branch runs there; a tag with no branch publishes on main and asks (orthanc-source CONTRACTS.md OA4).
 test('F21 F22: a tag apply asks in every mode, yolo only off a global branch (tag.test.ts); repository push reads its destination past boolean flags', async () => {
   const tag = (args: string[]) => classifyCall(CLI, { command: 'repository tag create', args }, MANIFEST, null)
   const applied = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--apply'])

@@ -39,6 +39,8 @@
 //  S10 A marker loosens a refusal: the branch rule or a promotion still blocks.
 //  S11 In auto, the Haiku guard's approval skips the marker's ask.
 //  S13 A read the manifest marks runs as a read (orthanc_cli or Bash).
+//  S14 The tag ignores its own marker scope. S15 A case orthanc refuses
+//      (e2e/cases/operator-approval-scope.json) runs in yolo.
 //  S12 The question does not name the command and its args, or lets an arg
 //      forge text (a newline) into it.
 //
@@ -240,4 +242,38 @@ test('S13: a read the manifest marks is not let through as a read, in orthanc_cl
   expect(classifyCall('mcp__foundry__orthanc_cli', { command: 'dataset get', args: [DATASET] }, manifest, null)).toBe(null)
   const shell = classifyCall('Bash', { command: `orthanc dataset get ${DATASET}` }, manifest, null)
   expect(shell?.error).toContain('orthanc_cli')
+})
+
+// S14 The release tag's own scope is ignored: a tag marked "always", or with a
+//     scope the guard cannot read, runs in yolo on a global branch.
+test('S14: the release tag honours its marker scope', async () => {
+  const tagWith = (scope: unknown) => manifestFrom({ schema_version: 'foundry-agent-v1',
+    data: { commands: [{ path: 'repository tag create', kind: 'mutation', args: [], operator_approval: { when_all_flags: ['--apply'] }, operator_approval_scope: scope }] },
+  })
+  const onBranch = [...FULL['repository tag create']!, '--branch', GB]
+  // "work-branch" reads the first positional, which for a tag is the repository: it asks.
+  for (const scope of ['always', 'bogus', 'work-branch', { work_branch_flag: 'branch' }, { work_branch_flag: '--branch', extra: 1 }]) {
+    expect(decide('yolo', 'repository tag create', onBranch, tagWith(scope)).outcome).toBe('ask')
+  }
+  expect(decide('yolo', 'repository tag create', onBranch, tagWith({ work_branch_flag: '--branch' })).outcome).toBe('run')
+})
+
+// S15 orthanc-source e2e/cases/operator-approval-scope.json: each call orthanc
+//     refuses (a work-branch command pointed at main or with no branch, a tag
+//     on main) never runs in yolo through the guard either.
+test('S15: the cases orthanc refuses do not run in yolo', async () => {
+  const cases: [string, string[]][] = [
+    ['global-branch roles set', ['main', '--principal-type', 'everyone', '--role', 'OWNER', '--apply', '--yes']],
+    ['global-branch remove-resources', ['master', '--resource', DATASET, '--apply', '--yes']],
+    ['global-branch remove-resources', ['refs/heads/main', '--resource', DATASET, '--apply', '--yes']],
+    ['global-branch remove-repo', ['HEAD', '--repository-rid', REPO, '--apply', '--yes']],
+    ['global-branch remove-resources', ['--resource', DATASET, '--apply', '--yes']],
+    ['repository tag create', [...FULL['repository tag create']!, '--branch', 'main']],
+    ['repository tag create', [...FULL['repository tag create']!, '--branch=main']],
+    ['repository tag create', [...FULL['repository tag create']!, '--foundry-branch-rid', 'master']],
+    ['repository tag create', [...FULL['repository tag create']!, '--branch', 'HEAD']],
+  ]
+  for (const [command, args] of cases) {
+    expect([command, args, decide('yolo', command, args).outcome]).not.toEqual([command, args, 'run'])
+  }
 })
