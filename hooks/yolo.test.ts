@@ -66,6 +66,12 @@
 //      combination, at the ladder.
 //  Y17 FDE mode stops pinning: with a bound branch, a write naming main asks or
 //      runs instead of being refused.
+//  Y18 A write that names its branch as a positional (dataset branches delete,
+//      repository branch delete, repository checks required set/remove,
+//      branch-protection repo protect/policy set/unprotect) deletes master, or
+//      unprotects main, with no ask: in yolo for all of them, in allow-edits
+//      for the ones that are not deletes. Each must ask in every mode; a work
+//      branch runs in yolo with no ask.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
@@ -109,6 +115,13 @@ const COMMANDS: [string, string][] = [
   ['pipeline edit', 'mutation'],
   ['pipeline publish', 'mutation'],
   ['pipeline deploy', 'mutation'],
+  ['dataset branches delete', 'mutation'],
+  ['repository branch delete', 'mutation'],
+  ['repository checks required set', 'mutation'],
+  ['repository checks required remove', 'mutation'],
+  ['branch-protection repo protect', 'mutation'],
+  ['branch-protection repo policy set', 'mutation'],
+  ['branch-protection repo unprotect', 'mutation'],
   ['ontology object-upsert', 'mutation'],
   ['resource delete', 'mutation'],
   ['dataset create', 'mutation'],
@@ -586,4 +599,40 @@ test('Y17: in FDE mode under yolo a write naming main is refused, not asked', as
   }
   expect(h.asked).toEqual([])
   expect(ran(h, 'ontology object-type-upsert')).toEqual([])
+})
+
+// The branch is a positional here, not a --branch flag.
+const POSITIONAL_ON_MAIN: [string, string[]][] = [
+  ['dataset branches delete', [DATASET, 'master', '--apply']],
+  ['repository branch delete', [REPO, 'refs/heads/main', '--apply']],
+  ['repository branch delete', ['--yes', REPO, 'main', '--apply']],
+  ['repository checks required set', [REPO, 'master', '--check', 'build', '--apply']],
+  ['repository checks required remove', [REPO, 'main', '--check', 'build', '--apply']],
+  ['branch-protection repo protect', [REPO, 'master', '--apply']],
+  ['branch-protection repo policy set', [REPO, 'master', '--min-approvals', '0', '--apply']],
+  ['branch-protection repo unprotect', [REPO, 'master', '--apply']],
+  ['branch-protection repo unprotect', [REPO, 'HEAD', '--apply']],
+]
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y18: in ${mode} mode a write naming main as a positional branch asks; no one to ask, it is refused`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'throw'
+    for (const [command, args] of POSITIONAL_ON_MAIN) {
+      const before = h.asked.length
+      const wrote = await write($, command, args)
+      expect({ command, args, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ command, args, denied: true, asked: 1 })
+    }
+    expect(h.calls.filter(call => !SETUP_CALLS.includes(call))).toEqual([])
+  })
+}
+
+test('Y18: in yolo the same writes on a work branch run with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, args] of POSITIONAL_ON_MAIN) {
+    const onWork = args.map(arg => (['master', 'main', 'refs/heads/main', 'HEAD'].includes(arg) ? 'agent-work' : arg))
+    expect({ command, deny: (await write($, command, onWork)).deny }).toEqual({ command, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
 })
