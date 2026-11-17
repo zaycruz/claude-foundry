@@ -264,10 +264,12 @@ export function approvalOnWorkBranch(path: string, args: readonly string[], mani
   if (entry === undefined || !approvalReadable(entry.operatorApproval)) return false
   const scope = entry.operatorApprovalScope
   if (scope === 'work-branch') {
-    const found = positionals(args)
+    // Every word that is not a flag counts, whatever flag comes before it: the
+    // guard does not know which flags take a value (`--yes main`).
+    const words = args.filter(arg => !unquote(arg).startsWith('-'))
     return (
-      args.some(arg => WORK_BRANCH_RID.test(arg)) &&
-      !found.some(isProtectedValue) &&
+      words.some(arg => WORK_BRANCH_RID.test(arg)) &&
+      !words.some(arg => isProtectedValue(unquote(arg))) &&
       !flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue)
     )
   }
