@@ -104,7 +104,12 @@ function harness(on: On, mode: Mode = 'yolo', entries: unknown[] = ENTRIES): Har
     if (words[0] === '--profile') words = words.slice(2)
     const line = words.join(' ')
     h.calls.push(line)
-    const stdout = line === 'agent-manifest' ? manifest : envelope({ ran: line })
+    const stdout =
+      line === 'agent-manifest'
+        ? manifest
+        : line === 'configure list'
+          ? envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] })
+          : envelope({ ran: line })
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/home/tester' : undefined }))

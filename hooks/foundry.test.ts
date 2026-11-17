@@ -269,11 +269,12 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
 })
 
 // zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag runs there.
-test('F21 F22: a tag apply asks in every mode but yolo (tag.test.ts); repository push reads its destination past boolean flags', async () => {
+test('F21 F22: a tag apply with no branch asks in every mode, yolo too (FND-2, tag.test.ts); repository push reads its destination past boolean flags', async () => {
   const tag = (args: string[]) => classifyCall(CLI, { command: 'repository tag create', args }, MANIFEST, null)
   const applied = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--apply'])
-  expect(MODES.filter(mode => mode !== 'yolo').every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
-  expect(ladderDecision('yolo', applied!, approve).outcome).toBe('run')
+  expect(MODES.every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  const onBranch = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--branch', 'ri.branch..branch.x1', '--apply'])
+  expect(ladderDecision('yolo', onBranch!, approve).outcome).toBe('run')
   expect(ladderDecision('yolo', tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40)])!).outcome).toBe('run')
   const push = (args: string[]) => classifyCall(CLI, { command: 'repository push', args }, MANIFEST, null)
   expect(blockedEverywhere(push(['--apply', 'ri.stemma.main.repository.x', 'refs/heads/a', 'refs/heads/main']))).toBe(true)
@@ -585,7 +586,9 @@ test('A11: blocks, destructive asks and release tags do not loosen', async () =>
     { path: 'ontology object-type-upsert', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] } },
   ]
   expect(blockedEverywhere(classifyCall(CLI, { command: 'ontology object-type-upsert', args: ['T', '--apply'] }, marked, 'agent/x'))).toBe(true)
-  expect(asksAll(classifyCall(CLI, { command: 'branch-protection project policy delete', args: ['ri.compass.main.folder.x'] }, PROTECTION, 'agent/x'))).toBe(true)
+  // A delete asks in every mode but yolo (PR #6, zay 2026-10-22: deletes run in yolo).
+  const policyDelete = classifyCall(CLI, { command: 'branch-protection project policy delete', args: ['ri.compass.main.folder.x'] }, PROTECTION, 'agent/x')
+  expect(decisions(policyDelete).map(decision => decision.outcome)).toEqual(['ask', 'ask', 'ask', 'run'])
   const tag = classifyCall(CLI, { command: 'repository tag create', args: [REPO_RID, 'refs/tags/1.2.3', '--commit-hash', '0123456789abcdef0123456789abcdef01234567', '--apply'] }, PROTECTION, 'agent/x')
   expect(decisions(tag).every(decision => decision.outcome === 'ask' && decision.reason.includes('release'))).toBe(true)
 })

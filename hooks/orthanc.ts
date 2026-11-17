@@ -53,6 +53,7 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           flags: flagsFrom(entry.args),
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
+          ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
         }]
       : [],
   )
