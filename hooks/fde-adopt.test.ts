@@ -162,7 +162,7 @@ function harness(on: On): Harness {
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
     h.store.set(e.key, e.value)
-    return { value: {} }
+    return { value: undefined }
   })
   on('fs.stat', () => ({ value: { kind: 'other', size: 0, mtimeMs: 0, isLink: false } as never }))
   on('fs.read', (_$, e) => {

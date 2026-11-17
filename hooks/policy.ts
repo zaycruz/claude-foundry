@@ -60,6 +60,14 @@ const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-ups
 // Promotion into main is the operator's decision, not the agent's. A release
 // tag is not here: it asks the operator each time (see releaseTagCall).
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve'])
+// A code pull request approval (Orthanc 0.7.7) is a promotion too: it lets work
+// into main under the operator's name. Only the exact flags --reject and
+// --withdraw make it something else (a review that lets nothing in), which the
+// ladder judges as an ordinary write. Any other spelling stays an approval.
+const PULL_REQUEST_APPROVE = 'repository pull-request approve'
+const NOT_AN_APPROVAL = ['--reject', '--withdraw']
+const isPromotion = (command: string, args: readonly string[]) =>
+  PROMOTIONS.has(command) || (command === PULL_REQUEST_APPROVE && !args.some(arg => NOT_AN_APPROVAL.includes(arg)))
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
 // Orthanc flags that take no value, so the word after one is a positional.
@@ -258,7 +266,7 @@ export function branchRuleReason(command: string, args: readonly string[]): stri
   if (MAIN_ONLY_WRITES.has(command)) {
     return `'${command}' writes live data on the main ontology branch and cannot take --branch. Agents do not run it: use 'ontology action-apply --branch <global branch RID>' or hand it to the operator.`
   }
-  if (PROMOTIONS.has(command)) {
+  if (isPromotion(command, args)) {
     return `'${command}' promotes work (a merge, an approval or a release). The operator does it; the agent does not.`
   }
   if (command === 'repository push') {

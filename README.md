@@ -28,7 +28,8 @@ says so instead of falling back to REST.
   `--branch <global branch RID>`; dataset, stream and build writes must name a
   work branch; code goes to a work branch through `orthanc repository push` and
   a pull request. Branchless writes, writes to `main`/`master`, proposal
-  merges and approvals, default-branch pushes, raw `git push` to
+  merges and approvals, code pull request approvals (`repository pull-request
+  approve`, unless it names `--reject` or `--withdraw`), default-branch pushes, raw `git push` to
   a Foundry repository and Foundry writes outside Orthanc are blocked. A
   release tag (`repository tag create --apply`) is not blocked: it asks the
   operator in every mode, naming the tag, the commit and the repository. Orthanc

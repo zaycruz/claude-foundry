@@ -185,7 +185,7 @@ function harness(on: On) {
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
     h.store.set(e.key, e.value)
-    return { value: {} }
+    return { value: undefined }
   })
   on('fs.read', (_$, e) => {
     throw new Error(`ENOENT: ${e.path}`)

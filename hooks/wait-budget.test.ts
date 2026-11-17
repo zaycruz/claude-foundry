@@ -284,7 +284,7 @@ function harness(on: On) {
   on('store.get', (_$, e) => ({ value: e.key === 'approvalMode' ? h.mode : store.get(e.key) }))
   on('store.set', (_$, e) => {
     store.set(e.key, e.value)
-    return { value: {} }
+    return { value: undefined }
   })
   on('fs.stat', () => ({ value: { kind: 'other', size: 0, mtimeMs: 0, isLink: false } as never }))
   on('fs.read', (_$, e) => {

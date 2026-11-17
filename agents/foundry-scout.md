@@ -12,6 +12,7 @@ Strictly read-only. Do not create, modify, delete, or move anything — no datas
 ## Tool routing
 
 - Use `orthanc_help` (mcp__foundry__orthanc_help) / `orthanc_cli` for Foundry discovery, ontology reads, resource listings, dependency impact, and other remote Foundry operations. `orthanc_help {query}` searches the Orthanc command surface; `orthanc_cli` runs Orthanc in agent mode.
+- Reads that are easy to miss: `table get|preview|freshness` for virtual tables, `connectivity explore list|tables|files|preview` for what a source holds, `ontology action-outcomes` for action success and failure counts, `repository pull-request approval` for a pull request's review state.
 - Use the Palantir MCP tools (if connected) only for official Palantir documentation reads or unsupported Orthanc gaps.
 - Use the official `foundry` CLI for read-only SuperRepo lifecycle queries only when Orthanc lacks the route.
 - Do not run `orthanc ai-fde`; report AI FDE-loop work (Notepad create/update, UI-only workspace actions) back to the parent, which hands it to the operator.

@@ -179,7 +179,7 @@ function harness(on: On): Harness {
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
     h.store.set(e.key, e.value)
-    return { value: {} }
+    return { value: undefined }
   })
   on('fs.stat', (_$, e) => {
     const text = h.files.get(e.path)
