@@ -366,24 +366,82 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
   }
 }
 
+// A schedule's build action is a JSON positional that names its branch inside.
+const ACTION_BRANCH_WRITES = new Set(['orchestration schedules create', 'orchestration schedules replace'])
+const ACTION_VALUE_FLAGS = new Set(['--trigger', '--name', '--description'])
+// These start builds on the branch stored in a schedule or an import, so the
+// guard reads it first (storedBranchReads) and judges what it finds.
+export const STORED_BRANCH_RUNS = new Set(['orchestration schedules run', 'orchestration schedules unpause', 'connectivity import run'])
+const BRANCH_KEYS = new Set(['branch', 'branchname', 'branch_name'])
+
+/** Every string under a branch key (branchName, branch, branch_name), at any depth. */
+export function branchesIn(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(branchesIn)
+  if (typeof value !== 'object' || value === null) return []
+  return Object.entries(value).flatMap(([key, inner]) =>
+    BRANCH_KEYS.has(key.toLowerCase()) && typeof inner === 'string' ? [inner] : branchesIn(inner),
+  )
+}
+
+/** The orthanc reads (argv) that return the stored schedule or import a run starts. */
+export function storedBranchReads(command: string, args: readonly string[]): string[][] {
+  const rid = positionals(args).find(arg => arg.startsWith('ri.'))
+  if (rid === undefined) return []
+  if (command === 'connectivity import run') {
+    const connection = flagValue(args, '--connection')
+    const extra = connection ? ['--connection', connection] : []
+    const kind = flagValue(args, '--kind')
+    const kinds = kind === 'file' || kind === 'table' ? [kind] : ['file', 'table']
+    return kinds.map(each => ['connectivity', 'import', `get-${each}`, rid, ...extra])
+  }
+  return [['orchestration', 'schedules', 'get', rid]]
+}
+
+/** A schedule action's branches, or why it is refused. */
+function actionBranches(command: string, args: readonly string[]): { branches: string[] } | { error: string } {
+  const actions = args.filter((arg, index) => unquote(arg).startsWith('{') && !ACTION_VALUE_FLAGS.has(unquote(args[index - 1] ?? '')))
+  if (actions.length !== 1) {
+    return { error: `'${command}' must pass one build action as JSON with its branchName, so the guard can see which branch its builds write; found ${actions.length}.` }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(unquote(actions[0]!))
+  } catch {
+    return { error: `'${command}' action is not JSON the guard can read, so the branch its builds write cannot be checked.` }
+  }
+  const branches = branchesIn(parsed)
+  if (branches.length === 0) {
+    return { error: `'${command}' action names no branchName, so its builds would write master. Add "branchName": "<work branch>" to the action.` }
+  }
+  const odd = branches.find(branch => !BRANCH_VALUE.test(branch.trim()))
+  if (odd !== undefined) return { error: `'${command}' action branch '${odd}' has characters no branch name uses.` }
+  return { branches }
+}
+
 function orthancClassification(
   command: string,
   args: readonly string[],
   rawInput: unknown,
   workingBranch: string | null,
+  stored?: readonly string[] | null,
 ): GateClassification {
+  const action = ACTION_BRANCH_WRITES.has(command) ? actionBranches(command, args) : null
   const base = {
     command,
     hasWorkingBranch: branchIsWorking(workingBranch),
     // `-b` is --branch in every command, so every spelling of it names the branch.
     targetsProtected:
       MAIN_WRITES.has(command) ||
+      (action !== null && 'branches' in action && action.branches.some(isProtectedValue)) ||
+      // A stored branch that could not be read, or none (Foundry reads none as master), may be main.
+      (STORED_BRANCH_RUNS.has(command) &&
+        (stored == null || stored.length === 0 || stored.some(branch => isProtectedValue(branch) || !BRANCH_VALUE.test(branch.trim())))) ||
       (POSITIONAL_BRANCH_WRITES.has(command) && args.some(arg => !unquote(arg).startsWith('-') && isProtectedValue(unquote(arg)))) ||
       targetsProtected(rawInput) ||
       flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue),
   }
   if (!BRANCH_CREATION_PATHS.includes(command)) {
-    const refused = branchRuleReason(command, args)
+    const refused = branchRuleReason(command, args) ?? (action !== null && 'error' in action ? action.error : null)
     const release =
       refused === null && command === 'repository tag create' && argsNameFlag(args, ['--apply'])
         ? releaseTagCall(args)
@@ -976,6 +1034,8 @@ export function classifyCall(
   input: Record<string, unknown>,
   manifest: readonly ManifestCommand[],
   workingBranch: string | null,
+  /** For a run of a stored schedule or import: the branches read from it; null when the read failed. */
+  stored?: readonly string[] | null,
 ): GateClassification | null {
   if (tool === ORTHANC_CLI) {
     // Without the manifest the guard cannot tell which command this call runs, and
@@ -991,7 +1051,7 @@ export function classifyCall(
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
     if (classifyOrthancCommand(resolved.path, manifest) === 'read') return null
-    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch)
+    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, stored)
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {
@@ -1031,7 +1091,7 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only). It runs only if the operator approves; otherwise pass a work branch.`,
+      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }

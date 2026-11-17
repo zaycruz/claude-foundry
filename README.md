@@ -44,7 +44,11 @@ says so instead of falling back to REST.
   main or master must name a branch too: connectivity imports, repository
   imports, `dataset create-from-csv`, `workshop module update`, `automate
   update`/`pause`/`resume` and the `pipeline` sandbox, edit, publish and
-  deploy commands. A release tag
+  deploy commands. A schedule's build action (`orchestration schedules
+  create`/`replace`) must name its `branchName`. Before `orchestration schedules
+  run`/`unpause` or `connectivity import run`, the guard reads the stored
+  schedule or import: if it builds main, names no branch, or cannot be read,
+  the call asks the operator. A release tag
   (`repository tag create --apply`) is not blocked: outside `yolo` it asks the
   operator, naming the tag, the commit and the repository. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
