@@ -50,8 +50,16 @@ says so instead of falling back to REST.
   run`/`unpause` or `connectivity import run`, the guard reads the stored
   schedule or import: if it builds main, names no branch, or cannot be read,
   the call asks the operator. A release tag
-  (`repository tag create --apply`) is not blocked: outside `yolo` it asks the
-  operator, naming the tag, the commit and the repository. Orthanc
+  (`repository tag create --apply`) is not blocked: it asks the operator,
+  naming the tag, the commit and the repository; in `yolo` it runs without
+  asking only when `--branch` (or `--foundry-branch-rid`) names one global
+  branch RID. Writes Orthanc's agent manifest marks `operator_approval` ask
+  the operator when every flag the marker lists is given; the marker's
+  `operator_approval_scope` says when yolo skips the ask: `work-branch`
+  markers (`global-branch roles set`, `remove-resources`, `remove-repo`) run
+  in yolo, `always` markers (branch protection off or weakened, project
+  policies) ask in every mode, and a marker the guard cannot read asks on
+  every call. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
   write, however the shell wraps the call. Text that only mentions Orthanc (a
   commit message, a PR body, an `echo`) is not a call.

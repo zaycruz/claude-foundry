@@ -33,10 +33,12 @@
 //  S8  manifestFrom drops operator_approval or its scope, so the guard never
 //      sees them.
 //  S9  The release tag: in yolo on a work branch it still asks; with no branch
-//      it runs; a bad tag, commit or two branch flags reach the operator
-//      instead of being refused; an orthanc without the marker stops asking.
+//      (main) it runs, as 0.6.0 let it (OA4); a bad tag, commit or two branch
+//      flags reach the operator instead of being refused; an orthanc without
+//      the marker gets a looser rule.
 //  S10 A marker loosens a refusal: the branch rule or a promotion still blocks.
 //  S11 In auto, the Haiku guard's approval skips the marker's ask.
+//  S13 A read the manifest marks runs as a read (orthanc_cli or Bash).
 //  S12 The question does not name the command and its args, or lets an arg
 //      forge text (a newline) into it.
 //
@@ -82,7 +84,7 @@ const RAW = {
     { path: 'branch-protection repo get', kind: 'read-only', args: [] },
   ],
 }
-const MANIFEST: ManifestCommand[] = manifestFrom({ data: RAW })
+const MANIFEST: ManifestCommand[] = manifestFrom({ schema_version: 'foundry-agent-v1', data: RAW })
 
 const decide = (mode: ApprovalMode, command: string, args: string[], manifest = MANIFEST, verdict = { action: 'approve' as const, reason: 'guard approves' }) => {
   const classification = classifyCall(CLI, { command, args }, manifest, null)
@@ -121,8 +123,10 @@ test('S1: every "always" marker asks in every mode, yolo included', async () => 
   for (const [path, , scope] of MARKERS) {
     if (scope !== 'always') continue
     for (const mode of APPROVAL_MODES) {
+      // global-branch deploy is a promotion (0.6.0): refused, which is stricter than an ask (S10).
+      const want = path === 'global-branch deploy' ? 'block' : 'ask'
       const decision = decide(mode, path, FULL[path]!)
-      expect([path, mode, decision.outcome]).toEqual([path, mode, 'ask'])
+      expect([path, mode, decision.outcome]).toEqual([path, mode, want])
     }
   }
 })
@@ -163,25 +167,27 @@ test('S9: two branch flags, a bad tag or a bad commit are refused before anyone 
   expect(decide('yolo', 'repository tag create', [REPO, TAG, '--commit-hash', 'HEAD', '--branch', GB, '--apply']).outcome).toBe('block')
 })
 
-test('S9: an orthanc without the marker keeps the release tag asking in every mode', async () => {
-  const old = manifestFrom({ data: { commands: [{ path: 'repository tag create', kind: 'mutation', args: [] }] } })
-  for (const mode of APPROVAL_MODES) {
-    expect(decide(mode, 'repository tag create', [...FULL['repository tag create']!, '--branch', GB], old).outcome).toBe('ask')
-  }
+test('S9: an orthanc without the marker gets the same release tag rule (OA4)', async () => {
+  const old = manifestFrom({ schema_version: 'foundry-agent-v1', data: { commands: [{ path: 'repository tag create', kind: 'mutation', args: [] }] } })
+  const base = FULL['repository tag create']!
+  expect(decide('yolo', 'repository tag create', base, old).outcome).toBe('ask')
+  expect(decide('yolo', 'repository tag create', [...base, '--branch', 'master'], old).outcome).not.toBe('run')
+  expect(decide('yolo', 'repository tag create', [...base, '--branch', GB], old).outcome).toBe('run')
+  for (const mode of NOT_YOLO) expect(decide(mode, 'repository tag create', [...base, '--branch', GB], old).outcome).toBe('ask')
 })
 
 test('S4: an unreadable scope is "always": it asks in yolo', async () => {
   for (const scope of [undefined, null, 7, 'work_branch', 'Work-Branch', 'never', { work_branch_flag: '--branch', other: 1 }, { work_branch_flag: 'branch' }, { work_branch_flag: '--branch', flag_aliases: 'x' }, []]) {
     const entry: Record<string, unknown> = { path: 'global-branch roles set', kind: 'mutation', args: [], operator_approval: when('--apply') }
     if (scope !== undefined) entry.operator_approval_scope = scope
-    const manifest = manifestFrom({ data: { commands: [entry] } })
+    const manifest = manifestFrom({ schema_version: 'foundry-agent-v1', data: { commands: [entry] } })
     expect([JSON.stringify(scope), decide('yolo', 'global-branch roles set', [GB, '--apply'], manifest).outcome]).toEqual([JSON.stringify(scope), 'ask'])
   }
 })
 
 test('S5: an unreadable operator_approval asks on every call in every mode', async () => {
   for (const approval of ['always', null, 1, {}, { when_all_flags: [] }, { when_all_flags: ['apply'] }, { when_all_flags: ['--apply'], also: true }, ['--apply']]) {
-    const manifest = manifestFrom({ data: { commands: [{ path: 'global-branch roles set', kind: 'mutation', args: [], operator_approval: approval, operator_approval_scope: 'work-branch' }] } })
+    const manifest = manifestFrom({ schema_version: 'foundry-agent-v1', data: { commands: [{ path: 'global-branch roles set', kind: 'mutation', args: [], operator_approval: approval, operator_approval_scope: 'work-branch' }] } })
     for (const mode of APPROVAL_MODES) {
       expect([JSON.stringify(approval), mode, decide(mode, 'global-branch roles set', [GB], manifest).outcome]).toEqual([JSON.stringify(approval), mode, 'ask'])
     }
@@ -189,8 +195,8 @@ test('S5: an unreadable operator_approval asks on every call in every mode', asy
 })
 
 test('S6: some of the flags, or --yes alone, is not the marked change', async () => {
-  expect(decide('allow-edits', 'global-branch deploy', [GB, '--apply']).outcome).toBe('run')
-  expect(decide('allow-edits', 'global-branch deploy', [GB, '--yes']).outcome).toBe('run')
+  expect(decide('allow-edits', 'global-branch remove-repo', [GB, REPO, '--apply']).outcome).toBe('run')
+  expect(decide('allow-edits', 'global-branch remove-repo', [GB, REPO, '--yes']).outcome).toBe('run')
   expect(decide('allow-edits', 'branch-protection resource set', [DATASET, '--apply']).outcome).toBe('run')
   expect(decide('allow-edits', 'branch-protection repo protect', [REPO, 'refs/heads/feature', '--apply']).outcome).toBe('run')
 })
@@ -202,14 +208,15 @@ test('S7: --APPLY, --apply=true and any order still match', async () => {
 })
 
 test('S10: a marker never loosens a refusal', async () => {
-  const manifest = manifestFrom({
+  const manifest = manifestFrom({ schema_version: 'foundry-agent-v1',
     data: { commands: [
       { path: 'proposal merge', kind: 'mutation', args: [], operator_approval: when('--apply'), operator_approval_scope: 'work-branch' },
       { path: 'dataset schema set', kind: 'mutation', args: [], operator_approval: when('--apply'), operator_approval_scope: 'work-branch' },
     ] },
   })
   expect(decide('yolo', 'proposal merge', ['ri.proposal.main.proposal.00000000-0000-0000-0000-000000000000', '--apply'], manifest).outcome).toBe('block')
-  expect(decide('yolo', 'dataset schema set', [DATASET, '--branch', 'master', '--apply'], manifest).outcome).toBe('block')
+  expect(decide('yolo', 'dataset schema set', [DATASET, '--apply'], manifest).outcome).toBe('block')
+  expect(decide('yolo', 'dataset schema set', [DATASET, '--branch', 'master', '--apply'], manifest).outcome).toBe('ask')
 })
 
 test('S11: in auto the guard model approving does not skip the ask', async () => {
@@ -223,4 +230,14 @@ test('S12: the question names the command and its args, with no forged lines', a
   expect(decision.reason).toContain('branch-protection resource set')
   expect(decision.reason).toContain(DATASET)
   expect(decision.reason).not.toContain('\n')
+})
+
+test('S13: a read the manifest marks is not let through as a read, in orthanc_cli or Bash', async () => {
+  const manifest = manifestFrom({ schema_version: 'foundry-agent-v1',
+    data: { commands: [{ path: 'dataset get', kind: 'read-only', args: [], operator_approval: { when_all_flags: ['--apply'] } }] },
+  })
+  for (const mode of APPROVAL_MODES) expect(decide(mode, 'dataset get', [DATASET, '--apply'], manifest).outcome).toBe('ask')
+  expect(classifyCall('mcp__foundry__orthanc_cli', { command: 'dataset get', args: [DATASET] }, manifest, null)).toBe(null)
+  const shell = classifyCall('Bash', { command: `orthanc dataset get ${DATASET}` }, manifest, null)
+  expect(shell?.error).toContain('orthanc_cli')
 })

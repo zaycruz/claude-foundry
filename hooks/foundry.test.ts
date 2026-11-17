@@ -269,11 +269,13 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
 })
 
 // zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag runs there.
-test('F21 F22: a tag apply asks in every mode but yolo (tag.test.ts); repository push reads its destination past boolean flags', async () => {
+test('F21 F22: a tag apply asks in every mode, yolo only off a global branch (tag.test.ts); repository push reads its destination past boolean flags', async () => {
   const tag = (args: string[]) => classifyCall(CLI, { command: 'repository tag create', args }, MANIFEST, null)
   const applied = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--apply'])
-  expect(MODES.filter(mode => mode !== 'yolo').every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
-  expect(ladderDecision('yolo', applied!, approve).outcome).toBe('run')
+  const onBranch = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--branch', 'ri.branch..branch.00000000-0000-0000-0000-000000000000', '--apply'])
+  expect(MODES.every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  expect(ladderDecision('yolo', onBranch!, approve).outcome).toBe('run')
+  expect(MODES.filter(mode => mode !== 'yolo').every(mode => ladderDecision(mode, onBranch!, approve).outcome === 'ask')).toBe(true)
   expect(ladderDecision('yolo', tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40)])!).outcome).toBe('run')
   const push = (args: string[]) => classifyCall(CLI, { command: 'repository push', args }, MANIFEST, null)
   expect(blockedEverywhere(push(['--apply', 'ri.stemma.main.repository.x', 'refs/heads/a', 'refs/heads/main']))).toBe(true)

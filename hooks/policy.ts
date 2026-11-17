@@ -4,7 +4,17 @@
 
 /** One option of a manifest command, as Orthanc's agent-manifest lists it. */
 export type ManifestFlag = { flag: string; takesValue: boolean; default?: string }
-export type ManifestCommand = { path: string; kind?: string; auth?: string; input?: string; flags?: ManifestFlag[] }
+export type ManifestCommand = {
+  path: string
+  kind?: string
+  auth?: string
+  input?: string
+  flags?: ManifestFlag[]
+  /** The entry's raw `operator_approval`, unread: operatorApprovalAsk reads it, failing closed. */
+  operatorApproval?: unknown
+  /** The entry's raw `operator_approval_scope`, unread: approvalScope reads it, failing closed. */
+  operatorApprovalScope?: unknown
+}
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 export type ApprovalMode = (typeof APPROVAL_MODES)[number]
@@ -142,8 +152,12 @@ export type GateClassification = {
   targetsProtected: boolean
   isDestructive: boolean
   proposedName?: string
-  /** The question to put to the operator for a release tag apply, outside yolo. */
+  /** The question to put to the operator for a release tag apply: in every mode, but in yolo only off a work branch. */
   release?: string
+  /** True when the tag names one global branch RID, so it is a pre-release on a work branch, not main (OA4). */
+  releaseOnWorkBranch?: boolean
+  /** A manifest operator_approval ask: the question, and whether yolo skips it because the write cannot land on main. */
+  operatorApproval?: { question: string; yoloSkips: boolean }
   error?: string
 }
 
@@ -356,10 +370,13 @@ const TAG_NAME = /^[A-Za-z0-9][A-Za-z0-9._+\/-]{0,127}$/
 const TAG_COMMIT = /^[0-9a-f]{40,64}$/i
 const TAG_BRANCH_RID = /^ri\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]+\.[A-Za-z0-9-]+$/
 const TAG_REFUSAL =
-  "'repository tag create --apply' must name a repository RID, a plain tag and one --commit-hash <hex> (and one plain --foundry-branch-rid, if any), so the operator can see what they approve."
+  "'repository tag create --apply' must name a repository RID, a plain tag and one --commit-hash <hex> (and at most one plain --branch, or its alias --foundry-branch-rid), so the operator can see what they approve."
+// The flag that puts a tag on a Foundry branch, and its hidden alias (OA10).
+const TAG_BRANCH_FLAGS = ['--branch', '--foundry-branch-rid']
+const GLOBAL_BRANCH_RID_VALUE = /^ri\.branch\.\.branch\.[A-Za-z0-9-]+$/
 
 /** The question a `repository tag create --apply` puts to the operator, or why it is refused. */
-function releaseTagCall(args: readonly string[]): { release: string } | { error: string } {
+function releaseTagCall(args: readonly string[]): { release: string; releaseOnWorkBranch: boolean } | { error: string } {
   // Orthanc gets the raw args, so a quoted, padded or newline-carrying arg is
   // not what the operator would read. Any such arg is refused.
   if (args.some(arg => unquote(arg) !== arg)) return { error: TAG_REFUSAL }
@@ -367,7 +384,7 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
   const repository = found[0] ?? ''
   const tag = found[1] ?? ''
   const commits = flagValues(args, ['--commit-hash'])
-  const links = flagValues(args, ['--foundry-branch-rid'])
+  const links = flagValues(args, TAG_BRANCH_FLAGS)
   const commit = commits[0] ?? ''
   const link = links[0] ?? null
   if (
@@ -383,6 +400,71 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
   const linked = link === null ? '' : ` (linked to Foundry branch ${link})`
   return {
     release: `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag is a release: the operator approves each one.`,
+    releaseOnWorkBranch: link !== null && GLOBAL_BRANCH_RID_VALUE.test(link),
+  }
+}
+
+// Manifest operator_approval (orthanc-source CONTRACTS.md, operator_approval_scope
+// OA1-OA10). `{when_all_flags: [flags]}` asks when every listed flag is given
+// (argsNameFlag: any case, `=value`, any order); anything else is unreadable
+// and asks on every call. The scope says where the write lands: "work-branch"
+// (one global branch, never main) and a work_branch_flag naming a global branch
+// RID are skipped in yolo; everything else, unreadable included, is "always".
+const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
+const QUESTION_ARGS_MAX = 600
+type ApprovalScope = { kind: 'always' } | { kind: 'work-branch' } | { kind: 'flag'; flags: string[] }
+
+const isFlagName = (value: unknown): value is string => typeof value === 'string' && /^--[a-z0-9][a-z0-9-]*$/.test(value)
+
+function approvalScope(raw: unknown): ApprovalScope {
+  if (raw === 'work-branch') return { kind: 'work-branch' }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { kind: 'always' }
+  const scope = raw as Record<string, unknown>
+  if (Object.keys(scope).some(key => key !== 'work_branch_flag' && key !== 'flag_aliases')) return { kind: 'always' }
+  const aliases = scope.flag_aliases ?? []
+  if (!isFlagName(scope.work_branch_flag) || !Array.isArray(aliases) || !aliases.every(isFlagName)) return { kind: 'always' }
+  return { kind: 'flag', flags: [scope.work_branch_flag, ...aliases] }
+}
+
+/** The manifest's operator_approval ask for this call, or null when the entry has
+ * no marker or the call does not give every flag the marker lists. */
+export function operatorApprovalAsk(
+  path: string,
+  args: readonly string[],
+  manifest: readonly ManifestCommand[],
+): { question: string; yoloSkips: boolean } | null {
+  const entry = manifest.find(found => found.path === path)
+  if (entry === undefined || entry.operatorApproval === undefined) return null
+  // JSON escapes newlines and quotes, so an arg cannot forge lines in the question.
+  const shown = JSON.stringify(args)
+  const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
+  const value = entry.operatorApproval
+  const condition = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  const flags = condition?.when_all_flags
+  const readable =
+    condition !== null &&
+    Object.keys(condition).length === 1 &&
+    Array.isArray(flags) &&
+    flags.length > 0 &&
+    flags.every(flag => typeof flag === 'string' && APPROVAL_FLAG.test(flag))
+  if (!readable) {
+    return {
+      question: `'${path}' ${cut} needs the operator: Orthanc's agent manifest marks it operator_approval in a form the Foundry guard cannot read, so it asks on every call, in every mode.`,
+      yoloSkips: false,
+    }
+  }
+  const listed = (flags as string[]).map(flag => flag.toLowerCase())
+  if (!listed.every(flag => argsNameFlag(args, [flag]))) return null
+  const scope = approvalScope(entry.operatorApprovalScope)
+  const onWorkBranch = (names: readonly string[]) => {
+    const values = flagValues(args, names)
+    return values.length === 1 && GLOBAL_BRANCH_RID_VALUE.test(values[0] ?? '')
+  }
+  const yoloSkips = scope.kind === 'work-branch' || (scope.kind === 'flag' && onWorkBranch(scope.flags))
+  const where = yoloSkips ? 'It stays on a work branch: in yolo it runs without asking.' : 'It can land on main or change what guards main, so it asks in every mode.'
+  return {
+    question: `'${path}' ${cut} needs the operator: Orthanc's agent manifest marks it operator_approval when ${listed.join(' ')} are given. ${where}`,
+    yoloSkips,
   }
 }
 
@@ -1016,7 +1098,9 @@ function shellClassification(
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
-    if (classifyOrthancCommand(call.path, manifest) === 'read') continue
+    // A read the manifest marks for the operator goes through orthanc_cli, where the marker is read.
+    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null
@@ -1070,8 +1154,13 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read') return null
-    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, stored)
+    const approval = operatorApprovalAsk(resolved.path, resolved.args, manifest)
+    // A read whose entry also asks for the operator is not let through as a read.
+    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && approval === null) return null
+    const classified = orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, stored)
+    // The release tag's own question covers its marker; every other marker adds its ask.
+    if (approval === null || classified.release !== undefined || classified.kind !== 'mutation') return classified
+    return { ...classified, operatorApproval: approval }
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {
@@ -1107,6 +1196,13 @@ export function ladderDecision(
   }
   const command = classification.command ?? '(foundry mcp write)'
   const note = verdict ? ` ${verdict.reason}` : ''
+  // Orthanc marks these for the operator. Yolo skips only those that stay off main.
+  const marked = classification.operatorApproval
+  if (marked && !(mode === 'yolo' && marked.yoloSkips)) return { outcome: 'ask', reason: marked.question }
+  // A release tag asks in every mode; yolo skips only a pre-release on a global branch (OA4).
+  if (classification.release && !(mode === 'yolo' && classification.releaseOnWorkBranch)) {
+    return { outcome: 'ask', reason: classification.release }
+  }
   // Yolo asks only for a write naming main: no write lands on main without the operator.
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
@@ -1115,7 +1211,6 @@ export function ladderDecision(
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
-  if (classification.release) return { outcome: 'ask', reason: classification.release }
   if (classification.isDestructive) {
     return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode but yolo${note}` }
   }
@@ -1140,10 +1235,11 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes, --force writes and release tags run at once, ' +
-        'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
-        'if the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
-      : 'Release tags (repository tag create --apply) ask the operator in every mode except yolo. ' +
+      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes, --force writes and release tags on a global branch (--branch ri.branch..branch.…) run at once, ' +
+        'and the loop guard is off. A write that names main or master as its branch asks the operator; so do a release tag with no global branch ' +
+        'and a write Orthanc marks operator_approval that can land on main or change what guards main (branch protection off or weakened, project policies). ' +
+        'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
+      : 'Release tags (repository tag create --apply) and writes Orthanc marks operator_approval ask the operator in every mode; in yolo only those on main ask. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
         'the call is blocked — report it, do not retry blindly.')
