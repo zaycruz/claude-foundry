@@ -43,9 +43,34 @@
 //  Y11 A credential command (auth store) runs in yolo.
 //  Y12 An Orthanc write in Bash runs in yolo instead of going to orthanc_cli.
 //
+// zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
+// necessary for anything on the branch, only main." Checked against the real
+// Orthanc commands (0.6.0 was checked only against dataset create, which has no
+// --branch):
+//  Y13 A real branch write (dataset schema set, a build, an ontology write, an
+//      import) naming main, master or HEAD is refused outright, so the operator
+//      cannot approve it; or it runs without asking. It must ask once in every
+//      mode, run when approved, and be refused when declined or no one can be
+//      asked.
+//  Y14 A write whose --branch is optional and lands on main or master when it is
+//      left out (dataset create-from-csv, workshop module update, automate
+//      update/pause/resume, pipeline sandbox and edit/publish/deploy) runs with
+//      no branch. Refused in every mode, asking no one; with a work branch it
+//      runs in yolo with no ask.
+//  Y15 workshop module publish, which only works on main, runs in yolo with no
+//      ask. It asks in every mode.
+//  Y16 The branch matcher misses a spelling of main, master or HEAD (case, a
+//      refs/heads/ prefix, ./, +, :, a trailing / or ., a quoted value, any flag
+//      form), or asks for a branch that is not main (main-fix, agent/main,
+//      maintenance, headless, a --fallback-branch master). Checked over every
+//      combination, at the ladder.
+//  Y17 FDE mode stops pinning: with a bound branch, a write naming main asks or
+//      runs instead of being refused.
+//
 // Synthetic stack only.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
+import { classifyCall, ladderDecision, type ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
 const ONT = { rid: 'ri.ontology.main.ontology.d0000000-0000-4000-8000-0000000000a1', name: 'Tester Ontology' }
@@ -70,6 +95,20 @@ const COMMANDS: [string, string][] = [
   ['global-branch create', 'mutation'],
   ['ontology object-type-delete', 'mutation'],
   ['ontology object-type-upsert', 'mutation'],
+  ['dataset schema set', 'mutation'],
+  ['dataset create-from-csv', 'mutation'],
+  ['workshop module update', 'mutation'],
+  ['workshop module publish', 'mutation'],
+  ['workshop module create', 'mutation'],
+  ['automate create', 'mutation'],
+  ['automate update', 'mutation'],
+  ['automate pause', 'mutation'],
+  ['automate resume', 'mutation'],
+  ['pipeline sandbox create', 'mutation'],
+  ['pipeline sandbox archive', 'mutation'],
+  ['pipeline edit', 'mutation'],
+  ['pipeline publish', 'mutation'],
+  ['pipeline deploy', 'mutation'],
   ['ontology object-upsert', 'mutation'],
   ['resource delete', 'mutation'],
   ['dataset create', 'mutation'],
@@ -270,17 +309,25 @@ for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
     const h = harness(on, mode)
     for (const [command, args] of [
       ['connectivity import create-file', [SOURCE, '--dataset', DATASET, '--name', 'orders', '--apply']],
-      ['connectivity import create-file', [SOURCE, '--dataset', DATASET, '--name', 'orders', '--branch', 'master', '--apply']],
       ['connectivity import create-table', [SOURCE, '--dataset', DATASET, '--name', 'orders', '--apply']],
-      ['repository imports add', [REPO, '--branch', 'master', '--source', SOURCE, '--apply']],
       ['repository imports add', [REPO, '--branch', 'agent-imports', '--allow-default-branch', '--source', SOURCE, '--apply']],
-      ['repository imports remove', [REPO, '--branch', 'main', '--source', SOURCE, '--apply']],
       ['repository imports remove', [REPO, '--source', SOURCE, '--apply']],
     ] as [string, string[]][]) {
       const wrote = await write($, command, args)
       expect({ command, args, denied: typeof wrote.deny === 'string' }).toEqual({ command, args, denied: true })
     }
     expect(h.asked).toEqual([])
+    // Naming master or main is a write on main: it asks, and declined it does not run.
+    h.answer = 'Decline'
+    for (const [command, args] of [
+      ['connectivity import create-file', [SOURCE, '--dataset', DATASET, '--name', 'orders', '--branch', 'master', '--apply']],
+      ['repository imports add', [REPO, '--branch', 'master', '--source', SOURCE, '--apply']],
+      ['repository imports remove', [REPO, '--branch', 'main', '--source', SOURCE, '--apply']],
+    ] as [string, string[]][]) {
+      const before = h.asked.length
+      const wrote = await write($, command, args)
+      expect({ command, args, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ command, args, denied: true, asked: 1 })
+    }
     expect(h.calls.filter(call => call.startsWith('connectivity ') || call.startsWith('repository imports'))).toEqual([])
   })
 }
@@ -361,4 +408,182 @@ test('Y12: an Orthanc write in Bash is refused in yolo and asks no one', async (
   expect(typeof (await shell($, `orthanc dataset create /Tester/scratch/x --branch agent-scratch --apply`)).deny).toBe('string')
   expect(h.asked).toEqual([])
   expect(ran(h, 'dataset create')).toEqual([])
+})
+
+// Real Orthanc commands that take --branch, each naming main in one spelling.
+const BRANCH_WRITES_ON_MAIN: [string, string[]][] = [
+  ['dataset schema set', [DATASET, '--schema-file', 's.json', '--branch', 'main', '--apply']],
+  ['dataset schema set', [DATASET, '--schema-file', 's.json', '-b', 'master', '--apply']],
+  ['dataset schema set', [DATASET, '--schema-file', 's.json', '-bmain', '--apply']],
+  ['dataset schema set', [DATASET, '--schema-file', 's.json', '--branch=HEAD', '--apply']],
+  ['orchestration builds create', [TARGET, '--branch', 'master', '--apply']],
+  ['ontology object-type-upsert', ['T', '--branch', 'main', '--apply']],
+  ['repository imports add', [REPO, '--branch=master', '--source', SOURCE, '--apply']],
+  ['dataset create-from-csv', ['orders', FOLDER, 'orders.csv', '--branch', 'master', '--apply']],
+  ['workshop module update', ['ri.workshop.main.module.c0000000-0000-4000-8000-0000000000c4', '--definition', 'm.json', '--branch', 'main', '--apply']],
+  ['dataset schema set /x --branch main --apply', []],
+]
+const SETUP_CALLS = ['agent-manifest', 'version', 'configure list']
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y13: in ${mode} mode a real branch write naming main asks once; declined or no one to ask, it is refused; approved, it runs`, async ($, on) => {
+    const h = harness(on, mode)
+    for (const answer of ['Decline', 'throw'] as Answer[]) {
+      h.answer = answer
+      for (const [command, args] of BRANCH_WRITES_ON_MAIN) {
+        const before = h.asked.length
+        const wrote = await write($, command, args)
+        expect({ answer, command, args, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ answer, command, args, denied: true, asked: 1 })
+      }
+    }
+    expect(h.calls.filter(call => !SETUP_CALLS.includes(call))).toEqual([])
+    h.answer = 'Approve'
+    for (const [command, args] of BRANCH_WRITES_ON_MAIN) {
+      const before = h.asked.length
+      const wrote = await write($, command, args)
+      expect({ command, args, deny: wrote.deny, asked: h.asked.length - before }).toEqual({ command, args, deny: undefined, asked: 1 })
+    }
+    expect(ran(h, 'dataset schema set').length).toBe(5)
+    expect(ran(h, 'orchestration builds create').length).toBe(1)
+    expect(ran(h, 'ontology object-type-upsert').length).toBe(1)
+  })
+}
+
+// Optional --branch, and main or master when it is left out.
+const AUTOMATION = 'ri.automate.main.automation.c0000000-0000-4000-8000-0000000000c5'
+const PIPELINE = 'ri.eddie.main.pipeline.c0000000-0000-4000-8000-0000000000c6'
+const BRANCHLESS_ON_MAIN: [string, string[]][] = [
+  ['dataset create-from-csv', ['orders', FOLDER, 'orders.csv', '--apply']],
+  ['workshop module update', ['ri.workshop.main.module.c0000000-0000-4000-8000-0000000000c4', '--definition', 'm.json', '--apply']],
+  ['automate update', [AUTOMATION, '--file', 'a.json', '--apply']],
+  ['automate pause', [AUTOMATION, '--apply']],
+  ['automate resume', [AUTOMATION, '--apply']],
+  ['pipeline sandbox create', [PIPELINE, '--apply']],
+  ['pipeline sandbox archive', [PIPELINE, '--apply']],
+  ['pipeline edit', [PIPELINE, '--logic', 'l.json', '--apply']],
+  ['pipeline publish', [PIPELINE, '--apply']],
+  ['pipeline deploy', [PIPELINE, '--apply']],
+]
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y14: in ${mode} mode a write that lands on main when --branch is left out is refused and asks no one`, async ($, on) => {
+    const h = harness(on, mode)
+    for (const [command, args] of BRANCHLESS_ON_MAIN) {
+      const wrote = await write($, command, args)
+      expect({ command, args, denied: typeof wrote.deny === 'string' }).toEqual({ command, args, denied: true })
+    }
+    expect(h.asked).toEqual([])
+    expect(h.calls.filter(call => !SETUP_CALLS.includes(call))).toEqual([])
+  })
+}
+
+test('Y14: with a work branch, those writes run in yolo with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, args] of BRANCHLESS_ON_MAIN) {
+    const branch = command.startsWith('dataset ') ? 'agent-orders' : GLOBAL
+    const wrote = await write($, command, [...args.slice(0, -1), '--branch', branch, '--apply'])
+    expect({ command, deny: wrote.deny }).toEqual({ command, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
+  for (const [command] of BRANCHLESS_ON_MAIN) expect({ command, ran: ran(h, command).length }).toEqual({ command, ran: 1 })
+})
+
+const MODULE = 'ri.workshop.main.module.c0000000-0000-4000-8000-0000000000c4'
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y15: in ${mode} mode workshop module publish, which works on main only, asks; no one to ask, it is refused`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'throw'
+    expect(typeof (await write($, 'workshop module publish', [MODULE, '--apply'])).deny).toBe('string')
+    expect(h.asked.length).toBe(1)
+    expect(ran(h, 'workshop module publish')).toEqual([])
+    h.answer = 'Approve'
+    expect((await write($, 'workshop module publish', [MODULE, '--apply'])).deny).toBe(undefined)
+    expect(ran(h, 'workshop module publish').length).toBe(1)
+  })
+}
+
+test('Y15: in yolo a new module or a paused automation, which change nothing on main, run with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  expect((await write($, 'workshop module create', ['--folder', FOLDER, '--name', 'm', '--apply'])).deny).toBe(undefined)
+  expect((await write($, 'automate create', ['--file', 'a.json', '--apply'])).deny).toBe(undefined)
+  expect(h.asked).toEqual([])
+})
+
+// Every spelling the matcher must read as main, master or HEAD, and every near
+// miss it must not: a bounded, exhaustive check at the ladder.
+const Y16_MANIFEST: ManifestCommand[] = [
+  { path: 'dataset schema set', kind: 'mutation' },
+  { path: 'orchestration builds create', kind: 'mutation' },
+]
+const casings = (name: string) => [name.toLowerCase(), name.toUpperCase(), name[0]!.toUpperCase() + name.slice(1).toLowerCase()]
+const PREFIXES = ['', 'refs/heads/', 'heads/', './', '+', ':', '+refs/heads/', 'refs//heads//']
+const SUFFIXES = ['', '/', '.', ':']
+const flagForms = (value: string): string[][] => [
+  ['--branch', value], [`--branch=${value}`], ['-b', value], [`-b${value}`], ['-B', value], ['--BRANCH', value],
+  ['--branch', `'${value}'`], ['--branch', `"${value}"`], [`--branch='${value}'`], ['--branch', ` ${value} `],
+]
+const ALL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
+const decide = (mode: Mode, command: string, args: string[]) => {
+  const classified = classifyCall(CLI, { command, args }, Y16_MANIFEST, null)
+  return classified === null ? 'read' : ladderDecision(mode, classified, { action: 'approve', reason: 'ok' }).outcome
+}
+
+test('Y16: every spelling of main, master and HEAD asks, in every mode', async () => {
+  let checked = 0
+  let asked = 0
+  const missed: string[] = []
+  for (const name of ['main', 'master', 'HEAD'])
+    for (const cased of casings(name))
+      for (const prefix of PREFIXES)
+        for (const suffix of SUFFIXES)
+          for (const form of flagForms(`${prefix}${cased}${suffix}`))
+            for (const mode of ALL_MODES) {
+              checked += 1
+              const args = [DATASET, '--schema-file', 's.json', ...form, '--apply']
+              const outcome = decide(mode, 'dataset schema set', args)
+              // A real spelling asks. A malformed one (-B or --BRANCH, which Orthanc
+              // does not take, or a value with a character no branch uses) may be
+              // refused outright, but never runs.
+              const value = `${prefix}${cased}${suffix}`
+              const real = form[0] !== '-B' && form[0] !== '--BRANCH' && /^[A-Za-z0-9._/-]+$/.test(value)
+              if (real ? outcome !== 'ask' : outcome === 'run') missed.push(`${mode} ${args.join(' ')} → ${outcome}`)
+              if (real) asked += 1
+            }
+  expect({ missed: missed.length, first: missed.slice(0, 10) }).toEqual({ missed: 0, first: [] })
+  // 5 prefixes and 3 suffixes are real spellings, and 8 of the 10 flag forms.
+  expect(asked).toBe(3 * 3 * 5 * 3 * 8 * ALL_MODES.length)
+  expect(checked).toBe(3 * 3 * PREFIXES.length * SUFFIXES.length * 10 * ALL_MODES.length)
+})
+
+test('Y16: a branch that only looks like main runs in yolo with no ask', async () => {
+  const missed: string[] = []
+  for (const branch of ['main-fix', 'agent/main', 'maintenance', 'mainline', 'master2', 'agent-master', 'headless', 'head-fix', 'refs/heads/main-x', 'feature/HEAD', GLOBAL])
+    // -B and --BRANCH are not Orthanc flags: such a call names no branch and is refused.
+    for (const form of flagForms(branch).filter(form => form[0] !== '-B' && form[0] !== '--BRANCH')) {
+      const args = [DATASET, '--schema-file', 's.json', ...form, '--apply']
+      const outcome = decide('yolo', 'dataset schema set', args)
+      if (outcome !== 'run') missed.push(`${args.join(' ')} → ${outcome}`)
+    }
+  for (const args of [
+    [TARGET, '--branch', 'agent-rebuild', '--fallback-branch', 'master', '--apply'],
+    [TARGET, '--branch', 'agent-rebuild', '--fallback-branches', 'main,master', '--apply'],
+  ]) {
+    const outcome = decide('yolo', 'orchestration builds create', args)
+    if (outcome !== 'run') missed.push(`${args.join(' ')} → ${outcome}`)
+  }
+  expect(missed).toEqual([])
+})
+
+test('Y17: in FDE mode under yolo a write naming main is refused, not asked', async ($, on) => {
+  const h = harness(on)
+  expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
+  expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
+  expect(await say($, 'fde', 'on')).toContain('FDE mode on')
+  for (const args of [[ONT.rid, 'T', '--branch', 'main'], [ONT.rid, 'T', '--branch', 'main', '--apply']]) {
+    expect(typeof (await write($, 'ontology object-type-upsert', args)).deny).toBe('string')
+  }
+  expect(h.asked).toEqual([])
+  expect(ran(h, 'ontology object-type-upsert')).toEqual([])
 })
