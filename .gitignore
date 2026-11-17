@@ -6,3 +6,6 @@ hooks/fixtures.local.ts
 hooks/e2e.local.test.ts
 hooks/fixtures.zap.ts
 node_modules/
+
+# scripts/live-manifest-reload.sh writes here by default
+live-out/

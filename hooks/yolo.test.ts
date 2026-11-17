@@ -120,7 +120,7 @@ function harness(on: On, mode: Mode = 'yolo'): Harness {
   on('env.set', (_$, e) => {
     if (e.value === undefined) env.delete(e.name)
     else env.set(e.name, e.value)
-    return { value: undefined }
+    return { value: {} }
   })
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
@@ -262,7 +262,7 @@ test('Y5: in yolo the silo holds: branchless, main-only, merges and default-bran
   const pushed = await shell($, 'cd /home/tester/clone && git push origin agent-fix')
   expect(typeof pushed.deny).toBe('string')
   expect(h.asked).toEqual([])
-  expect(h.calls.filter(call => !['agent-manifest', 'configure list'].includes(call))).toEqual([])
+  expect(h.calls.filter(call => !['agent-manifest', 'version', 'configure list'].includes(call))).toEqual([])
 })
 
 for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
