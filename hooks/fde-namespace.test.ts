@@ -286,7 +286,7 @@ function harness(on: On): Harness {
   on('env.set', (_$, e) => {
     if (e.value === undefined) env.delete(e.name)
     else env.set(e.name, e.value)
-    return { value: undefined }
+    return { value: {} }
   })
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
@@ -325,7 +325,8 @@ const write = ($: Engine, args: string[], command = 'dataset create') =>
 const ran = (h: Harness, line: string) => h.calls.includes(line)
 const prompt = async ($: Engine) =>
   ((await $.classic.SubagentStart({ agent_id: 'n', agent_type: 'foundry:foundry-scout' } as never)).additionalContext ?? []).join('\n')
-const quiet = (calls: string[]) => calls.filter(call => call !== 'agent-manifest' && call !== 'configure list')
+// A manifest read runs `version` beside `agent-manifest` (orthanc-0hzh).
+const quiet = (calls: string[]) => calls.filter(call => call !== 'agent-manifest' && call !== 'version' && call !== 'configure list')
 
 /** /profile, /ontology, /namespace (unless null), `beforeOn`, then /fde on. */
 async function bind(

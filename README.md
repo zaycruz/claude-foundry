@@ -8,24 +8,49 @@ says so instead of falling back to REST.
 - **Two tools.** `orthanc_help` discovers Orthanc's command surface; `orthanc_cli`
   runs a command in agent mode and returns its `foundry-agent-v1` envelope.
   A waiting command (`repository checks wait`, `ontology branch-index-status
-  --wait`, `sql wait`) runs as long as its own `--timeout` and `--publish-grace`
-  plus a margin, from 300 s up to 1,920 s.
+  --wait`, `sql wait`, `ai-fde run --apply`) runs as long as its own `--timeout`
+  and `--publish-grace`, plus the time Orthanc adds around the wait (370 s for
+  `ai-fde run`) and a margin, from 300 s up to 2,290 s (more for a command
+  whose own defaults need more). A call that would need more is refused before
+  it starts and before any approval prompt, with the largest `--timeout` that
+  fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
+  `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
+  says `reason: cancelled`; a stop by the timer says `reason: timeout`.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
-  judges each mutation) and `yolo`. Destructive changes always ask; protected
-  branches ask unless `yolo`; branch-scoped work needs an agent branch; calls
-  naming the Compass root are denied; a call repeated three times is blocked.
+  judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
+  delete, `--force`) and release tags ask, protected branches ask, and a call
+  repeated three times is blocked. In `yolo` only a write on main asks:
+  deletes, `--force` writes and release tags run at once, and the loop guard
+  is off. A write naming `main`, `master` or `HEAD` as its branch (any
+  spelling: `--branch=main`, `-b master`, `-bmain`, or as a positional, as in
+  `dataset branches delete <dataset> master` or `branch-protection repo
+  unprotect <repo> main`), and `workshop module publish`, which works on main
+  only, run only when the operator approves
+  them, in every mode; with no one to ask they are refused.
+  Branch-scoped work needs an agent branch; calls naming the Compass root are
+  denied.
 - **A branch rule** that no approval mode can turn off: agent work happens on
   branches, never on a production main. Ontology writes must pass
   `--branch <global branch RID>`; dataset, stream and build writes must name a
   work branch; code goes to a work branch through `orthanc repository push` and
-  a pull request. Branchless writes, writes to `main`/`master`, proposal
-  merges and approvals, default-branch pushes, raw `git push` to
-  a Foundry repository and Foundry writes outside Orthanc are blocked. A
-  release tag (`repository tag create --apply`) is not blocked: it asks the
-  operator in every mode, naming the tag, the commit and the repository. Orthanc
+  a pull request. Branchless writes, `--allow-default-branch`, proposal
+  merges and approvals, `global-branch deploy`, `repository pull-request
+  merge`, default-branch pushes, raw `git push` to a Foundry
+  repository and Foundry writes outside Orthanc are blocked. A write naming
+  `main`/`master` asks the operator (above). Writes whose branch defaults to
+  main or master must name a branch too: connectivity imports, repository
+  imports, `dataset create-from-csv`, `workshop module update`, `automate
+  update`/`pause`/`resume` and the `pipeline` sandbox, edit, publish and
+  deploy commands. A schedule's build action (`orchestration schedules
+  create`/`replace`) must name its `branchName`. Before `orchestration schedules
+  run`/`unpause` or `connectivity import run`, the guard reads the stored
+  schedule or import: if it builds main, names no branch, or cannot be read,
+  the call asks the operator. A release tag
+  (`repository tag create --apply`) is not blocked: outside `yolo` it asks the
+  operator, naming the tag, the commit and the repository. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
   write, however the shell wraps the call. Text that only mentions Orthanc (a
   commit message, a PR body, an `echo`) is not a call.
@@ -160,8 +185,8 @@ RID, and an open proposal on it is named when it is adopted. While bound:
 `/fde end` prints a handoff (branch, namespace, applied writes, how to close it) and
 leaves the branch open: merging or closing it is the operator's call. If a
 session ends while bound, the next one offers `/fde resume`. The mode only
-adds checks. The branch rule, the approval ladder and the destructive rule
-judge every bound call as before, in every approval mode.
+adds checks. The branch rule and the approval ladder (with its destructive
+rule, outside `yolo`) judge every bound call as before.
 
 ## Operator rules and auto mode
 

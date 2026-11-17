@@ -119,11 +119,12 @@ for (const answer of ['Decline', 'yes', 'throw'] as Answer[]) {
 test('E4: in yolo, plans and turning protection on run without a question', async ($, on) => {
   const h = harness(on)
   for (const [command, args] of [
-    ['branch-protection repo unprotect', [REPO, 'master']],
+    // A work branch: a positional naming main or master asks in yolo (yolo.test.ts Y18).
+    ['branch-protection repo unprotect', [REPO, 'feature-x']],
     ['branch-protection resource set', [MODULE, '--off']],
     ['branch-protection resource set', [MODULE, '--on', '--apply']],
     ['branch-protection project set', [PROJECT, '--auto-protect-new-resources', '--apply']],
-    ['branch-protection repo protect', [REPO, 'master', '--require-approval', '--apply']],
+    ['branch-protection repo protect', [REPO, 'feature-x', '--require-approval', '--apply']],
   ] as [string, string[]][]) {
     expect({ command, args, deny: (await write($, command, args)).deny }).toEqual({ command, args, deny: undefined })
   }
