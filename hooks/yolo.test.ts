@@ -76,6 +76,15 @@
 //      deploys a proposal to main; repository pull-request merge) runs in
 //      yolo or allow-edits. Promotions are the operator's: refused in every
 //      mode, asking no one, like proposal merge.
+//  Y20 A schedule or an import carries its branch inside: the action JSON of
+//      orchestration schedules create/replace, or the stored schedule or
+//      import that schedules run/unpause and connectivity import run start.
+//      One whose builds write master (named, or no branchName, which Foundry
+//      reads as master) runs in yolo or allow-edits with no ask. Create and
+//      replace must name a work branch (no branch, or an action the guard
+//      cannot read, is refused; naming main asks). A run or unpause reads the
+//      stored branch first: main, none, or a read that fails asks; a work
+//      branch runs in yolo with no ask.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
@@ -94,6 +103,16 @@ const SOURCE = 'ri.magritte..source.c0000000-0000-4000-8000-0000000000c2'
 const DATASET = 'ri.foundry.main.dataset.c0000000-0000-4000-8000-0000000000c3'
 const TARGET = '{"type":"manual","targetRids":["ri.foundry.main.dataset.c0000000-0000-4000-8000-0000000000c3"]}'
 const OTHER_MODES = ['ask-always', 'allow-edits', 'auto'] as const
+const SCHED = (n: number) => `ri.scheduler.main.schedule.c0000000-0000-4000-8000-00000000000${n}`
+const IMPORT = (n: number) => `ri.magritte..import.c0000000-0000-4000-8000-00000000000${n}`
+const STORED: Record<string, { kind?: 'file' | 'table'; data: unknown }> = {
+  [SCHED(1)]: { data: { rid: SCHED(1), action: { target: { type: 'manual', targetRids: [] }, branchName: 'master' } } },
+  [SCHED(2)]: { data: { rid: SCHED(2), action: { target: { type: 'manual', targetRids: [] } } } },
+  [SCHED(3)]: { data: { rid: SCHED(3), action: { target: { type: 'manual', targetRids: [] }, branchName: 'agent-nightly', fallbackBranches: ['master'] } } },
+  [IMPORT(1)]: { kind: 'file', data: { rid: IMPORT(1), datasetRid: 'ri.foundry.main.dataset.x', branchName: 'master' } },
+  [IMPORT(2)]: { kind: 'table', data: { rid: IMPORT(2), datasetRid: 'ri.foundry.main.dataset.x' } },
+  [IMPORT(3)]: { kind: 'table', data: { rid: IMPORT(3), datasetRid: 'ri.foundry.main.dataset.x', branchName: 'agent-orders' } },
+}
 type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
 
 const envelope = (data: unknown) =>
@@ -128,6 +147,15 @@ const COMMANDS: [string, string][] = [
   ['branch-protection repo unprotect', 'mutation'],
   ['global-branch deploy', 'mutation'],
   ['repository pull-request merge', 'mutation'],
+  ['orchestration schedules create', 'mutation'],
+  ['orchestration schedules replace', 'mutation'],
+  ['orchestration schedules run', 'mutation'],
+  ['orchestration schedules unpause', 'mutation'],
+  ['orchestration schedules pause', 'mutation'],
+  ['orchestration schedules get', 'read-only'],
+  ['connectivity import run', 'mutation'],
+  ['connectivity import get-file', 'read-only'],
+  ['connectivity import get-table', 'read-only'],
   ['ontology object-upsert', 'mutation'],
   ['resource delete', 'mutation'],
   ['dataset create', 'mutation'],
@@ -171,6 +199,14 @@ function harness(on: On, mode: Mode = 'yolo'): Harness {
     if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
     if (line === 'ontology list') return reply(envelope({ data: [{ rid: ONT.rid, display_name: ONT.name, api_name: ONT.name }] }))
     if (line.startsWith('global-branch create ')) return reply(envelope({ branch: { rid: MADE, display_name: words[2] } }))
+    // A stored schedule or import: its branch is what its builds write.
+    if (line.startsWith('orchestration schedules get ') || line.startsWith('connectivity import get-')) {
+      const stored = STORED[words.find(word => word.startsWith('ri.')) ?? '']
+      if (stored === undefined) return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'no such resource' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (line.startsWith('connectivity import get-table') && stored.kind !== 'table') return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'not a table import' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (line.startsWith('connectivity import get-file') && stored.kind !== 'file') return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'not a file import' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      return reply(envelope(stored.data))
+    }
     return reply(envelope({ ran: line }))
   })
   const env = new Map<string, string>([['HOME', '/home/tester']])
@@ -676,3 +712,66 @@ for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
     expect(h.calls.filter(call => !SETUP_CALLS.includes(call))).toEqual([])
   })
 }
+
+const action = (extra: Record<string, unknown>) => JSON.stringify({ type: 'build', target: { type: 'manual', targetRids: [DATASET] }, ...extra })
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y20: in ${mode} mode a schedule action with no branch, or one the guard cannot read, is refused and asks no one`, async ($, on) => {
+    const h = harness(on, mode)
+    for (const args of [
+      [action({}), '--trigger', '{"type":"time","cronExpression":"0 3 * * *"}', '--apply'],
+      ['--apply'],
+      ['{not json', '--apply'],
+    ]) {
+      const wrote = await write($, 'orchestration schedules create', args)
+      expect({ args, denied: typeof wrote.deny === 'string' }).toEqual({ args, denied: true })
+    }
+    expect(typeof (await write($, 'orchestration schedules replace', [SCHED(3), action({}), '--apply'])).deny).toBe('string')
+    expect(h.asked).toEqual([])
+    expect(ran(h, 'orchestration schedules')).toEqual([])
+  })
+
+  test(`Y20: in ${mode} mode a schedule or import whose builds write master asks; no one to ask, it is refused`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'throw'
+    for (const [command, args] of [
+      ['orchestration schedules create', [action({ branchName: 'master' }), '--apply']],
+      ['orchestration schedules create', [action({ branchName: 'refs/heads/main' }), '--apply']],
+      ['orchestration schedules replace', [SCHED(3), action({ branchName: 'master' }), '--apply']],
+      ['orchestration schedules run', [SCHED(1), '--apply']],
+      ['orchestration schedules run', [SCHED(2), '--apply']],
+      ['orchestration schedules run', [SCHED(9), '--apply']],
+      ['orchestration schedules unpause', [SCHED(1), '--apply']],
+      ['connectivity import run', [IMPORT(1), '--apply']],
+      ['connectivity import run', [IMPORT(2), '--kind', 'table', '--apply']],
+      ['connectivity import run', [IMPORT(9), '--apply']],
+    ] as [string, string[]][]) {
+      const before = h.asked.length
+      const wrote = await write($, command, args)
+      expect({ command, args, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ command, args, denied: true, asked: 1 })
+    }
+    expect(ran(h, 'orchestration schedules create')).toEqual([])
+    expect(ran(h, 'orchestration schedules replace')).toEqual([])
+    expect(ran(h, 'orchestration schedules run')).toEqual([])
+    expect(ran(h, 'orchestration schedules unpause')).toEqual([])
+    expect(ran(h, 'connectivity import run')).toEqual([])
+  })
+}
+
+test('Y20: in yolo a schedule or import on a work branch runs with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, args] of [
+    ['orchestration schedules create', [action({ branchName: 'agent-nightly', fallbackBranches: ['master'] }), '--trigger', '{"type":"time","cronExpression":"0 3 * * *"}', '--apply']],
+    ['orchestration schedules replace', [SCHED(3), action({ branchName: 'agent-nightly' }), '--apply']],
+    ['orchestration schedules run', [SCHED(3), '--apply']],
+    ['orchestration schedules unpause', [SCHED(3), '--apply']],
+    ['orchestration schedules pause', [SCHED(1), '--apply']],
+    ['connectivity import run', [IMPORT(3), '--apply']],
+  ] as [string, string[]][]) {
+    expect({ command, args, deny: (await write($, command, args)).deny }).toEqual({ command, args, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
+  expect(ran(h, 'orchestration schedules run').length).toBe(1)
+  expect(ran(h, 'connectivity import run').length).toBe(1)
+})
