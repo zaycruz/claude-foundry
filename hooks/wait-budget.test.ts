@@ -278,7 +278,7 @@ function harness(on: On) {
   on('env.set', (_$, e) => {
     if (e.value === undefined) env.delete(e.name)
     else env.set(e.name, e.value)
-    return { value: undefined }
+    return { value: {} }
   })
   const store = new Map<string, unknown>()
   on('store.get', (_$, e) => ({ value: e.key === 'approvalMode' ? h.mode : store.get(e.key) }))

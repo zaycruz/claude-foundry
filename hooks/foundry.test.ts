@@ -38,6 +38,12 @@ const GLOBAL = 'ri.branch..branch.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
 const approve = { action: 'approve', reason: 'ok' } as const
 const blockedEverywhere = (classification: ReturnType<typeof classifyCall>) =>
   MODES.every(mode => ladderDecision(mode, classification!, approve).outcome === 'block')
+// zay, 2026-11-17: "no approvals are necessary for anything on the branch, only
+// main." A write naming main is the operator's call in every mode: it asks, and
+// it runs only when approved (yolo.test.ts Y13 checks the refusal with no one to ask).
+const asksEverywhere = (classification: ReturnType<typeof classifyCall>) =>
+  classification?.error === undefined &&
+  MODES.every(mode => ladderDecision(mode, classification!, approve).outcome === 'ask')
 
 test('reads, clone and non-Foundry tools never reach the ladder', async () => {
   expect(classifyCall(CLI, { command: 'ontology list' }, MANIFEST, null)).toBe(null)
@@ -47,21 +53,22 @@ test('reads, clone and non-Foundry tools never reach the ladder', async () => {
   expect(classifyCall('Bash', { command: 'orthanc --agent ontology list' }, MANIFEST, null)).toBe(null)
 })
 
-test('destructive mutations ask in every mode, yolo included', async () => {
+test('destructive mutations ask in every mode but yolo, where they run', async () => {
   const deleting = classifyCall(CLI, { command: 'ontology object-type-delete', args: ['T', '--branch', GLOBAL] }, MANIFEST, 'agent/x')
   expect(deleting?.isDestructive).toBe(true)
-  for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  expect(ladderDecision('yolo', deleting!).outcome).toBe('run')
+  for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
     expect(ladderDecision(mode, deleting!, { action: 'approve', reason: 'ok' }).outcome).toBe('ask')
   }
   const forced = classifyCall(CLI, { command: 'dataset create', args: ['foo', '--force'] }, MANIFEST, 'agent/x')
   expect(forced?.isDestructive).toBe(true)
 })
 
-test('protected baselines ask unless yolo; branchless mutations skip the branch gate', async () => {
+test('protected baselines ask in every mode, yolo included; branchless mutations skip the branch gate', async () => {
   const onMain = classifyCall(CLI, { command: 'dataset create', args: ['--branch', 'main'] }, MANIFEST, 'agent/x')
   expect(onMain?.targetsProtected).toBe(true)
   expect(ladderDecision('allow-edits', onMain!).outcome).toBe('ask')
-  expect(ladderDecision('yolo', onMain!).outcome).toBe('run')
+  expect(ladderDecision('yolo', onMain!).outcome).toBe('ask')
   const created = classifyCall(CLI, { command: 'dataset create', args: ['x'] }, MANIFEST, null)
   expect(created?.isBranchScoped).toBe(false)
   expect(ladderDecision('allow-edits', created!).outcome).toBe('run')
@@ -72,11 +79,11 @@ test('F1 F10: an ontology write without --branch blocks in every mode, yolo incl
   expect(blockedEverywhere(classifyCall(CLI, { command: 'ontology action-apply', args: ['a', '--branch'] }, MANIFEST, null))).toBe(true)
 })
 
-test('F2 F3 F5: protected, defaulted or non-global branches block; a global branch RID passes the rule', async () => {
-  expect(blockedEverywhere(classifyCall(CLI, { command: 'ontology object-type-upsert', args: ['T', '--branch', 'main'] }, MANIFEST, null))).toBe(true)
+test('F2 F3 F5: protected branches ask; defaulted or non-global branches block; a global branch RID passes the rule', async () => {
+  expect(asksEverywhere(classifyCall(CLI, { command: 'ontology object-type-upsert', args: ['T', '--branch', 'main'] }, MANIFEST, null))).toBe(true)
   expect(blockedEverywhere(classifyCall(CLI, { command: 'ontology object-type-upsert', args: ['T', '--branch', 'ri.ontology.main.branch.x'] }, MANIFEST, null))).toBe(true)
   expect(blockedEverywhere(classifyCall(CLI, { command: 'dataset schema set', args: ['ri.foundry.main.dataset.x', '--json', '{}'] }, MANIFEST, null))).toBe(true)
-  expect(blockedEverywhere(classifyCall(CLI, { command: 'dataset schema set', args: ['d', '--branch', 'master'] }, MANIFEST, null))).toBe(true)
+  expect(asksEverywhere(classifyCall(CLI, { command: 'dataset schema set', args: ['d', '--branch', 'master'] }, MANIFEST, null))).toBe(true)
   const dataset = classifyCall(CLI, { command: 'dataset schema set', args: ['d', '--branch', 'agent-fix-1'] }, MANIFEST, null)
   expect(ladderDecision('allow-edits', dataset!).outcome).toBe('run')
   const onBranch = classifyCall(CLI, { command: 'ontology object-type-upsert', args: ['T', `--branch=${GLOBAL}`] }, MANIFEST, null)
@@ -257,14 +264,16 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
   expect(blockedEverywhere(cli('dataset schema set', ['d', '--branch', 'main;']))).toBe(true)
   expect(blockedEverywhere(cli('dataset schema set', ['d', '--branch', 'agent fix']))).toBe(true)
   expect(blockedEverywhere(cli('cp', ['ri.a', 'ri.f', '--apply']))).toBe(true)
-  expect(blockedEverywhere(cli('cp', ['ri.a', 'ri.f', '-bmaster']))).toBe(true)
+  expect(asksEverywhere(cli('cp', ['ri.a', 'ri.f', '-bmaster']))).toBe(true)
   expect(cli('cp', ['ri.a', 'ri.f', '-b', 'agent-copy', '--apply'])?.error).toBe(undefined)
 })
 
-test('F21 F22: a tag apply asks in every mode (tag.test.ts); repository push reads its destination past boolean flags', async () => {
+// zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag runs there.
+test('F21 F22: a tag apply asks in every mode but yolo (tag.test.ts); repository push reads its destination past boolean flags', async () => {
   const tag = (args: string[]) => classifyCall(CLI, { command: 'repository tag create', args }, MANIFEST, null)
   const applied = tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40), '--apply'])
-  expect(MODES.every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  expect(MODES.filter(mode => mode !== 'yolo').every(mode => ladderDecision(mode, applied!, approve).outcome === 'ask')).toBe(true)
+  expect(ladderDecision('yolo', applied!, approve).outcome).toBe('run')
   expect(ladderDecision('yolo', tag(['ri.stemma.main.repository.x', 'refs/tags/v1', '--commit-hash', 'a'.repeat(40)])!).outcome).toBe('run')
   const push = (args: string[]) => classifyCall(CLI, { command: 'repository push', args }, MANIFEST, null)
   expect(blockedEverywhere(push(['--apply', 'ri.stemma.main.repository.x', 'refs/heads/a', 'refs/heads/main']))).toBe(true)
@@ -280,6 +289,34 @@ test('F24: the agent cannot write the operator rules', async () => {
   expect(rulesWriteReason('Read', { file_path: '.claude/foundry-rules.md' })).toBe(null)
   expect(rulesWriteReason('Bash', { command: 'cat .claude/foundry-rules.md' })).not.toBe(null)
   expect(rulesWriteReason('Write', { file_path: 'README.md' })).toBe(null)
+})
+
+// hooks-alp, ways this can fail, written before the code:
+//  A1  A shell write naming the plugin's own skill reference files in a
+//      worktree (skills/palantir-foundry-tools/references/*.md) is refused as
+//      an operator file, because `foundry` sits inside a longer directory name.
+//  A2  The fix stops refusing a relative path to the operator's directory after
+//      `cd ~/.claude`: foundry/rules.md, ./foundry/…, "foundry/…", foundry/x/../rules.md.
+test('F25: plugin source that names foundry inside a longer name is not an operator file (hooks-alp)', async () => {
+  const deny = (command: string) => rulesWriteReason('Bash', { command }, '/w', '/Users/x') !== null
+  for (const command of [
+    "sed -i '' 's/every mode/every mode but yolo/' skills/palantir-foundry-tools/references/execution-policy.md",
+    'git add skills/palantir-foundry-tools/references/execution-policy.md README.md',
+    'grep -n mode README.md skills/palantir-foundry-tools/references/execution-policy.md',
+    "python3 - <<'EOF'\nopen('docs/claude-foundry/notes.md', 'w').write('x')\nEOF",
+  ]) {
+    expect({ command, denied: deny(command) }).toEqual({ command, denied: false })
+  }
+  for (const command of [
+    'cd ~/.claude && echo x > foundry/rules.md',
+    'cd ~/.claude; cp x ./foundry/rules.md',
+    'cd ~/.claude; tee "foundry/rules.md" < x',
+    'cd ~/.claude && echo x >foundry/rules.md',
+    'cd ~/.claude && cp x foundry/sub/../rules.md',
+    'cd ~/.claude && cp x {foundry,tmp}/rules.md',
+  ]) {
+    expect({ command, denied: deny(command) }).toEqual({ command, denied: true })
+  }
 })
 
 test('round 3: substitutions, wrappers, help and false positives', async () => {
@@ -365,7 +402,7 @@ test('round 4: operator files are neither read nor written, however the shell re
 test('round 3: main spelled any way is main', async () => {
   const cli = (command: string, args: string[]) => classifyCall(CLI, { command, args }, MANIFEST, null)
   for (const branch of ['refs/heads/master', 'heads/main', 'main/', './main', 'master.', 'MAIN']) {
-    expect({ branch, blocked: blockedEverywhere(cli('dataset schema set', ['d', '--branch', branch])) }).toEqual({ branch, blocked: true })
+    expect({ branch, asks: asksEverywhere(cli('dataset schema set', ['d', '--branch', branch])) }).toEqual({ branch, asks: true })
   }
   const push = (dest: string) => classifyCall(CLI, { command: 'repository push', args: ['ri.r', 'refs/heads/a', dest] }, MANIFEST, null)
   for (const dest of ['+refs/heads/main', ':main', 'refs/heads/main:', 'Refs/Heads/Main', 'refs/heads//main', 'HEAD']) {

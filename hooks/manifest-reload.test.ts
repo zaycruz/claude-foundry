@@ -180,7 +180,7 @@ function harness(on: On) {
   on('env.set', (_$, e) => {
     if (e.value === undefined) h.env.delete(e.name)
     else h.env.set(e.name, e.value)
-    return { value: undefined }
+    return { value: {} }
   })
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
