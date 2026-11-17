@@ -27,6 +27,8 @@
 //      scope runs.
 //  O5  A "work-branch" call with no global branch RID, or naming main,
 //      master or HEAD (as a positional, --branch=main, -bmain), runs in yolo.
+//      A flag the guard does not know takes no value (--yes main): main hides
+//      behind it and the call runs.
 //  O6  A flag scope runs in yolo without proof: no flag, --branch=main,
 //      -bmain, --branch HEAD, a value that is not a global branch RID, a
 //      quoted RID, the flag twice, the flag in another case, -b instead of
@@ -151,6 +153,7 @@ const WORK_BRANCH: [string, string[]][] = [
   ['global-branch roles set', [RID, '--roles', '[]', '--apply']],
   ['global-branch remove-resources', [RID, DATASET, '--apply', '--yes']],
   ['global-branch remove-repo', [RID, REPO, '--apply', '--yes']],
+  ['global-branch remove-repo', ['--apply', '--yes', RID, REPO]],
 ]
 const ALWAYS: [string, string[]][] = [
   // The four writes of bead orthanc-9s1q.
@@ -173,7 +176,7 @@ test('O1: in yolo a work-branch write runs with no ask, even with no one to ask;
   h.answer = 'throw'
   for (const [command, args] of WORK_BRANCH) {
     expect({ command, deny: (await write($, command, args)).deny }).toEqual({ command, deny: undefined })
-    expect(ran(h, command)).toEqual([`${command} ${args.join(' ')}`])
+    expect(ran(h, command).at(-1)).toBe(`${command} ${args.join(' ')}`)
   }
   expect(h.asked).toEqual([])
 })
@@ -236,6 +239,21 @@ test('O4: a scope the guard cannot read asks in yolo', async () => {
   }
   // The readable scope, for contrast.
   expect(yoloOutcome(rolesSet('work-branch'), 'global-branch roles set', args)).toBe('run')
+  // Object scopes the guard cannot read, on a call that does pass the flag with a RID.
+  const tagged = [REPO, TAG, '--commit-hash', COMMIT, '--branch', RID, '--apply']
+  const tagWith = (scope: unknown): ManifestCommand[] => [
+    { path: 'repository tag create', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: scope },
+  ]
+  for (const scope of [
+    { work_branch_flag: '--branch', extra: 1 }, { work_branch_flag: '--branch', flag_aliases: '--foundry-branch-rid' },
+    { work_branch_flag: '--branch', flag_aliases: [7] }, { work_branch_flag: '--branch', flag_aliases: ['branch'] },
+    { work_branch_flag: 'branch' }, { work_branch_flag: '-b' }, { work_branch_flag: ['--branch'] }, { flag_aliases: ['--branch'] },
+    [{ work_branch_flag: '--branch' }], 'work-branch-flag',
+  ]) {
+    expect({ scope, outcome: yoloOutcome(tagWith(scope), 'repository tag create', tagged) }).toEqual({ scope, outcome: 'ask' })
+  }
+  // A readable object scope with no aliases, for contrast (the release ask is skipped by --branch RID too).
+  expect(yoloOutcome(tagWith({ work_branch_flag: '--branch' }), 'repository tag create', tagged)).toBe('run')
 })
 
 test('O5: a work-branch call with no global branch RID, or naming main, never runs in yolo', async () => {
@@ -252,6 +270,9 @@ test('O5: a work-branch call with no global branch RID, or naming main, never ru
     [RID, '--branch=main', '--roles', '[]', '--apply'],
     [RID, '-bmain', '--roles', '[]', '--apply'],
     [RID, '--branch', 'master', '--roles', '[]', '--apply'],
+    [RID, '--apply', '--yes', 'main'],
+    ['--yes', 'main', RID, '--apply'],
+    ['--allow-weaken', 'master', RID, '--apply'],
   ]) {
     const classification = classifyCall(CLI, { command: 'global-branch roles set', args }, rolesSet('work-branch'), null)!
     const outcome = ladderDecision('yolo', classification, null).outcome

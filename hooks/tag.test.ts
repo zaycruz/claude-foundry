@@ -258,6 +258,20 @@ test('G10: in FDE mode under yolo a tag links only to the session branch, and ap
   ])
 })
 
+test('G10: in FDE mode the pin holds for --branch as for its alias', async ($, on) => {
+  const h = harness(on)
+  expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
+  expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
+  expect(await say($, 'fde', 'on')).toContain('FDE mode on')
+  expect(typeof (await write($, 'repository tag create', tagArgs('--branch', OTHER, '--apply'))).deny).toBe('string')
+  expect(typeof (await write($, 'repository tag create', tagArgs(`--branch=${OTHER}`))).deny).toBe('string')
+  expect(typeof (await write($, 'repository tag create', tagArgs('--branch', MADE, '--apply'))).deny).toBe('string')
+  expect((await write($, 'repository tag create', tagArgs('--branch', MADE))).deny).toBe(undefined)
+  expect((await write($, 'repository tag create', tagArgs('--branch', MADE, '--apply'))).deny).toBe(undefined)
+  expect(h.asked).toEqual([])
+  expect(tagged(h).filter(call => call.includes('--apply'))).toEqual([`repository tag create ${tagArgs('--branch', MADE, '--apply').join(' ')}`])
+})
+
 test('G11: orthanc repository tag create in Bash is refused and asks no one', async ($, on) => {
   const h = harness(on)
   const wrote = (await $.tool.call({ tool: 'Bash', command: `orthanc repository tag create ${tagArgs('--apply').join(' ')}` } as never)) as { deny?: string }
