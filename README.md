@@ -24,20 +24,24 @@ says so instead of falling back to REST.
   delete, `--force`) and release tags ask, protected branches ask, and a call
   repeated three times is blocked. In `yolo` only a write on main asks:
   deletes, `--force` writes and release tags run at once, and the loop guard
-  is off. A write naming `main`, `master` or `HEAD` as its branch runs only
-  when the operator approves it, in every mode; with no one to ask it is
-  refused.
+  is off. A write naming `main`, `master` or `HEAD` as its branch (any
+  spelling: `--branch=main`, `-b master`, `-bmain`), and `workshop module
+  publish`, which works on main only, run only when the operator approves
+  them, in every mode; with no one to ask they are refused.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied.
 - **A branch rule** that no approval mode can turn off: agent work happens on
   branches, never on a production main. Ontology writes must pass
   `--branch <global branch RID>`; dataset, stream and build writes must name a
   work branch; code goes to a work branch through `orthanc repository push` and
-  a pull request. Branchless writes, writes to `main`/`master`,
-  `--allow-default-branch`, proposal merges and approvals, default-branch
-  pushes, raw `git push` to a Foundry repository and Foundry writes outside
-  Orthanc are blocked. Connectivity imports and repository imports, whose
-  branch defaults to master, must name a work branch too. A release tag
+  a pull request. Branchless writes, `--allow-default-branch`, proposal
+  merges and approvals, default-branch pushes, raw `git push` to a Foundry
+  repository and Foundry writes outside Orthanc are blocked. A write naming
+  `main`/`master` asks the operator (above). Writes whose branch defaults to
+  main or master must name a branch too: connectivity imports, repository
+  imports, `dataset create-from-csv`, `workshop module update`, `automate
+  update`/`pause`/`resume` and the `pipeline` sandbox, edit, publish and
+  deploy commands. A release tag
   (`repository tag create --apply`) is not blocked: outside `yolo` it asks the
   operator, naming the tag, the commit and the repository. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not

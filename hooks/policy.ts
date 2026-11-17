@@ -58,10 +58,24 @@ const BRANCH_REQUIRED_PATHS = new Set([
   'connectivity import create-table',
   'repository imports add',
   'repository imports remove',
+  // Optional --branch that lands on main or master when it is left out.
+  'dataset create-from-csv',
+  'workshop module update',
+  'automate update',
+  'automate pause',
+  'automate resume',
+  'pipeline sandbox create',
+  'pipeline sandbox archive',
+  'pipeline edit',
+  'pipeline publish',
+  'pipeline deploy',
 ])
 export const requiresBranch = (path: string) => BRANCH_REQUIRED_PATHS.has(path)
 // Ontology writes Orthanc cannot branch: they change live data on main.
 const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-upsert-batch', 'ontology action-apply-with-overrides'])
+// Writes that change main and take no branch: each is a write on main, so it
+// asks the operator in every mode, yolo too.
+const MAIN_WRITES = new Set(['workshop module publish'])
 // Promotion into main is the operator's decision, not the agent's. A release
 // tag is not here: it asks the operator outside yolo (see releaseTagCall).
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve'])
@@ -294,7 +308,9 @@ export function branchRuleReason(command: string, args: readonly string[]): stri
       : `'${command}' names no --branch, so it would write the default branch (master). Pass --branch <work branch>; create one with 'dataset branches create <dataset> ${DATASET_BRANCH_PREFIX}<name>' or use a global branch.`
   }
   if (!BRANCH_VALUE.test(branch)) return `'${command}' branch '${branch}' has characters no branch name uses.`
-  if (isProtectedValue(branch)) return `'${command}' targets ${branch}. Agent work happens on branches, never on main or master.`
+  // A write naming main is not refused here: the ladder asks the operator for it
+  // in every mode (targetsProtected), and refuses it when no one can be asked.
+  if (isProtectedValue(branch)) return null
   if (command.startsWith('ontology ') && !branch.startsWith(GLOBAL_BRANCH_RID)) {
     return `'${command}' must target a global branch RID (ri.branch..branch.…), not '${branch}': only a global branch is provably not the main ontology branch.`
   }
@@ -349,7 +365,9 @@ function orthancClassification(
     hasWorkingBranch: branchIsWorking(workingBranch),
     // `-b` is --branch in every command, so every spelling of it names the branch.
     targetsProtected:
-      targetsProtected(rawInput) || flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue),
+      MAIN_WRITES.has(command) ||
+      targetsProtected(rawInput) ||
+      flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue),
   }
   if (!BRANCH_CREATION_PATHS.includes(command)) {
     const refused = branchRuleReason(command, args)
@@ -1000,7 +1018,7 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' names main, master or HEAD as its branch. It runs only if the operator approves; otherwise pass a work branch.`,
+      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only). It runs only if the operator approves; otherwise pass a work branch.`,
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
@@ -1027,6 +1045,7 @@ export function modeGuidance(mode: ApprovalMode): string {
     'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
+    'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
     (mode === 'yolo'
       ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes, --force writes and release tags run at once, ' +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
