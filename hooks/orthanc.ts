@@ -51,6 +51,9 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
           input: typeof entry.input === 'string' ? entry.input : undefined,
           flags: flagsFrom(entry.args),
+          // Kept raw, null included: policy reads it and fails closed on what it cannot read.
+          ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
+          ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
         }]
       : [],
   )
