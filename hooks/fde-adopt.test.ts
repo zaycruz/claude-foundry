@@ -157,12 +157,12 @@ function harness(on: On): Harness {
   on('env.set', (_$, e) => {
     if (e.value === undefined) env.delete(e.name)
     else env.set(e.name, e.value)
-    return { value: undefined }
+    return { value: {} }
   })
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
     h.store.set(e.key, e.value)
-    return { value: undefined }
+    return { value: {} }
   })
   on('fs.stat', () => ({ value: { kind: 'other', size: 0, mtimeMs: 0, isLink: false } as never }))
   on('fs.read', (_$, e) => {
