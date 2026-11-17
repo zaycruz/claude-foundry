@@ -107,6 +107,10 @@ const READ_VERBS = new Set([
   'preview', 'query', 'read', 'view', 'help', 'export', 'status', 'download',
 ])
 export const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
+// Orthanc's global stack flag; it takes no abbreviation (`--prof` is a usage error).
+const PROFILE_FLAG = /^--profile(=|$)/
+// Local commands that change which stack orthanc runs on when none is named.
+const STACK_COMMANDS = new Set(['configure use', 'configure set-default'])
 // Orthanc `local` commands that only read local state.
 const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
@@ -1051,6 +1055,14 @@ export function classifyCall(
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
     if (classifyOrthancCommand(resolved.path, manifest) === 'read') return null
+    // orthanc reads the last --profile it is given, so one in the args would move
+    // the write off the stack the operator picked. Reads may look at another stack.
+    if (resolved.args.some(arg => PROFILE_FLAG.test(unquote(arg)))) {
+      return unreadableCall(input, workingBranch, `'${resolved.path}' passes --profile, which would run this write on a stack the operator did not pick. orthanc_cli runs on the active stack; the operator switches it with /profile.`)
+    }
+    if (STACK_COMMANDS.has(resolved.path)) {
+      return unreadableCall(input, workingBranch, `'${resolved.path}' changes orthanc's default stack, which a later session starts on. The stack is the operator's: they switch it with /profile.`)
+    }
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, stored)
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
