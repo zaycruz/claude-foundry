@@ -18,6 +18,8 @@
 //      --REJECT, a quoted '--reject x') lets an approval through.
 //  A6  The refusal does not say the operator approves pull requests.
 //  A7  The other promotions loosen: proposal merge, accept or approve run.
+//  A8  --reject or --withdraw as another flag's value (--expect-head --reject)
+//      or after `--` lets an approval through.
 //
 // Synthetic manifest only; no Foundry stack.
 import { expect, test } from 'claude-code/testing'
@@ -25,8 +27,8 @@ import { expect, test } from 'claude-code/testing'
 import { classifyCall, ladderDecision, APPROVAL_MODES, type ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
-const REPO = 'ri.stemma.main.repository.e0000000-0000-4000-8000-0000000000e1'
-const HEAD = '0123456789abcdef0123456789abcdef01234567'
+const REPO = 'ri.stemma.main.repository.00000000-0000-0000-0000-000000000000'
+const HEAD = '0000000000000000000000000000000000000000'
 const MANIFEST: ManifestCommand[] = [
   { path: 'repository pull-request approve', kind: 'mutation' },
   { path: 'repository pull-request approval', kind: 'read-only' },
@@ -56,7 +58,7 @@ test('A1 A6: an approve apply is refused in every mode, and says the operator ap
 test('A2: the plan form is refused like proposal approve', async () => {
   for (const mode of APPROVAL_MODES) {
     expect(decide(mode, 'repository pull-request approve', [REPO, '7']).outcome).toBe('block')
-    expect(decide(mode, 'proposal approve', ['ri.proposal.x']).outcome).toBe('block')
+    expect(decide(mode, 'proposal approve', ['ri.proposal.main.proposal.00000000-0000-0000-0000-000000000000']).outcome).toBe('block')
   }
 })
 
@@ -75,16 +77,19 @@ test('A4: a rejection or a withdrawal is an ordinary write the ladder judges', a
   }
 })
 
-test('A5: spellings that only look like a rejection stay refused', async () => {
+test('A5 A8: spellings that only look like a rejection stay refused', async () => {
   for (const flag of ['--reject=false', '--REJECT', '--withdraw=no', '"--reject x"', '--rejected', '-r']) {
     expect(decide('yolo', 'repository pull-request approve', [...APPLY, flag]).outcome).toBe('block')
   }
+  // A flag value or a positional, not a switch.
+  expect(decide('yolo', 'repository pull-request approve', [REPO, '7', '--apply', '--expect-head', '--reject']).outcome).toBe('block')
+  expect(decide('yolo', 'repository pull-request approve', [...APPLY, '--', '--withdraw']).outcome).toBe('block')
 })
 
 test('A7: proposal merge, accept and approve stay refused; the approval read stays a read', async () => {
   for (const mode of APPROVAL_MODES) {
     for (const command of ['proposal merge', 'proposal accept', 'proposal approve']) {
-      expect(decide(mode, command, ['ri.proposal.x']).outcome).toBe('block')
+      expect(decide(mode, command, ['ri.proposal.main.proposal.00000000-0000-0000-0000-000000000000']).outcome).toBe('block')
     }
   }
   expect(decide('yolo', 'repository pull-request approval', [REPO, '7']).outcome).toBe('read')

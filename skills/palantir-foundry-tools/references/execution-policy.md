@@ -36,7 +36,8 @@ Code repositories are cloned locally through Orthanc, never through raw git smar
 `orthanc_help {query}` is the source of truth; these are easy to miss:
 
 - Reads: `table get`, `table preview`, `table freshness` (virtual tables); `connectivity explore list|tables|files|preview|preview-files` (what a source holds, before an import); `ontology action-outcomes` (action submissions, successes and failures); `repository pull-request list|get|approval`.
-- Writes that take `--branch` (a work branch, never `master` or `main`): `pipeline create|edit|publish|deploy`, `pipeline sandbox create|archive`, `workshop module create|update|publish|delete`, `automate create|update|pause|resume|delete`, `connectivity import create-file|create-table`, `dataset create-from-csv`.
+- Writes that take `--branch` (a work branch, never `master` or `main`): `pipeline create|edit|publish|deploy`, `pipeline sandbox create|archive`, `workshop module update` (a global branch RID), `automate create|update|pause|resume|delete`, `connectivity import create-file|create-table`, `dataset create-from-csv`.
+- Main only: `workshop module create`, `publish` and `delete` refuse `--branch` (Workshop creates, publishes and trashes modules on main). They are writes on main: the operator runs them or approves them.
 
 ## Orthanc gaps
 

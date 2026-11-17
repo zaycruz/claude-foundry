@@ -63,11 +63,23 @@ const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal appro
 // A code pull request approval (Orthanc 0.7.7) is a promotion too: it lets work
 // into main under the operator's name. Only the exact flags --reject and
 // --withdraw make it something else (a review that lets nothing in), which the
-// ladder judges as an ordinary write. Any other spelling stays an approval.
+// ladder judges as an ordinary write. Any other spelling stays an approval, and
+// so does one that may be another flag's value (after a flag that is not a known
+// switch) or a positional (after `--`). Over-matching only refuses more.
 const PULL_REQUEST_APPROVE = 'repository pull-request approve'
 const NOT_AN_APPROVAL = ['--reject', '--withdraw']
+const APPROVE_SWITCHES = new Set(['--apply', '--reject', '--withdraw', '--agent', '--non-interactive'])
+function namesRejectOrWithdraw(args: readonly string[]): boolean {
+  let before = ''
+  for (const arg of args) {
+    if (arg === '--') return false
+    if (NOT_AN_APPROVAL.includes(arg) && !(before.startsWith('-') && !APPROVE_SWITCHES.has(before))) return true
+    before = arg
+  }
+  return false
+}
 const isPromotion = (command: string, args: readonly string[]) =>
-  PROMOTIONS.has(command) || (command === PULL_REQUEST_APPROVE && !args.some(arg => NOT_AN_APPROVAL.includes(arg)))
+  PROMOTIONS.has(command) || (command === PULL_REQUEST_APPROVE && !namesRejectOrWithdraw(args))
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
 // Orthanc flags that take no value, so the word after one is a positional.
