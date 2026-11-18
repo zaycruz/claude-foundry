@@ -41,6 +41,14 @@
 //      the binary (`run.sh /opt/bin/orthanc $CMD`), or an interpreter given only
 //      other flags (`node --no-warnings` reading a pipe), runs.
 //
+// FND-4: the guard never refuses a command for its shape or because it names
+// orthanc. N1 cases were refused before and now run: interpreter code that
+// starts a process, a variable or substitution it cannot read, a script file, a
+// pipe into an interpreter, a wrapper script, an unknown command. L1 and the
+// two K cases still stop: a promotion, a write naming main, a release tag
+// written out so the guard can read them.
+//  N2  A readable write on main or a promotion runs unasked (a tag apply: tag.test.ts G11).
+//
 // Synthetic commands and paths only.
 import { expect, test } from 'claude-code/testing'
 
@@ -60,9 +68,10 @@ const MANIFEST: ManifestCommand[] = [
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 const approve = { action: 'approve', reason: 'ok' } as const
 const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, 'agent/x')
+// Stopped: blocked, or asks the operator (a write on main asks, and is refused when no one can be asked).
 const blockedEverywhere = (command: string) => {
   const classified = bash(command)
-  return classified !== null && MODES.every(mode => ladderDecision(mode, classified, approve).outcome === 'block')
+  return classified !== null && MODES.every(mode => ladderDecision(mode, classified, approve).outcome !== 'run')
 }
 
 const PASSES: [string, string][] = [
@@ -90,33 +99,41 @@ const PASSES: [string, string][] = [
   ['S7', 'which orthanc && python3 -V && perl -v | head -2'],
   ['S8', "orthanc --agent ai-fde tools list 2>/dev/null | grep -i -E 'log|build_history' | head"],
   ['S8', 'orthanc smoke schedule'],
+  ['N1', "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
+  ['N1', `python3 -c "import os; os.system('/opt/bin/orthanc proposal merge p')"`],
+  ['N1', "python3 - <<'EOF'\nimport os\nos.execvp('orthanc', ['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
+  ['N1', `ruby -e 'system("orthanc proposal merge p")'`],
+  ['N1', "ruby -e '`orthanc proposal merge p`'"],
+  ['N1', "perl -e 'qx(orthanc proposal merge p)'"],
+  ['N1', `awk 'BEGIN { system("orthanc proposal merge p") }'`],
+  ['N1', `awk 'BEGIN { "orthanc dataset create x" | getline r }'`],
+  ['N1', `osascript -e 'do shell script "orthanc proposal merge p"'`],
+  ['N1', `node -e 'require("child_process").execSync("orthanc proposal merge p")'`],
+  ['N1', `bun -e 'Bun.spawnSync(["orthanc", "proposal", "merge", "p"])'`],
+  ['N1', 'scripts/e2e/keychain-env.sh tester target/release/orthanc --profile tester dataset create x --apply'],
+  ['N1', "find . -name '*.json' -exec /opt/bin/orthanc dataset create {} \\;"],
+  ['N1', 'for b in $(which -a orthanc); do $b proposal merge p; done'],
+  ['N1', 'O=/opt/bin/orthanc; $O dataset create x'],
+  ['N1', 'X="cd /tmp && orthanc proposal merge p"; bash -c "$X"'],
+  ['N1', 'cat job.py | python3 - --target orthanc'],
+  ['N1', './run.sh /opt/bin/orthanc $CMD'],
+  ['N1', './run.sh /opt/bin/orthanc "$(cat /tmp/tester/cmd)"'],
+  ['N1', 'echo orthanc; cat job.js | node --no-warnings'],
+  ['N1', 'echo orthanc; cat job.py | python3 -v'],
+  ['N1', "orthanc alias add mk 'dataset create x'"],
+  ['N1', 'bash scripts/e2e/run.sh'],
+  ['N1', 'gh -R owner/orthanc-source pr list'],
+  ['N1', 'orthanc configure list'],
+  ['N1', 'orthanc --version'],
+  ['N1', 'orthanc ontology list | head -3'],
+  ['N1', 'orthanc dataset create x --branch agent/work --apply'],
 ]
 
 const REFUSED: [string, string][] = [
-  ['K1', "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
-  ['K1', `python3 -c "import os; os.system('/opt/bin/orthanc proposal merge p')"`],
-  ['K1', "python3 - <<'EOF'\nimport os\nos.execvp('orthanc', ['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
-  ['K1', `ruby -e 'system("orthanc proposal merge p")'`],
-  ['K1', "ruby -e '`orthanc proposal merge p`'"],
-  ['K1', "perl -e 'qx(orthanc proposal merge p)'"],
-  ['K1', `awk 'BEGIN { system("orthanc proposal merge p") }'`],
-  ['K1', `awk 'BEGIN { "orthanc dataset create x" | getline r }'`],
-  ['K1', `osascript -e 'do shell script "orthanc proposal merge p"'`],
-  ['K1', `node -e 'require("child_process").execSync("orthanc proposal merge p")'`],
-  ['K1', `bun -e 'Bun.spawnSync(["orthanc", "proposal", "merge", "p"])'`],
-  ['K2', 'scripts/e2e/keychain-env.sh tester target/release/orthanc --profile tester dataset create x --apply'],
   ['K2', './run.sh /opt/bin/orthanc proposal merge p'],
-  ['K2', "find . -name '*.json' -exec /opt/bin/orthanc dataset create {} \\;"],
-  ['K3', 'for b in $(which -a orthanc); do $b proposal merge p; done'],
-  ['K3', 'O=/opt/bin/orthanc; $O dataset create x'],
   ['K3', 'B="/opt/bin/orthanc --profile tester"; $B proposal merge p'],
-  ['K3', 'X="cd /tmp && orthanc proposal merge p"; bash -c "$X"'],
-  ['K4', 'cat job.py | python3 - --target orthanc'],
-  ['K6', './run.sh /opt/bin/orthanc $CMD'],
-  ['K6', './run.sh /opt/bin/orthanc "$(cat /tmp/tester/cmd)"'],
-  ['K6', 'echo orthanc; cat job.js | node --no-warnings'],
-  ['K6', 'echo orthanc; cat job.py | python3 -v'],
-  ['K6', "orthanc alias add mk 'dataset create x'"],
+  ['L1', 'orthanc proposal merge p'],
+  ['L1', 'orthanc dataset create x --branch main --apply'],
 ]
 
 for (const [id, command] of PASSES) {
@@ -126,7 +143,7 @@ for (const [id, command] of PASSES) {
 }
 
 for (const [id, command] of REFUSED) {
-  test(`${id}: refused in every mode: ${command.split('\n')[0]!.slice(0, 70)}`, async () => {
+  test(`${id}: stopped in every mode: ${command.split('\n')[0]!.slice(0, 70)}`, async () => {
     expect({ command, blocked: blockedEverywhere(command) }).toEqual({ command, blocked: true })
   })
 }

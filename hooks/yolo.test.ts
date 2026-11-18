@@ -41,7 +41,7 @@
 //  Y10 FDE mode loosens in yolo: an apply with no dry run runs. After its dry
 //      run, a bound delete runs without a dialog.
 //  Y11 A credential command (auth store) runs in yolo.
-//  Y12 An Orthanc write in Bash runs in yolo instead of going to orthanc_cli.
+//  Y12 An Orthanc write in Bash on a work branch is refused in yolo, or one naming main runs unasked.
 //
 // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
 // necessary for anything on the branch, only main." Checked against the real
@@ -458,11 +458,12 @@ test('Y11: a credential command does not run in yolo', async ($, on) => {
   expect(ran(h, 'auth store')).toEqual([])
 })
 
-test('Y12: an Orthanc write in Bash is refused in yolo and asks no one', async ($, on) => {
+test('Y12: an Orthanc write in Bash on a work branch runs in yolo; one naming main asks, and is refused when no one can be asked', async ($, on) => {
   const h = harness(on)
-  expect(typeof (await shell($, `orthanc dataset create /Tester/scratch/x --branch agent-scratch --apply`)).deny).toBe('string')
+  expect((await shell($, `orthanc dataset create /Tester/scratch/x --branch agent-scratch --apply`)).deny).toBe(undefined)
   expect(h.asked).toEqual([])
-  expect(ran(h, 'dataset create')).toEqual([])
+  h.answer = 'throw'
+  expect(typeof (await shell($, `orthanc dataset create /Tester/scratch/x --branch main --apply`)).deny).toBe('string')
 })
 
 // Real Orthanc commands that take --branch, each naming main in one spelling.

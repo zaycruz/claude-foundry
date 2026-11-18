@@ -30,7 +30,7 @@
 //  G9  The prompt still calls tags the operator's, or does not say they ask
 //      outside yolo.
 //  G10 In FDE mode a tag links to another branch, or applies with no dry run.
-//  G11 orthanc repository tag create in Bash runs, or asks.
+//  G11 orthanc repository tag create --apply in Bash runs without asking, or its dry run asks.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
@@ -244,9 +244,12 @@ test('G10: in FDE mode under yolo a tag links only to the session branch, and ap
   ])
 })
 
-test('G11: orthanc repository tag create in Bash is refused and asks no one', async ($, on) => {
-  const h = harness(on)
+test('G11: a release tag in Bash asks like any ladder write; declined, it does not run', async ($, on) => {
+  const h = harness(on, 'allow-edits')
+  h.answer = 'Decline'
   const wrote = (await $.tool.call({ tool: 'Bash', command: `orthanc repository tag create ${tagArgs('--apply').join(' ')}` } as never)) as { deny?: string }
   expect(typeof wrote.deny).toBe('string')
-  expect(h.asked).toEqual([])
+  expect(h.asked.length).toBe(1)
+  const dry = (await $.tool.call({ tool: 'Bash', command: `orthanc repository tag create ${tagArgs().join(' ')}` } as never)) as { deny?: string }
+  expect(dry.deny).toBe(undefined)
 })
