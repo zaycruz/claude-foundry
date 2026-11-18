@@ -63,7 +63,13 @@ function flagsFrom(args: unknown): ManifestFlag[] {
   if (!Array.isArray(args)) return []
   return args.filter(isRecord).flatMap(arg =>
     typeof arg.flag === 'string'
-      ? [{ flag: arg.flag, takesValue: arg.takes_value === true, ...(typeof arg.default === 'string' ? { default: arg.default } : {}) }]
+      ? [{
+          flag: arg.flag,
+          takesValue: arg.takes_value === true,
+          // A default carried as a JSON number counts too: read as none, a
+          // waiting command would fall back to the 300 s floor in silence.
+          ...(typeof arg.default === 'string' || typeof arg.default === 'number' ? { default: String(arg.default) } : {}),
+        }]
       : [],
   )
 }
@@ -118,6 +124,15 @@ function flagArgument(args: readonly string[], flag: string): string | undefined
   return value
 }
 
+/** The flag that sets this command's own wait: the one it declares (--timeout,
+ * or --timeout-seconds for the commands that name it so), the one a call
+ * passes when no manifest entry was found, or --timeout. Every answer to
+ * "which flag names this command's wait" comes from here, so a timer, a
+ * refusal and a stopped hint never name three different flags. */
+export function deadlineFlagOf(command: ManifestCommand | undefined, given?: (flag: string) => boolean): string {
+  return DEADLINE_FLAGS.find(flag => (command?.flags ?? []).some(entry => entry.flag === flag) || (given?.(flag) ?? false)) ?? '--timeout'
+}
+
 export type CliWait = {
   timeoutMs: number
   neededMs: number
@@ -170,7 +185,7 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
   }
   const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
   // The flag to name in the refusal: the one this command or this call uses.
-  const deadlineFlag = DEADLINE_FLAGS.find(flag => declares(flag) || given(flag)) ?? '--timeout'
+  const deadlineFlag = deadlineFlagOf(command, given)
   const totalS = waits ? totalOf(seconds) : 0
   if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false, deadlineFlag }
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
@@ -227,7 +242,7 @@ function stoppedHint(command: ManifestCommand, reason: 'timeout' | 'cancelled'):
   if (extra) return extra.stoppedHint
   if (command.kind === 'read-only') {
     return reason === 'timeout'
-      ? 'It is a read: call it again to keep waiting, with a --timeout that fits.'
+      ? `It is a read: call it again to keep waiting, with a ${deadlineFlagOf(command)} that fits.`
       : 'It is a read: call it again to keep waiting.'
   }
   return 'Read the matching Foundry state before any retry.'

@@ -73,11 +73,19 @@
 //      --timeout", a flag the command does not have.
 //  W23 A command whose `--timeout-seconds` is an HTTP timeout (`search`,
 //      `verify`: default 30) is refused or over-timed by the change.
+//
+// From the reviews of the first fix (jev.engineering-charter, jev.quality-assurance):
+//  W24 The hint on a call the timer stopped still names `--timeout`, the flag
+//      the command does not have: orthanc_cli tells the model to retry
+//      `models deployment get` with a flag orthanc would reject.
+//  W25 A manifest that carries a default as a JSON number (300, not "300")
+//      reads as no default, so the wait falls back to the floor again: the
+//      same cut, back by the side door.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, notRunFailure, overCapFailure } from './orthanc'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, manifestFrom, notRunFailure, overCapFailure, withStoppedHint } from './orthanc'
 import type { ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
@@ -279,6 +287,38 @@ test('W22: an over-cap --timeout-seconds names itself and the largest value that
   // A --poll-interval too big to fit names itself, not --timeout.
   const poll = cliWait(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '3000'])
   expect({ overCap: poll.overCap, max: poll.maxTimeoutS, flags: poll.overFlags }).toEqual({ overCap: true, max: undefined, flags: ['--poll-interval'] })
+})
+
+test('W24: the hint on a call the timer stopped names the flag that command waits with', async () => {
+  const stopped = (command: ManifestCommand) =>
+    String(withStoppedHint({ ...failure('orthanc-launch-error', 'aborted', command.path, { reason: 'timeout' }) }, command).errors?.[0]?.hint ?? '')
+  expect(stopped(DEPLOYMENT_GET)).toContain('--timeout-seconds that fits')
+  expect(stopped(DEPLOYMENT_GET)).not.toContain('with a --timeout that fits')
+  // A command that waits with --timeout keeps the words it had.
+  expect(stopped(CHECKS_WAIT)).toContain('--timeout that fits')
+  // A cancelled read says nothing about a flag; ai-fde run keeps its own hint.
+  expect(stopped({ ...DEPLOYMENT_GET })).toContain('call it again')
+  expect(stopped({ ...AI_FDE_RUN, kind: 'read-only' })).toContain('ai-fde status')
+})
+
+test('W25: a manifest default carried as a number still sets the wait', async () => {
+  const loaded = manifestFrom({
+    schema_version: 'foundry-agent-v1',
+    data: {
+      commands: [
+        {
+          path: 'models deployment get',
+          kind: 'read-only',
+          args: [
+            { kind: 'option', flag: '--wait', takes_value: false },
+            { kind: 'option', flag: '--timeout-seconds', takes_value: true, default: 300 },
+            { kind: 'option', flag: '--poll-interval', takes_value: true, default: 5 },
+          ],
+        },
+      ],
+    },
+  })
+  expect(seconds(cliTimeoutMs(loaded[0], ['ri.d.1', '--wait']))).toBe(300 + 5 + MARGIN_S)
 })
 
 // ---------- through the tool: the plugin loaded, orthanc faked, the clock mocked ----------
