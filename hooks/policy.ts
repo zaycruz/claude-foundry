@@ -4,7 +4,17 @@
 
 /** One option of a manifest command, as Orthanc's agent-manifest lists it. */
 export type ManifestFlag = { flag: string; takesValue: boolean; default?: string }
-export type ManifestCommand = { path: string; kind?: string; auth?: string; input?: string; flags?: ManifestFlag[] }
+export type ManifestCommand = {
+  path: string
+  kind?: string
+  auth?: string
+  input?: string
+  flags?: ManifestFlag[]
+  /** The entry's raw `operator_approval`, unread: operatorApprovalQuestion reads it, failing closed. */
+  operatorApproval?: unknown
+  /** The entry's raw `operator_approval_scope` (orthanc #118), unread: approvalOnWorkBranch reads it, failing closed. */
+  operatorApprovalScope?: unknown
+}
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 export type ApprovalMode = (typeof APPROVAL_MODES)[number]
@@ -122,8 +132,14 @@ export type GateClassification = {
   targetsProtected: boolean
   isDestructive: boolean
   proposedName?: string
-  /** The question to put to the operator for a release tag apply, outside yolo. */
+  /** The question to put to the operator for a release tag apply. */
   release?: string
+  /** True when the tag is linked to one global branch RID: yolo skips the release ask. */
+  releaseOnWorkBranch?: true
+  /** The question to put to the operator for a write the manifest marks operator_approval. */
+  operatorApproval?: string
+  /** True when operator_approval_scope proves the write lands on one global work branch: yolo skips the ask. */
+  operatorApprovalOnWorkBranch?: true
   error?: string
 }
 
@@ -163,6 +179,108 @@ const SHORT_FORCE = new Set(['configure', 'configure profile create', 'configure
 
 function argsHaveForce(command: string, args: readonly string[]): boolean {
   return argsNameFlag(args, SHORT_FORCE.has(command) ? ['--force', '-f'] : ['--force'])
+}
+
+// A flag as the manifest may list it in when_all_flags.
+const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
+const QUESTION_ARGS_MAX = 600
+
+/** The every-mode question for a call whose manifest entry carries
+ * `operator_approval`, or null. `{when_all_flags: [...]}` asks when every
+ * listed flag is given (argsNameFlag: any case, `=value`, any order);
+ * `"always"` asks on every call. Anything else is unreadable and asks on every
+ * call: a condition the guard cannot read never lets a call through. */
+/** `{when_all_flags: [flags]}`, nothing else. ("always" is handled before.) */
+function approvalReadable(value: unknown): boolean {
+  if (value === 'always') return true
+  const condition = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  const flags = condition?.when_all_flags
+  return (
+    condition !== null &&
+    Object.keys(condition).length === 1 &&
+    Array.isArray(flags) &&
+    flags.length > 0 &&
+    flags.every(flag => typeof flag === 'string' && APPROVAL_FLAG.test(flag))
+  )
+}
+
+export function operatorApprovalQuestion(
+  path: string,
+  args: readonly string[],
+  manifest: readonly ManifestCommand[],
+): string | null {
+  const entry = manifest.find(found => found.path === path)
+  if (entry === undefined || entry.operatorApproval === undefined) return null
+  const value = entry.operatorApproval
+  // JSON escapes newlines and quotes, so an arg cannot forge lines in the question.
+  const shown = JSON.stringify(args)
+  const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
+  const ask = (why: string) => `'${path}' ${cut} weakens a governance control: ${why} The operator approves it.`
+  if (value === 'always') return ask("Orthanc's agent manifest marks it operator_approval.")
+  if (!approvalReadable(value)) {
+    return ask("Orthanc's agent manifest marks it operator_approval in a form the Foundry guard cannot read, so it asks on every call.")
+  }
+  const listed = ((value as Record<string, unknown>).when_all_flags as string[]).map(flag => flag.toLowerCase())
+  if (!listed.every(flag => argsNameFlag(args, [flag]))) return null
+  return ask(`Orthanc's agent manifest marks it operator_approval when ${listed.join(' ')} are given.`)
+}
+
+// A global branch RID, exactly. Main is not a global branch (orthanc CONTRACTS.md, SRC-15).
+const WORK_BRANCH_RID = /^ri\.branch\.\.branch\.[A-Za-z0-9-]+$/
+const SCOPE_FLAG = /^--[a-z0-9][a-z0-9-]*$/
+
+/** True only when `names` are given exactly once in all, spelled exactly
+ * (`--flag v` or `--flag=v`, no quotes, no other case), with a global branch
+ * RID as the value, and no `-b` and no other branch flag names anything else.
+ * Anything the reader is not sure of is false: the call then asks. */
+function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): boolean {
+  const values: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? ''
+    const lower = arg.toLowerCase()
+    const name = names.find(found => arg === found || arg.startsWith(`${found}=`))
+    if (name !== undefined) {
+      if (arg === name) {
+        values.push(args[index + 1] ?? '')
+        index += 1
+      } else values.push(arg.slice(name.length + 1))
+      continue
+    }
+    // Another case of a listed flag, or a branch flag the scope does not list.
+    if (names.some(found => lower === found || lower.startsWith(`${found}=`))) return false
+    if (BRANCH_FLAGS.some(flag => lower === flag || lower.startsWith(`${flag}=`)) || /^-b./i.test(arg)) return false
+  }
+  return values.length === 1 && WORK_BRANCH_RID.test(values[0]!)
+}
+
+/** True only when the entry's operator_approval_scope (orthanc #118) shows
+ * that this call lands on one global work branch, never on main:
+ * `"work-branch"` with a global branch RID among the positionals and nothing
+ * naming main, or `{work_branch_flag, flag_aliases?}` with that flag (or an
+ * alias) holding one global branch RID. A missing or unreadable scope, or an
+ * unreadable operator_approval, is false: yolo then asks. */
+export function approvalOnWorkBranch(path: string, args: readonly string[], manifest: readonly ManifestCommand[]): boolean {
+  const entry = manifest.find(found => found.path === path)
+  if (entry === undefined || !approvalReadable(entry.operatorApproval)) return false
+  const scope = entry.operatorApprovalScope
+  if (scope === 'work-branch') {
+    // Every word that is not a flag counts, whatever flag comes before it: the
+    // guard does not know which flags take a value (`--yes main`).
+    const words = args.filter(arg => !unquote(arg).startsWith('-'))
+    return (
+      words.some(arg => WORK_BRANCH_RID.test(arg)) &&
+      !words.some(arg => isProtectedValue(unquote(arg))) &&
+      !flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue)
+    )
+  }
+  if (typeof scope !== 'object' || scope === null || Array.isArray(scope)) return false
+  const record = scope as Record<string, unknown>
+  if (!Object.keys(record).every(key => key === 'work_branch_flag' || key === 'flag_aliases')) return false
+  const flag = record.work_branch_flag
+  const aliases = record.flag_aliases ?? []
+  if (typeof flag !== 'string' || !SCOPE_FLAG.test(flag)) return false
+  if (!Array.isArray(aliases) || !aliases.every(alias => typeof alias === 'string' && SCOPE_FLAG.test(alias))) return false
+  return oneWorkBranchFlag(args, [flag, ...(aliases as string[])])
 }
 
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
@@ -336,10 +454,13 @@ const TAG_NAME = /^[A-Za-z0-9][A-Za-z0-9._+\/-]{0,127}$/
 const TAG_COMMIT = /^[0-9a-f]{40,64}$/i
 const TAG_BRANCH_RID = /^ri\.[a-z0-9-]+\.[a-z0-9-]*\.[a-z0-9-]+\.[A-Za-z0-9-]+$/
 const TAG_REFUSAL =
-  "'repository tag create --apply' must name a repository RID, a plain tag and one --commit-hash <hex> (and one plain --foundry-branch-rid, if any), so the operator can see what they approve."
+  "'repository tag create --apply' must name a repository RID, a plain tag and one --commit-hash <hex> (and one plain --branch or --foundry-branch-rid, if any), so the operator can see what they approve."
+// --foundry-branch-rid is orthanc's hidden alias of --branch.
+const TAG_BRANCH_FLAGS = ['--branch', '--foundry-branch-rid']
 
-/** The question a `repository tag create --apply` puts to the operator, or why it is refused. */
-function releaseTagCall(args: readonly string[]): { release: string } | { error: string } {
+/** The question a `repository tag create --apply` puts to the operator, or why it is refused.
+ * A tag linked to one global branch RID is not a release on main: yolo does not ask for it. */
+function releaseTagCall(args: readonly string[]): { release: string; releaseOnWorkBranch?: true } | { error: string } {
   // Orthanc gets the raw args, so a quoted, padded or newline-carrying arg is
   // not what the operator would read. Any such arg is refused.
   if (args.some(arg => unquote(arg) !== arg)) return { error: TAG_REFUSAL }
@@ -347,7 +468,7 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
   const repository = found[0] ?? ''
   const tag = found[1] ?? ''
   const commits = flagValues(args, ['--commit-hash'])
-  const links = flagValues(args, ['--foundry-branch-rid'])
+  const links = flagValues(args, [...TAG_BRANCH_FLAGS, '-b'])
   const commit = commits[0] ?? ''
   const link = links[0] ?? null
   if (
@@ -362,7 +483,11 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
   }
   const linked = link === null ? '' : ` (linked to Foundry branch ${link})`
   return {
-    release: `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag is a release: the operator approves each one.`,
+    release:
+      link === null
+        ? `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag with no Foundry branch is a release on main: the operator approves each one.`
+        : `'repository tag create' publishes ${tag} at commit ${commit} of ${repository}${linked}. A tag is a release: the operator approves each one.`,
+    ...(oneWorkBranchFlag(args, TAG_BRANCH_FLAGS) ? { releaseOnWorkBranch: true as const } : {}),
   }
 }
 
@@ -423,6 +548,7 @@ function orthancClassification(
   args: readonly string[],
   rawInput: unknown,
   workingBranch: string | null,
+  manifest: readonly ManifestCommand[],
   stored?: readonly string[] | null,
 ): GateClassification {
   const action = ACTION_BRANCH_WRITES.has(command) ? actionBranches(command, args) : null
@@ -446,12 +572,16 @@ function orthancClassification(
       refused === null && command === 'repository tag create' && argsNameFlag(args, ['--apply'])
         ? releaseTagCall(args)
         : null
+    const approval = operatorApprovalQuestion(command, args, manifest)
+    const approvalOnBranch = approval !== null && approvalOnWorkBranch(command, args, manifest)
     return {
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
       isDestructive: isDestructiveCommand(command) || argsHaveForce(command, args),
       ...(release !== null ? release : {}),
+      ...(approval !== null ? { operatorApproval: approval } : {}),
+      ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
       ...(refused ? { error: refused } : {}),
     }
   }
@@ -996,7 +1126,8 @@ function shellClassification(
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
-    if (classifyOrthancCommand(call.path, manifest) === 'read') continue
+    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null
@@ -1050,8 +1181,9 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read') return null
-    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, stored)
+    // A read whose entry also asks for the operator is not let through as a read.
+    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
+    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {
@@ -1076,6 +1208,18 @@ export function ladderDecision(
   verdict?: GuardVerdict | null,
 ): LadderDecision {
   if (classification.error) return { outcome: 'block', reason: classification.error }
+  // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
+  // necessary for anything on the branch, only main." A release tag or a write
+  // the manifest marks operator_approval asks in every mode; yolo skips it only
+  // when the call is shown to land on one global work branch. These come before
+  // yolo's early run, so nothing that lands on main runs unasked.
+  const yolo = mode === 'yolo'
+  if (classification.release && !(yolo && classification.releaseOnWorkBranch)) {
+    return { outcome: 'ask', reason: classification.release }
+  }
+  if (classification.operatorApproval && !(yolo && classification.operatorApprovalOnWorkBranch)) {
+    return { outcome: 'ask', reason: classification.operatorApproval }
+  }
   if (classification.kind === 'branch-creation') {
     if (mode === 'ask-always') {
       return {
@@ -1095,7 +1239,6 @@ export function ladderDecision(
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
-  if (classification.release) return { outcome: 'ask', reason: classification.release }
   if (classification.isDestructive) {
     return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode but yolo${note}` }
   }
@@ -1120,10 +1263,13 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes, --force writes and release tags run at once, ' +
+      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes and --force writes run at once, ' +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
-        'if the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
-      : 'Release tags (repository tag create --apply) ask the operator in every mode except yolo. ' +
+        'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
+        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
+        'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
+      : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
+        'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
         'the call is blocked — report it, do not retry blindly.')
