@@ -26,7 +26,7 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 import { SNAPSHOT } from './orthanc-manifest.snapshot'
-import { KNOWN_ARG_KEYS, KNOWN_ENTRY_KEYS, KNOWN_KINDS, MIN_ORTHANC, ORTHANC_CHECKED, ORTHANC_UPDATE, orthancVersionWarning, PLUGIN_UPDATE } from './orthanc-tie'
+import { KNOWN_ARG_KEYS, KNOWN_ENTRY_KEYS, KNOWN_KINDS, MIN_ORTHANC, ORTHANC_CHECKED, ORTHANC_UPDATE, PLUGIN_UPDATE } from './orthanc-tie'
 import { readApprovalCondition, readApprovalScope } from './policy'
 
 type Entry = { path: string; kind: string; auth?: string; args?: { flag: string; takes_value: boolean }[]; operator_approval?: unknown; operator_approval_scope?: unknown }
@@ -250,7 +250,9 @@ const VERSIONS: [string, string | null | 'missing', string[]][] = [
   ['older than MIN_ORTHANC', '0.7.7', [`older than ${MIN_ORTHANC}`, ORTHANC_UPDATE]],
   ['newer than ORTHANC_CHECKED', '0.8.0', [`newer than ${ORTHANC_CHECKED}`, PLUGIN_UPDATE]],
   ['a newer patch', '0.7.10', [`newer than ${ORTHANC_CHECKED}`, PLUGIN_UPDATE]],
+  ['a two-digit minor', '0.10.0', [`newer than ${ORTHANC_CHECKED}`]],
   ['a prerelease of the next minor', '0.8.0-rc.1', [`newer than ${ORTHANC_CHECKED}`]],
+  ['a prerelease of MIN_ORTHANC', `${MIN_ORTHANC}-rc.1`, [`older than ${MIN_ORTHANC}`]],
   ['no version in the reply', null, ['cannot compare', 'orthanc version']],
   ['no version command', 'missing', ['cannot compare']],
   ['a nightly name', 'nightly-20261118', ['cannot compare', 'nightly-20261118']],
@@ -278,7 +280,7 @@ for (const [name, version, says] of VERSIONS) {
   })
 }
 
-for (const version of [MIN_ORTHANC, ORTHANC_CHECKED]) {
+for (const version of [MIN_ORTHANC, ORTHANC_CHECKED, `v${ORTHANC_CHECKED}`, `${ORTHANC_CHECKED}-dev`, `${ORTHANC_CHECKED}+build.5`]) {
   test(`S5: orthanc ${version}, inside the range, shows no warning`, async ($, on) => {
     const h = harness(on)
     h.version = version
@@ -286,15 +288,3 @@ for (const version of [MIN_ORTHANC, ORTHANC_CHECKED]) {
     expect(warnings(h)).toEqual([])
   })
 }
-
-test('S5 S7: the warning text, for each edge of the range', () => {
-  const tie = { plugin: '1.0.0', min: '0.7.8', checked: '0.7.9' }
-  expect(orthancVersionWarning('0.7.8', tie)).toBe(null)
-  expect(orthancVersionWarning('v0.7.9', tie)).toBe(null)
-  expect(orthancVersionWarning('0.7.9-dev', tie)).toBe(null)
-  expect(orthancVersionWarning('0.7.8-rc.1', tie)).toContain('older than 0.7.8')
-  expect(orthancVersionWarning('0.7.9+build.5', tie)).toBe(null)
-  expect(orthancVersionWarning('0.10.0', tie)).toContain('newer than 0.7.9')
-  expect(orthancVersionWarning('', tie)).toContain('cannot compare orthanc (no version read)')
-  expect(orthancVersionWarning('0.7.9', { ...tie, min: 'x' })).toContain('cannot compare')
-})

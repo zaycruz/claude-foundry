@@ -83,14 +83,18 @@ binary.
    `Tie the plugin to orthanc <x.y.z>`. Its body holds the `refresh` output.
 6. Never merge, never tag, never push to `main`.
 
-The token is a fine-grained token for this one repository only, with contents
-write (to push the branch) and pull requests write.
+The token is a fine-grained token for this one repository only. It has two
+permissions: contents write and pull requests write. GitHub has no permission
+that opens a pull request without pushing a branch, so contents write is
+needed. A token that reaches any other repository, or has any other write
+permission, is refused.
 
 When the manifest has not changed apart from the version, `refresh` says
-`manifest unchanged apart from the version`. Open the pull request anyway: it
-only moves `orthanc_checked` and the plugin's patch version. Otherwise every
-session warns that orthanc is newer than the plugin. (The SRC-178 brief says to
-open no pull request in this case. Choose one rule with SRC-178.)
+`manifest unchanged apart from the version`. The job still opens the pull
+request. That pull request only moves `orthanc_checked` and the plugin's patch
+version, and its title ends with `(manifest unchanged)`. If the job opens no
+pull request, `orthanc_checked` stays behind, and every session on the new
+orthanc warns that orthanc is newer than the plugin.
 
 ## What the operator does
 

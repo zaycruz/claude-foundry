@@ -252,6 +252,7 @@ async function readManifest($: EngineInterface, identity: BinaryIdentity): Promi
 // new text is shown once; the read at session start shows it in the session's
 // first lines. It never blocks a call.
 let orthancTieWarning: string | null = null
+const STARTUP_MANIFEST_WAIT_MS = 3_000
 const shownTieWarnings = new Set<string>()
 function tieWarning($: EngineInterface, warning: string | null) {
   orthancTieWarning = warning
@@ -1810,7 +1811,20 @@ export const register: Register = on => {
       tracing = null
       tracingNote = 'off: tracing setup failed'
     })
-    void loadManifest($).catch(() => undefined)
+    // Wait a little for the manifest and version read, so the orthanc version
+    // warning (orthanc-tie.ts) is among the session's first lines. A slow
+    // orthanc does not hold the session: the read goes on in the background.
+    const read = loadManifest($).then(
+      () => undefined,
+      () => undefined,
+    )
+    let waited = () => {}
+    const timer = $.clock.after(STARTUP_MANIFEST_WAIT_MS, () => waited())
+    try {
+      await Promise.race([read, new Promise<void>(resolve => (waited = resolve))])
+    } finally {
+      timer.cancel()
+    }
     const earlier = (await fdeState($)) === null ? await fdeFromEarlier($).catch(() => null) : null
     if (earlier) $.ui.toast(`FDE branch ${earlier.branchName} (${goalLabel(earlier.goal)}) is still open from an earlier session: /fde resume or /fde end`)
     return started
