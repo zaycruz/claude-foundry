@@ -129,7 +129,10 @@ const DATASET_BRANCHES: Record<string, { name: string; transaction_rid?: string 
   [DS(1)]: [{ name: 'master', transaction_rid: TXN(1) }, { name: 'agent-orders', transaction_rid: TXN(2) }, { name: 'agent-empty' }],
   [DS(3)]: [{ name: 'agent-copy', transaction_rid: TXN(4) }, { name: 'master', transaction_rid: TXN(4) }],
   [DS(4)]: [{ name: 'main', transaction_rid: TXN(5) }],
+  // DS(5) has a second page: a branch not read may hold the same transaction.
+  [DS(5)]: [{ name: 'agent-paged', transaction_rid: TXN(6) }],
 }
+const PAGED = new Set([DS(5)])
 type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
 
 const envelope = (data: unknown) =>
@@ -230,7 +233,7 @@ function harness(on: On, mode: Mode = 'yolo'): Harness {
     if (line.startsWith('dataset branches list ')) {
       const branches = DATASET_BRANCHES[words[3] ?? '']
       if (branches === undefined) return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'no such dataset' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-      return reply(envelope({ branches, next_page_token: null }))
+      return reply(envelope({ branches, next_page_token: PAGED.has(words[3] ?? '') ? 'page-2' : null }))
     }
     return reply(envelope({ ran: line }))
   })
@@ -814,6 +817,16 @@ const TXN_ON_MAIN: [string, string[]][] = [
   ['dataset transactions commit', [DS(2), TXN(1), '--apply']],
   // No transaction RID to look up.
   ['dataset transactions commit', [DS(1), '--apply']],
+  // A second transaction or dataset RID, behind a flag the guard does not know:
+  // which one orthanc commits is not plain, so the work-branch one proves nothing.
+  ['dataset transactions commit', [DS(1), TXN(2), '--yes', TXN(1), '--apply']],
+  ['dataset transactions commit', ['--yes', TXN(1), DS(1), TXN(2), '--apply']],
+  ['dataset transactions commit', [DS(1), TXN(2), `--transaction=${TXN(1)}`, '--apply']],
+  ['dataset transactions commit', ['--dataset', DS(4), DS(1), TXN(2), '--apply']],
+  // The branch list has another page.
+  ['dataset transactions commit', [DS(5), TXN(6), '--apply']],
+  // Everything in the command string.
+  [`dataset transactions commit ${DS(1)} ${TXN(1)}`, ['--apply']],
 ]
 for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
   test(`Y21: in ${mode} mode a transaction commit or abort that may land on main asks; no one to ask, it is refused`, async ($, on) => {
@@ -834,10 +847,11 @@ test('Y21: in yolo a transaction commit or abort on a work branch runs with no a
   for (const [command, args] of [
     ['dataset transactions commit', [DS(1), TXN(2), '--apply']],
     ['dataset transactions abort', [DS(1), TXN(2), '--apply']],
+    [`dataset transactions commit ${DS(1)}`, [TXN(2), '--apply']],
   ] as [string, string[]][]) {
     expect({ command, args, deny: (await write($, command, args)).deny }).toEqual({ command, args, deny: undefined })
   }
   expect(h.asked).toEqual([])
-  expect(ran(h, 'dataset transactions').length).toBe(2)
-  expect(ran(h, `dataset branches list ${DS(1)}`).length).toBe(2)
+  expect(ran(h, 'dataset transactions').length).toBe(3)
+  expect(ran(h, `dataset branches list ${DS(1)}`).length).toBe(3)
 })
