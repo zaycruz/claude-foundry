@@ -23,8 +23,14 @@ says so instead of falling back to REST.
   judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
   delete, `--force`) and release tags ask, protected branches ask, and a call
   repeated three times is blocked. In `yolo` only a write on main asks:
-  deletes, `--force` writes and release tags run at once, and the loop guard
-  is off. A write naming `main`, `master` or `HEAD` as its branch (any
+  deletes and `--force` writes run at once, and the loop guard is off. A
+  release tag with no `--branch <global branch RID>` is a release on main and
+  asks in `yolo` too. A write that Orthanc's agent manifest marks
+  `operator_approval` (turning branch protection off, removing a required
+  check) asks in every mode; in `yolo` it runs with no ask only when the
+  entry's `operator_approval_scope` shows it lands on one global work branch
+  (`global-branch roles set`, `remove-resources`, `remove-repo` with a branch
+  RID). A missing or unreadable scope asks. A write naming `main`, `master` or `HEAD` as its branch (any
   spelling: `--branch=main`, `-b master`, `-bmain`, or as a positional, as in
   `dataset branches delete <dataset> master` or `branch-protection repo
   unprotect <repo> main`), and `workshop module publish`, which works on main
@@ -51,8 +57,9 @@ says so instead of falling back to REST.
   the call asks the operator. Before `dataset transactions commit` or `abort`,
   the guard reads `dataset branches list <dataset>`: unless the transaction is
   the latest of a work branch only, the call asks the operator. A release tag
-  (`repository tag create --apply`) is not blocked: outside `yolo` it asks the
-  operator, naming the tag, the commit and the repository. Orthanc
+  (`repository tag create --apply`) is not blocked: it asks the operator,
+  naming the tag, the commit, the repository and the Foundry branch if any;
+  in `yolo` only a tag on a global branch RID runs with no ask. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
   write, however the shell wraps the call. Text that only mentions Orthanc (a
   commit message, a PR body, an `echo`) is not a call.
