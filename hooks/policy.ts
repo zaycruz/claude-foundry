@@ -95,26 +95,20 @@ const MAIN_WRITES = new Set(['workshop module publish'])
 // The class comes from the manifest (`operator_approval_scope`, or
 // `operator_approval.scope`), so a renamed command keeps it. The tables below
 // are the floor for an Orthanc whose manifest carries none yet (0.7.7): they
-// add to the manifest, never replace it. Paths no Orthanc has yet are listed
-// so the class is there on the day one ships.
+// add to the manifest, never replace it, and name only commands Orthanc has.
+// A command Orthanc adds later is covered by the manifest's own word.
 export const APPROVAL_CLASSES = ['outbound', 'credential', 'access'] as const
 export type ApprovalClass = (typeof APPROVAL_CLASSES)[number] | (string & {})
 const floor = (scope: ApprovalClass, paths: string[]) => paths.map(path => [path, scope] as [string, ApprovalClass])
 const APPROVAL_FLOOR: ReadonlyMap<string, ApprovalClass> = new Map<string, ApprovalClass>([
-  ...floor('outbound', [
-    'connectivity webhook create', 'connectivity webhook update', 'connectivity webhook run', 'connectivity webhook execute',
-    'connectivity export run', 'connectivity sync run', 'connectivity external-share create',
-  ]),
-  ...floor('credential', [
-    'connectivity source secret set', 'connectivity source secret rotate', 'connectivity source certificate set',
-    'connectivity source oauth-secret set', 'auth token revoke', 'token revoke',
-  ]),
+  ...floor('outbound', ['connectivity webhook create', 'connectivity webhook update']),
+  ...floor('credential', ['connectivity source secret set']),
   ...floor('access', [
-    'connectivity egress ensure', 'connectivity egress propose', 'connectivity egress revoke', 'connectivity rest-source create',
-    'connectivity source create-s3', 'connectivity export settings set', 'connectivity cors set', 'connectivity ingress set',
-    'dev-console scope add', 'dev-console scope remove', 'dev-console scope update', 'dev-console client install',
-    'resource-role grant', 'resource-role revoke', 'global-branch roles set', 'marketplace installation create',
-    'marketplace installation upgrade', 'marketplace installation uninstall',
+    'connectivity egress ensure', 'connectivity rest-source create', 'connectivity source create-s3',
+    'dev-console scope add', 'dev-console scope remove', 'dev-console scope update',
+    'resource-role grant', 'resource-role revoke', 'global-branch roles set',
+    'project add-orgs', 'project remove-orgs', 'resource add-markings', 'resource remove-markings',
+    'marketplace installation create', 'marketplace installation upgrade', 'marketplace installation uninstall',
   ]),
 ])
 const APPROVAL_PREFIXES: readonly [string, ApprovalClass][] = [['admin ', 'access']]
