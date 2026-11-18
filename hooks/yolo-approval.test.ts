@@ -41,8 +41,7 @@
 //      work-branch write in yolo is refused.
 //  O9  (manifest-reload.test.ts R20) orthanc is upgraded mid-session: the
 //      guard keeps the old manifest's scope.
-//  O10 A work-branch write in Bash runs in yolo instead of going to
-//      orthanc_cli.
+//  O10 A work-branch write in Bash is refused in yolo.
 //  O11 The yolo prompt says release tags run at once, or does not say which
 //      marked writes still ask.
 //  O12 A global-branch deploy (scope "always") runs or asks: it stays refused
@@ -339,14 +338,13 @@ test('O7: with an orthanc before #118 (no scope, no tag marker) yolo asks for ev
   }
 })
 
-test('O10: a work-branch write in Bash is refused in yolo and asks no one', async ($, on) => {
+test('O10: a work-branch write in Bash runs in yolo and asks no one (FND-4: raw use is never stopped)', async ($, on) => {
   const h = harness(on)
   for (const [command, args] of WORK_BRANCH) {
     const wrote = (await $.tool.call({ tool: 'Bash', command: `orthanc ${command} ${args.join(' ')}` } as never)) as { deny?: string }
-    expect({ command, denied: typeof wrote.deny }).toEqual({ command, denied: 'string' })
+    expect({ command, denied: typeof wrote.deny }).toEqual({ command, denied: 'undefined' })
   }
   expect(h.asked).toEqual([])
-  expect(ran(h, 'global-branch')).toEqual([])
 })
 
 test('O11: the yolo prompt says a release tag with no branch and marked writes off a work branch still ask', async ($, on) => {

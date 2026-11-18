@@ -61,6 +61,7 @@ import {
 } from './fde'
 import {
   CLI_TIMEOUT_FLOOR_MS,
+  cliLimitMs,
   cliWait,
   type Envelope,
   failure,
@@ -328,7 +329,7 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
       command.path,
     )
   }
-  const wait = cliWait(command, resolved.args)
+  const wait = cliWait(command, resolved.args, cliLimitMs(await $.env.get('FOUNDRY_CLI_TIMEOUT_S')))
   if (wait.overCap) return overCapFailure(command, wait)
   const now = await binaryIdentity($)
   if (now.key !== checked.identity.key) return binaryChangedFailure(checked, now, command.path, 'after')
@@ -1648,7 +1649,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (tool === ORTHANC_CLI) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
     const command = manifest.find(entry => entry.path === resolved.path)
-    const wait = command ? cliWait(command, resolved.args) : null
+    const wait = command ? cliWait(command, resolved.args, cliLimitMs(await $.env.get('FOUNDRY_CLI_TIMEOUT_S'))) : null
     if (command && wait?.overCap) {
       note.foundry = true
       note.command = command.path

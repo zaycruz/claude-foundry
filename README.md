@@ -268,6 +268,18 @@ are redacted; add your own domains with `FOUNDRY_OTEL_REDACT_DOMAINS=...`.
 `/trace` shows the collector's host, never a header. Export is fire-and-forget
 and never changes what a tool call does.
 
+## Raw Orthanc in Bash
+
+The Bash guard never refuses a command because of its shape or because it names
+`orthanc`. Raw `orthanc` calls, scripts, pipelines, variables and substitutions run.
+It stops only what the ladder names, when it can read the call: a write on main or
+HEAD, a promotion (`proposal merge`), or a release tag apply. A call it cannot read
+runs unjudged.
+
+`orthanc_cli` stops a call after 300 s, or after its own `--timeout` plus a margin.
+Set `FOUNDRY_CLI_TIMEOUT_S` (seconds, up to 86400) in the environment to raise that
+limit for long builds and e2e runs.
+
 ## Develop
 
 ```

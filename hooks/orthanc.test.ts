@@ -25,7 +25,7 @@
 import type { HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, manifestFrom } from './orthanc'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliLimitMs, cliTimeoutMs, cliWait, manifestFrom } from './orthanc'
 import { type ManifestCommand, resolveOrthancCommand } from './policy'
 import { PROCESS_RUN_MAX_MS, readToExit } from './process'
 
@@ -198,4 +198,18 @@ test('T13 T14: a silent child past its deadline is stopped and the run rejects',
   await running
   expect(outcome).toBe('still running after 1920 s; stopped')
   expect(seen.returned).toBe(true)
+})
+
+// FND-4: the operator can raise the orthanc_cli limit for long builds and e2e runs.
+test('FND-4: FOUNDRY_CLI_TIMEOUT_S raises the floor and the cap, never lowers them', async () => {
+  expect(cliLimitMs(undefined)).toBe(0)
+  expect(cliLimitMs('')).toBe(0)
+  expect(cliLimitMs('abc')).toBe(0)
+  expect(cliLimitMs('-5')).toBe(0)
+  expect(cliLimitMs('7200')).toBe(7_200_000)
+  expect(cliLimitMs('999999')).toBe(86_400_000)
+  expect(cliTimeoutMs(LIST, ['ri.o'], 7_200_000)).toBe(7_200_000)
+  expect(cliTimeoutMs(LIST, ['ri.o'], 60_000)).toBe(CLI_TIMEOUT_FLOOR_MS)
+  expect(cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '5000']).overCap).toBe(true)
+  expect(cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '5000'], 7_200_000).overCap).toBe(false)
 })

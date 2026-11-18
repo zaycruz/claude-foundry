@@ -141,10 +141,11 @@ test('E3 A7: an unreadable operator_approval in the manifest asks in yolo, even 
   expect(ran(h, 'branch-protection')).toEqual([])
 })
 
-test('A9: in Bash a governance write is refused and asks no one', async ($, on) => {
+test('A9: in Bash a governance write asks like orthanc_cli; declined, it is refused', async ($, on) => {
   const h = harness(on)
+  h.answer = 'Decline'
   const wrote = (await $.tool.call({ tool: 'Bash', command: `orthanc branch-protection repo unprotect ${REPO} master --apply` } as never)) as { deny?: string }
   expect(typeof wrote.deny).toBe('string')
-  expect(h.asked).toEqual([])
+  expect(h.asked.length).toBe(1)
   expect(ran(h, 'branch-protection')).toEqual([])
 })

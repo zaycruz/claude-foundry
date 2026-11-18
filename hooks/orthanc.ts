@@ -131,7 +131,9 @@ const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
  * would need more, then with the largest `maxTimeoutS` that fits, and the
  * flags to make smaller.
  */
-export function cliWait(command: ManifestCommand | undefined, args: readonly string[]): CliWait {
+export function cliWait(command: ManifestCommand | undefined, args: readonly string[], limitMs = 0): CliWait {
+  // The operator's own limit (FOUNDRY_CLI_TIMEOUT_S) raises both the floor and the cap, never lowers them.
+  const floorMs = Math.max(CLI_TIMEOUT_FLOOR_MS, limitMs)
   const flags = command?.flags ?? []
   const extra = command ? WAIT_EXTRAS[command.path] : undefined
   const declares = (flag: string) => flags.some(entry => entry.flag === flag)
@@ -159,10 +161,10 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     const wait = WAIT_FLAGS.reduce((sum, flag) => sum + secondsOf(flag), 0)
     return wait === 0 ? 0 : wait + (extra?.aroundS ?? 0) + Math.max(...POLL_FLAGS.map(secondsOf)) + CLI_MARGIN_S
   }
-  const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
+  const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000, limitMs)
   const totalS = waits ? totalOf(seconds) : 0
-  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false }
-  const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
+  if (totalS === 0) return { timeoutMs: floorMs, neededMs: floorMs, capMs, overCap: false }
+  const neededMs = Math.max(floorMs, totalS * 1000)
   const overCap = neededMs > capMs
   if (!overCap) return { timeoutMs: neededMs, neededMs, capMs, overCap }
   const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
@@ -180,7 +182,13 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
 }
 
 /** How long orthanc_cli lets `command` run with `args`, in ms. */
-export const cliTimeoutMs = (command: ManifestCommand | undefined, args: readonly string[]) => cliWait(command, args).timeoutMs
+export const cliTimeoutMs = (command: ManifestCommand | undefined, args: readonly string[], limitMs = 0) => cliWait(command, args, limitMs).timeoutMs
+
+/** FOUNDRY_CLI_TIMEOUT_S as ms: the operator's longer limit for one orthanc_cli call; 0 when unset or not a positive number. */
+export function cliLimitMs(raw: string | undefined): number {
+  const seconds = Number(raw?.trim() ?? '')
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 86_400) * 1000 : 0
+}
 
 /** The refusal of a call that would run past the cap; Orthanc did not start. */
 export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelope {
@@ -191,6 +199,7 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
     wait.maxTimeoutS === undefined ? `Pass a smaller ${smaller}` : `Pass --timeout ${wait.maxTimeoutS} or less`,
     WAIT_EXTRAS[command.path]?.detachHint,
     command.kind === 'read-only' ? 'and call it again if it times out: the wait is a read' : undefined,
+    'or set FOUNDRY_CLI_TIMEOUT_S (seconds) in the environment to raise the limit',
   ].filter(Boolean)
   return failure(
     'timeout-over-cap',

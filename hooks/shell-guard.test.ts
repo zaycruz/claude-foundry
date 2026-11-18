@@ -41,6 +41,14 @@
 //      the binary (`run.sh /opt/bin/orthanc $CMD`), or an interpreter given only
 //      other flags (`node --no-warnings` reading a pipe), runs.
 //
+// FND-4: the guard never refuses a command for its shape or because it names
+// orthanc. N1 cases were refused before and now run: interpreter code that
+// starts a process, a variable or substitution it cannot read, a script file, a
+// pipe into an interpreter, a wrapper script, an unknown command. L1 and the
+// two K cases still stop: a promotion, a write naming main, a release tag
+// written out so the guard can read them.
+//  N2  A readable write on main or a promotion runs unasked (a tag apply: tag.test.ts G11).
+//
 // Synthetic commands and paths only.
 import { expect, test } from 'claude-code/testing'
 
@@ -52,6 +60,12 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'functions search', kind: 'read-only' },
   { path: 'dataset create', kind: 'mutation' },
   { path: 'proposal merge', kind: 'mutation' },
+  { path: 'ontology object-upsert', kind: 'mutation' },
+  { path: 'ontology action-apply', kind: 'mutation' },
+  { path: 'global-branch create', kind: 'mutation' },
+  { path: 'repository push', kind: 'mutation' },
+  { path: 'repository tag create', kind: 'mutation', flags: [{ flag: '--apply', takesValue: false }] },
+  { path: 'dataset create-from-csv', kind: 'mutation', flags: [{ flag: '--apply', takesValue: false }] },
   { path: 'sql export', kind: 'read-only' },
   { path: 'ai-fde tools list', kind: 'local' },
   { path: 'smoke schedule', kind: 'local' },
@@ -60,9 +74,10 @@ const MANIFEST: ManifestCommand[] = [
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 const approve = { action: 'approve', reason: 'ok' } as const
 const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, 'agent/x')
+// Stopped: blocked, or asks the operator (a write on main asks, and is refused when no one can be asked).
 const blockedEverywhere = (command: string) => {
   const classified = bash(command)
-  return classified !== null && MODES.every(mode => ladderDecision(mode, classified, approve).outcome === 'block')
+  return classified !== null && MODES.every(mode => ladderDecision(mode, classified, approve).outcome !== 'run')
 }
 
 const PASSES: [string, string][] = [
@@ -90,33 +105,41 @@ const PASSES: [string, string][] = [
   ['S7', 'which orthanc && python3 -V && perl -v | head -2'],
   ['S8', "orthanc --agent ai-fde tools list 2>/dev/null | grep -i -E 'log|build_history' | head"],
   ['S8', 'orthanc smoke schedule'],
+  ['N1', "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
+  ['N1', `python3 -c "import os; os.system('/opt/bin/orthanc proposal merge p')"`],
+  ['N1', "python3 - <<'EOF'\nimport os\nos.execvp('orthanc', ['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
+  ['N1', `ruby -e 'system("orthanc proposal merge p")'`],
+  ['N1', "ruby -e '`orthanc proposal merge p`'"],
+  ['N1', "perl -e 'qx(orthanc proposal merge p)'"],
+  ['N1', `awk 'BEGIN { system("orthanc proposal merge p") }'`],
+  ['N1', `awk 'BEGIN { "orthanc dataset create x" | getline r }'`],
+  ['N1', `osascript -e 'do shell script "orthanc proposal merge p"'`],
+  ['N1', `node -e 'require("child_process").execSync("orthanc proposal merge p")'`],
+  ['N1', `bun -e 'Bun.spawnSync(["orthanc", "proposal", "merge", "p"])'`],
+  ['N1', 'scripts/e2e/keychain-env.sh tester target/release/orthanc --profile tester dataset create x --apply'],
+  ['N1', "find . -name '*.json' -exec /opt/bin/orthanc dataset create {} \\;"],
+  ['N1', 'for b in $(which -a orthanc); do $b proposal merge p; done'],
+  ['N1', 'O=/opt/bin/orthanc; $O dataset create x'],
+  ['N1', 'X="cd /tmp && orthanc proposal merge p"; bash -c "$X"'],
+  ['N1', 'cat job.py | python3 - --target orthanc'],
+  ['N1', './run.sh /opt/bin/orthanc $CMD'],
+  ['N1', './run.sh /opt/bin/orthanc "$(cat /tmp/tester/cmd)"'],
+  ['N1', 'echo orthanc; cat job.js | node --no-warnings'],
+  ['N1', 'echo orthanc; cat job.py | python3 -v'],
+  ['N1', "orthanc alias add mk 'dataset create x'"],
+  ['N1', 'bash scripts/e2e/run.sh'],
+  ['N1', 'gh -R owner/orthanc-source pr list'],
+  ['N1', 'orthanc configure list'],
+  ['N1', 'orthanc --version'],
+  ['N1', 'orthanc ontology list | head -3'],
+  ['N1', 'orthanc dataset create x --branch agent/work --apply'],
 ]
 
 const REFUSED: [string, string][] = [
-  ['K1', "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
-  ['K1', `python3 -c "import os; os.system('/opt/bin/orthanc proposal merge p')"`],
-  ['K1', "python3 - <<'EOF'\nimport os\nos.execvp('orthanc', ['orthanc', 'proposal', 'merge', 'p'])\nEOF"],
-  ['K1', `ruby -e 'system("orthanc proposal merge p")'`],
-  ['K1', "ruby -e '`orthanc proposal merge p`'"],
-  ['K1', "perl -e 'qx(orthanc proposal merge p)'"],
-  ['K1', `awk 'BEGIN { system("orthanc proposal merge p") }'`],
-  ['K1', `awk 'BEGIN { "orthanc dataset create x" | getline r }'`],
-  ['K1', `osascript -e 'do shell script "orthanc proposal merge p"'`],
-  ['K1', `node -e 'require("child_process").execSync("orthanc proposal merge p")'`],
-  ['K1', `bun -e 'Bun.spawnSync(["orthanc", "proposal", "merge", "p"])'`],
-  ['K2', 'scripts/e2e/keychain-env.sh tester target/release/orthanc --profile tester dataset create x --apply'],
   ['K2', './run.sh /opt/bin/orthanc proposal merge p'],
-  ['K2', "find . -name '*.json' -exec /opt/bin/orthanc dataset create {} \\;"],
-  ['K3', 'for b in $(which -a orthanc); do $b proposal merge p; done'],
-  ['K3', 'O=/opt/bin/orthanc; $O dataset create x'],
   ['K3', 'B="/opt/bin/orthanc --profile tester"; $B proposal merge p'],
-  ['K3', 'X="cd /tmp && orthanc proposal merge p"; bash -c "$X"'],
-  ['K4', 'cat job.py | python3 - --target orthanc'],
-  ['K6', './run.sh /opt/bin/orthanc $CMD'],
-  ['K6', './run.sh /opt/bin/orthanc "$(cat /tmp/tester/cmd)"'],
-  ['K6', 'echo orthanc; cat job.js | node --no-warnings'],
-  ['K6', 'echo orthanc; cat job.py | python3 -v'],
-  ['K6', "orthanc alias add mk 'dataset create x'"],
+  ['L1', 'orthanc proposal merge p'],
+  ['L1', 'orthanc dataset create x --branch main --apply'],
 ]
 
 for (const [id, command] of PASSES) {
@@ -126,7 +149,7 @@ for (const [id, command] of PASSES) {
 }
 
 for (const [id, command] of REFUSED) {
-  test(`${id}: refused in every mode: ${command.split('\n')[0]!.slice(0, 70)}`, async () => {
+  test(`${id}: stopped in every mode: ${command.split('\n')[0]!.slice(0, 70)}`, async () => {
     expect({ command, blocked: blockedEverywhere(command) }).toEqual({ command, blocked: true })
   })
 }
@@ -140,4 +163,60 @@ test('S1 E2E: a Python heredoc that edits text naming orthanc runs through the g
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   const ran = (await $.tool.call({ tool: 'Bash', command: PASSES[0]![1] } as never)) as { deny?: string }
   expect(ran.deny).toBe(undefined)
+})
+
+// FND-4 review: judged by what the call does. A variable or substitution in the
+// arguments does not hide a path the guard can read; a refusal only for what the
+// ladder names.
+const outcomes = (command: string) => {
+  const classified = bash(command)
+  return classified === null ? null : MODES.map(mode => ladderDecision(mode, classified, approve).outcome)
+}
+const TAG = 'ri.stemma.main.repository.abc'
+const HASH = '0123456789abcdef0123456789abcdef01234567'
+
+test('R1: a promotion or a main-only write stops with a variable or substitution in its arguments', () => {
+  for (const command of [
+    'orthanc proposal merge p',
+    'orthanc proposal merge "$P"',
+    'P=p; orthanc proposal merge $P',
+    'orthanc proposal merge "$(cat p.txt)"',
+    'orthanc ontology object-upsert "$OBJ"',
+  ]) {
+    expect({ command, outcomes: outcomes(command) }).toEqual({ command, outcomes: ['block', 'block', 'block', 'block'] })
+  }
+})
+
+test('R2: a release tag apply asks, literal or with a variable; its dry run runs', () => {
+  const literal = `orthanc repository tag create ${TAG} refs/tags/v1 --commit-hash ${HASH} --apply`
+  const variable = `orthanc repository tag create ${TAG} "$TAG" --commit-hash ${HASH} --apply`
+  // yolo runs a tag on a work branch (tag.test.ts G1); every other mode asks.
+  for (const command of [literal, variable]) {
+    expect({ command, outcomes: outcomes(command)?.slice(0, 3) }).toEqual({ command, outcomes: ['ask', 'ask', 'ask'] })
+  }
+  expect(outcomes(`orthanc repository tag create ${TAG} "$TAG" --commit-hash ${HASH}`)).toBe(null)
+})
+
+test('R3: a write naming main asks in every mode, never a plain block', () => {
+  for (const command of ['orthanc dataset create x --branch main --apply', 'orthanc dataset create x --branch=HEAD', 'orthanc dataset create x -b master']) {
+    expect({ command, outcomes: outcomes(command) }).toEqual({ command, outcomes: ['ask', 'ask', 'ask', 'ask'] })
+  }
+})
+
+test('R4: a dry run on main runs; the same call with --apply asks', () => {
+  expect(outcomes('orthanc dataset create-from-csv t f c.csv --branch main')).toBe(null)
+  expect(outcomes('orthanc dataset create-from-csv t f c.csv --branch main --apply')).toEqual(['ask', 'ask', 'ask', 'ask'])
+})
+
+test('R5: writes off main run, whatever their branch name or shape', () => {
+  for (const command of [
+    'orthanc global-branch create foo',
+    'orthanc ontology action-apply a --branch agent/foo',
+    `orthanc repository push ${TAG} refs/heads/x`,
+    `orthanc repository push ${TAG} refs/heads/x refs/heads/agent-x`,
+  ]) {
+    expect({ command, result: outcomes(command) }).toEqual({ command, result: null })
+  }
+  // A push to the default branch still stops.
+  expect(outcomes(`orthanc repository push ${TAG} refs/heads/x refs/heads/master`)?.every(outcome => outcome !== 'run')).toBe(true)
 })

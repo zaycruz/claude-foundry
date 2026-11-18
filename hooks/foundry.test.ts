@@ -37,7 +37,10 @@ const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 const GLOBAL = 'ri.branch..branch.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
 const approve = { action: 'approve', reason: 'ok' } as const
 const blockedEverywhere = (classification: ReturnType<typeof classifyCall>) =>
-  MODES.every(mode => ladderDecision(mode, classification!, approve).outcome === 'block')
+  classification !== null && MODES.every(mode => ladderDecision(mode, classification, approve).outcome === 'block')
+// Stopped: blocked, or asks the operator (a write on main asks; refused when no one can be asked).
+const stoppedEverywhere = (classification: ReturnType<typeof classifyCall>) =>
+  classification !== null && MODES.every(mode => ladderDecision(mode, classification, approve).outcome !== 'run')
 // zay, 2026-11-17: "no approvals are necessary for anything on the branch, only
 // main." A write naming main is the operator's call in every mode: it asks, and
 // it runs only when approved (yolo.test.ts Y13 checks the refusal with no one to ask).
@@ -153,24 +156,20 @@ test('F17: Orthanc writes in Bash block in every mode, however the shell hides t
   expect(bash('grep orthanc README.md')).toBe(null)
   expect(bash('cd ~/projects/orthanc && cargo test')).toBe(null)
   for (const command of [
-    `orthanc ontology object-type-upsert T --branch ${GLOBAL}`,
     'orthanc ontology object-type-upsert T',
     'bash -c "orthanc ontology object-type-upsert T"',
     'ls;orthanc ontology object-type-upsert T',
     'echo $(orthanc ontology object-type-upsert T)',
     'echo `orthanc proposal merge p`',
-    '$ORTHANC_BIN ontology object-type-upsert T',
     'env X=1 orthanc dataset schema set d',
     'echo T | xargs orthanc ontology object-type-upsert',
     'orthanc --profile acme ontology object-type-upsert T',
     '/usr/local/bin/orthanc proposal merge p',
-    'orthanc ontology --profile acme object-type-upsert T',
     'O=orthanc; $O proposal merge p',
     'X="orthanc proposal merge p"; eval $X',
-    `python3 -c "import subprocess; subprocess.run(['orthanc','proposal','merge','p'])"`,
     'orthanc Proposal Merge p',
   ]) {
-    expect({ command, blocked: blockedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
+    expect({ command, blocked: stoppedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
   }
 })
 
@@ -195,18 +194,18 @@ test('G1-G4: free text that only mentions orthanc passes', async () => {
     'git commit -m "fix orthanc timeout"',
     'git commit -m "orthanc proposal merge p is gated now"',
     'gh pr create --draft --title "Guard: orthanc in free text" --body "orthanc repository push … still blocks"',
-    'gh pr create --body "orthanc dataset create x; orthanc proposal merge p"',
+    'gh pr create --body "orthanc dataset create x --branch main; orthanc proposal merge p"',
     'bd create "orthanc_cli timeout" --description "orthanc ontology object-type-upsert T waits"',
-    'bd update hooks-kus --notes "run orthanc dataset create x | tee log"',
+    'bd update hooks-kus --notes "run orthanc dataset create x --branch main | tee log"',
     'echo "orthanc proposal merge p"',
-    "echo 'run orthanc dataset create x now'",
+    "echo 'run orthanc dataset create x --branch main now'",
     'report --activity "Checking Orthanc flags"',
     'git commit -m "$VERSION: orthanc timeout guard"',
     'printf "%s\\n" "see orthanc help (dataset create)"',
     'orthanc --agent ontology list > "$TMPDIR/m.json"',
     'orthanc ontology list 2> "$LOG"',
     'git commit -F - <<EOF\nfix orthanc timeout\northanc proposal merge p is now gated\nEOF',
-    "gh pr create --body-file - <<'EOF'\northanc dataset create x\nEOF\necho done",
+    "gh pr create --body-file - <<'EOF'\northanc dataset create x --branch main\nEOF\necho done",
     "cat > /tmp/body.txt <<'EOF'\nrun `orthanc proposal merge p` with orthanc_cli\nEOF",
     'cat > /tmp/body.txt <<-EOF\n\torthanc proposal merge p is gated\n\tEOF\ngit add -A',
   ]) {
@@ -217,38 +216,32 @@ test('G1-G4: free text that only mentions orthanc passes', async () => {
 test('G5-G9: orthanc writes the shell runs stay blocked', async () => {
   const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, 'agent/x')
   for (const command of [
-    'env X=1 orthanc dataset create x --apply',
-    "bash -c 'orthanc dataset create x --apply'",
+    'env X=1 orthanc dataset create x --branch main --apply',
+    "bash -c 'orthanc dataset create x --branch main --apply'",
     "sh -lc 'cd /tmp; orthanc proposal merge p'",
-    "zsh -c 'true && orthanc dataset create x'",
-    "eval 'orthanc dataset create x'",
-    "ssh box 'orthanc dataset create x'",
-    "xargs -I{} sh -c 'orthanc dataset create {}'",
+    "zsh -c 'true && orthanc dataset create x --branch main'",
+    "eval 'orthanc dataset create x --branch main'",
+    "ssh box 'orthanc dataset create x --branch main'",
+    "xargs -I{} sh -c 'orthanc dataset create {} --branch main'",
     "sudo -u svc bash -c 'orthanc proposal merge p'",
-    "find . -name x -exec sh -c 'orthanc dataset create x' \\;",
-    'nohup orthanc dataset create x &',
+    "find . -name x -exec sh -c 'orthanc dataset create x --branch main' \\;",
+    'nohup orthanc dataset create x --branch main &',
     'timeout 60 orthanc proposal merge p',
     'git commit -m "$(orthanc proposal merge p)"',
     'git commit -m "msg `orthanc proposal merge p`"',
-    'echo "x $(echo "y" && orthanc dataset create x) z"',
-    'echo "orthanc dataset create x" | sh',
-    'echo "orthanc dataset create x" | bash -s',
-    'bash <<< "orthanc dataset create x"',
-    'python3 <<EOF\nimport subprocess; subprocess.run(["orthanc", "dataset", "create", "x"])\nEOF',
-    'cat <<EOF | sh\northanc dataset create x\nEOF',
+    'echo "x $(echo "y" && orthanc dataset create x --branch main) z"',
+    'bash <<< "orthanc dataset create x --branch main"',
     'cat <<EOF\n$(orthanc proposal merge p)\nEOF',
-    'X="orthanc dataset create x"; bash -c "$X"',
+    'X="orthanc dataset create x --branch main"; bash -c "$X"',
     "bash -c 'git commit -m \"$(orthanc proposal merge p)\"'",
-    'bash -s x <<EOF\northanc dataset create x\nEOF',
-    'sh -s -- a <<< "orthanc dataset create x"',
-    `python3 - x <<'PY'\nimport os; os.system("orthanc dataset create x")\nPY`,
+    'bash -s x <<EOF\northanc dataset create x --branch main\nEOF',
+    'sh -s -- a <<< "orthanc dataset create x --branch main"',
     'ssh box <<EOF\northanc proposal merge p\nEOF',
-    'ssh box <<< "orthanc dataset create x"',
-    'kubectl exec -i p -- bash <<EOF\northanc dataset create x\nEOF',
-    'bash 0<<EOF\northanc dataset create x\nEOF',
-    'node /dev/stdin x <<EOF\nrequire("child_process").execSync("orthanc dataset create x")\nEOF',
+    'ssh box <<< "orthanc dataset create x --branch main"',
+    'kubectl exec -i p -- bash <<EOF\northanc dataset create x --branch main\nEOF',
+    'bash 0<<EOF\northanc dataset create x --branch main\nEOF',
   ]) {
-    expect({ command, blocked: blockedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
+    expect({ command, blocked: stoppedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
   }
 })
 
@@ -324,15 +317,13 @@ test('F25: plugin source that names foundry inside a longer name is not an opera
 test('round 3: substitutions, wrappers, help and false positives', async () => {
   const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, null)
   for (const command of [
-    'orthanc $(echo dataset) create x',
-    'orthanc `echo dataset` create x',
-    '! orthanc dataset create x',
-    'find . -exec orthanc dataset create x \\;',
-    'setsid orthanc dataset create x',
-    'npx orthanc dataset create x',
-    'ssh box orthanc dataset create x',
+    '! orthanc dataset create x --branch main',
+    'find . -exec orthanc dataset create x --branch main \\;',
+    'setsid orthanc dataset create x --branch main',
+    'npx orthanc dataset create x --branch main',
+    'ssh box orthanc dataset create x --branch main',
   ]) {
-    expect({ command, blocked: blockedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
+    expect({ command, blocked: stoppedEverywhere(bash(command)) }).toEqual({ command, blocked: true })
   }
   for (const command of [
     'orthanc help dataset create',
@@ -345,7 +336,41 @@ test('round 3: substitutions, wrappers, help and false positives', async () => {
   ]) {
     expect({ command, result: bash(command) }).toEqual({ command, result: null })
   }
-  expect(blockedEverywhere(bash('orthanc dataset create -- -h'))).toBe(true)
+  expect(stoppedEverywhere(bash('orthanc dataset create --branch main -- -h'))).toBe(true)
+})
+
+// The Bash guard judges a call by what it does, never by its shape (FND-4).
+// These ran blocked before: a work-branch write, a variable, a substitution,
+// interpreter code, a pipe into a shell. None names main, a promotion or a tag
+// the guard can read, so all of them run.
+test('FND-4: shapes the guard cannot read, and writes off main, run', async () => {
+  const bash = (command: string) => classifyCall('Bash', { command }, MANIFEST, 'agent/x')
+  for (const command of [
+    `orthanc ontology object-type-upsert T --branch ${GLOBAL}`,
+    'orthanc ontology --profile acme object-type-upsert T',
+    `python3 -c "import subprocess; subprocess.run(['orthanc','proposal','merge','p'])"`,
+    'echo "orthanc dataset create x --branch main" | sh',
+    'echo "orthanc dataset create x --branch main" | bash -s',
+    'python3 <<EOF\nimport subprocess; subprocess.run(["orthanc", "dataset", "create", "x"])\nEOF',
+    'cat <<EOF | sh\northanc dataset create x --branch main\nEOF',
+    `python3 - x <<'PY'\nimport os; os.system("orthanc dataset create x --branch main")\nPY`,
+    'orthanc $(echo dataset) create x',
+    'orthanc `echo dataset` create x',
+    'orthanc ontology object-type-upsert T --branch $BRANCH',
+    'orthanc dataset create x --branch "$(cat branch.txt)"',
+    'bash ./run-e2e.sh',
+    'orthanc --version',
+    'orthanc configure list',
+    'orthanc not-a-command --x',
+    'gh -R owner/orthanc-source pr list',
+    'orthanc ontology list | head -3',
+  ]) {
+    expect({ command, result: bash(command) }).toEqual({ command, result: null })
+  }
+  // A variable that holds the binary is read through, so a write on main still stops.
+  expect(stoppedEverywhere(bash('$ORTHANC_BIN ontology object-type-upsert T'))).toBe(true)
+  expect(stoppedEverywhere(bash('O=orthanc; $O proposal merge p'))).toBe(true)
+  expect(stoppedEverywhere(bash('orthanc dataset create x --branch main'))).toBe(true)
 })
 
 test('round 3: git push by URL, GIT_DIR, alias and cd --', async () => {
@@ -570,11 +595,11 @@ test('A8: the path in another case, split across command and args, or carrying t
   expect(asksAll(resourceSet(['--apply'], PROTECTION, `branch-protection resource set ${WORKSHOP} --off`))).toBe(true)
 })
 
-test('A9: Bash is refused, and a read-only entry with operator_approval is not let through as a read', async () => {
-  expect(blockedEverywhere(classifyCall('Bash', { command: `orthanc --agent branch-protection repo unprotect ${REPO_RID} master --apply` }, PROTECTION, 'agent/x'))).toBe(true)
+test('A9: Bash asks like orthanc_cli, and a read-only entry with operator_approval is not let through as a read', async () => {
+  expect(stoppedEverywhere(classifyCall('Bash', { command: `orthanc --agent branch-protection repo unprotect ${REPO_RID} master --apply` }, PROTECTION, 'agent/x'))).toBe(true)
   const contradictory: ManifestCommand[] = [...MANIFEST, { path: 'branch-protection resource get', kind: 'read-only', operatorApproval: 'always' }]
   expect(asksAll(classifyCall(CLI, { command: 'branch-protection resource get', args: [WORKSHOP] }, contradictory, 'agent/x'))).toBe(true)
-  expect(blockedEverywhere(classifyCall('Bash', { command: `orthanc branch-protection resource get ${WORKSHOP}` }, contradictory, 'agent/x'))).toBe(true)
+  expect(stoppedEverywhere(classifyCall('Bash', { command: `orthanc branch-protection resource get ${WORKSHOP}` }, contradictory, 'agent/x'))).toBe(true)
 })
 
 test('A10: with no manifest the call is blocked in every mode', async () => {

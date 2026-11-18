@@ -1090,22 +1090,31 @@ function orthancShellCall(
   return { path: leading.join(' ').toLowerCase(), known: false, help }
 }
 
-// Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
-// where the branch rule and the ladder see its arguments as data, not shell.
+// The Bash guard never refuses a command for its shape or because it names
+// orthanc. A raw `orthanc …` call, a script file, a pipeline, a variable or a
+// substitution all run. The guard stops one thing: a call it can read that does
+// what the ladder names (a write on main or HEAD, a promotion, a release tag).
+// A call it cannot read (a variable it cannot resolve, a substitution, a
+// script) is allowed: it is judged by what it does where that is readable, and
+// not at all where it is not.
+const UNREADABLE_WORD = /[$`]/
+
+// Run through a variable that the line sets to the binary (`O=orthanc; $O …`).
+function resolveHead(segment: Segment, assignments: ReadonlyMap<string, string[]>): Segment {
+  const index = commandHead(segment.words)
+  const head = segment.words[index]
+  const name = head === undefined ? undefined : /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(head)?.[1]
+  const values = name === undefined ? [] : (assignments.get(name) ?? [])
+  const value = values.length > 0 && values.every(candidate => candidate === values[0]) ? unquote(values[0]!) : ''
+  if (!isOrthancWord(value.split(/\s+/)[0] ?? '')) return segment
+  return { ...segment, words: [...segment.words.slice(0, index), ...value.split(/\s+/), ...segment.words.slice(index + 1)] }
+}
+
 function shellClassification(
   command: string,
   manifest: readonly ManifestCommand[],
   workingBranch: string | null,
 ): GateClassification | null {
-  const refuse = (path: string | null, error: string): GateClassification => ({
-    command: path,
-    kind: 'mutation',
-    isBranchScoped: false,
-    hasWorkingBranch: branchIsWorking(workingBranch),
-    targetsProtected: false,
-    isDestructive: false,
-    error,
-  })
   const segments = commandSegments(command)
   // The first words of the manifest paths: what can follow `orthanc` as a call.
   const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
@@ -1115,24 +1124,49 @@ function shellClassification(
     const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
     if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
   }
-  for (const segment of segments) {
+  for (const original of segments) {
+    const segment = resolveHead(original, assignments)
     const { words } = segment
-    if (hidesOrthanc(segment, command, assignments, groups)) {
-      return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
-    }
     const start = orthancStart(segment, groups)
     if (start < 0) continue
     const call = orthancShellCall(words, start, manifest)
-    if (call.path === '' && !call.help && segment.split) {
-      return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
+    // Help, version, an unknown or unreadable command, clone and every read run.
+    if (call.help || !call.known || call.path === 'repository clone') continue
+    // A read the manifest marks for operator approval is judged like a write.
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && !manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)) continue
+    const args = words.slice(start + 1 + call.path.split(' ').length)
+    // The guard names only what the ladder names: a promotion or a main-only
+    // write (judged by the command path alone), a write naming main or HEAD, a
+    // write with no branch (it lands on main), a release tag apply, a command the
+    // manifest marks for operator approval. Every other branch-rule refusal
+    // (a branch name it dislikes, a push with other positionals) is not named.
+    // A word the shell expands cannot be read: the path and the literal flags are still judged.
+    const readable = !words.slice(start + 1).some(word => UNREADABLE_WORD.test(word))
+    const classified = orthancClassification(call.path, args, { command: call.path, args }, workingBranch, manifest)
+    const declaresApply = manifest.some(entry => entry.path === call.path && entry.flags?.some(flag => flag.flag === '--apply'))
+    // A dry run changes nothing: a command that declares --apply and was not given it.
+    const dryRun = declaresApply && !argsNameFlag(args, ['--apply'])
+    let error: string | undefined
+    if (PROMOTIONS.has(call.path) || MAIN_ONLY_WRITES.has(call.path) || argsNameFlag(args, ['--allow-default-branch'])) {
+      error = branchRuleReason(call.path, args) ?? classified.error
+    } else if (call.path === 'repository push') {
+      const found = positionals(args)
+      if (found.length === 3 && isProtectedValue(found[2]!)) error = classified.error
+    } else if (readable && BRANCH_REQUIRED_PATHS.has(call.path) && flagValues(args, BRANCH_FLAGS).length === 0) {
+      error = classified.error
     }
-    if (call.help || call.path === '' || call.path === 'repository clone') continue
-    if (!call.known) {
-      return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
+    const tagApply = call.path === 'repository tag create' && argsNameFlag(args, ['--apply'])
+    const release = tagApply
+      ? (classified.release ?? `'repository tag create --apply' publishes a release tag; the guard cannot read all of its arguments, so the operator decides.`)
+      : undefined
+    const targetsProtected = classified.targetsProtected && !dryRun
+    if (error === undefined && !targetsProtected && release === undefined && classified.operatorApproval === undefined) continue
+    return {
+      ...classified,
+      targetsProtected,
+      error,
+      ...(release !== undefined ? { release } : {}),
     }
-    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
-    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
-    return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null
 }
