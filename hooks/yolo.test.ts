@@ -12,6 +12,10 @@
 //  Y1  In yolo a delete, or a write with --force, opens a dialog, or does not run
 //      when no one can be asked (a subagent, a -p run).
 //  Y2  In yolo a release tag apply asks, or does not run when no one can be asked.
+//      Changed by zay, 2026-11-17 ("no approvals are necessary for anything on
+//      the branch, only main"), board task FND-2: a tag with no --branch
+//      <global branch RID> is a release on main, so in yolo it asks, and with
+//      no one to ask it is refused. A tag on a global branch runs with no ask.
 //  Y3  Another mode loosens: ask-always, allow-edits and auto stop asking for a
 //      delete, a --force write or a tag apply.
 //  Y4  In any mode a write that names main, master or HEAD as its branch runs
@@ -258,15 +262,27 @@ const ASKING: [string, string[]][] = [
   ['repository tag create', [REPO, TAG, '--commit-hash', COMMIT, '--apply']],
 ]
 
-test('Y1 Y2: in yolo a delete, a --force write and a tag apply run with no dialog, even with no one to ask', async ($, on) => {
+test('Y1: in yolo a delete and a --force write run with no dialog, even with no one to ask', async ($, on) => {
   const h = harness(on)
   h.answer = 'throw'
-  for (const [command, args] of ASKING) {
+  for (const [command, args] of ASKING.filter(([command]) => command !== 'repository tag create')) {
     const wrote = await write($, command, args)
     expect({ command, deny: wrote.deny }).toEqual({ command, deny: undefined })
     expect({ command, ran: ran(h, command) }).toEqual({ command, ran: [`${command} ${args.join(' ')}`] })
   }
   expect(h.asked).toEqual([])
+})
+
+test('Y2: in yolo a release tag with no branch asks and, with no one to ask, is refused; on a global branch it runs with no dialog', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  expect(typeof (await write($, 'repository tag create', [REPO, TAG, '--commit-hash', COMMIT, '--apply'])).deny).toBe('string')
+  expect(h.asked.length).toBe(1)
+  expect(ran(h, 'repository tag create')).toEqual([])
+  const linked = [REPO, TAG, '--commit-hash', COMMIT, '--branch', GLOBAL, '--apply']
+  expect((await write($, 'repository tag create', linked)).deny).toBe(undefined)
+  expect(h.asked.length).toBe(1)
+  expect(ran(h, 'repository tag create')).toEqual([`repository tag create ${linked.join(' ')}`])
 })
 
 for (const mode of OTHER_MODES) {
