@@ -21,6 +21,7 @@ All agent work happens on branches. The mod blocks a write with no branch in eve
 
 5. Writes go through `orthanc_cli` only. Bash may run Orthanc reads; an Orthanc write in Bash, in any wrapping, is blocked.
 6. Writes run on the stack the operator picked with `/profile`. Do not pass `--profile`: a write that names it is blocked in every mode, because orthanc would run it on that other stack. A read may name another stack. `configure use` and `configure set-default` are blocked too: they change the stack a later session starts on.
+7. A stack the operator marked read-only (orthanc `configure profile set <name> --read-only`) runs no write in any mode, yolo included. `orthanc_cli` reads the profile's `read_only` mark and refuses before the approval ladder and before orthanc starts, naming the exact call. Reads run. Do not look for another path, and do not clear the mark: `configure profile set <name> --no-read-only` asks the operator. `orthanc_help`'s first lines and `/profile` say which stacks are read-only; a `configure list` that answers nothing puts a write to the operator rather than running it blind.
 
 ## Local repository clones (orthanc-first)
 

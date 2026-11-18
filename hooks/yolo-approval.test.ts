@@ -212,7 +212,8 @@ for (const mode of OTHER_MODES) {
       expect({ command, asked: h.asked.length - before }).toEqual({ command, asked: 1 })
       expect(h.asked.at(-1)).toContain('governance control')
     }
-    expect(h.calls.filter(call => call !== 'agent-manifest' && call !== 'version')).toEqual([])
+    // `configure list` is the plugin's own read of the stack's read-only mark.
+    expect(h.calls.filter(call => call !== 'agent-manifest' && call !== 'version' && call !== 'configure list')).toEqual([])
   })
 }
 

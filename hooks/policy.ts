@@ -287,6 +287,63 @@ export function approvalOnWorkBranch(path: string, args: readonly string[], mani
   return oneWorkBranchFlag(args, [flag, ...(aliases as string[])])
 }
 
+/** What `configure list` says about the stack a call would run on (v0.7.8). */
+export type StackMark = { name: string; readOnly: boolean | null }
+
+/** Orthanc's per-profile read-only mark, read: true, false, or null when the
+ * entry carries something unreadable where the mark belongs. No mark at all is
+ * false: a binary older than 0.7.8 has none, and it judged no write before. */
+export function profileReadOnlyMark(entry: Record<string, unknown>): boolean | null {
+  if (!('read_only' in entry)) return false
+  const mark = entry.read_only
+  return typeof mark === 'boolean' ? mark : null
+}
+
+/** True for `configure profile set <name> --no-read-only`: the clear of the mark. */
+export const clearsReadOnlyMark = (path: string, args: readonly string[]) =>
+  path === 'configure profile set' && argsNameFlag(args, ['--no-read-only'])
+
+/**
+ * The read-only stack gate, which runs before the ladder and before orthanc
+ * starts: zay's rule, a stack the operator marked read-only (`orthanc configure
+ * profile set <name> --read-only`) takes no write. Null lets the call on to the
+ * ladder; a read is always let on, since reads are what such a stack is for.
+ *  - marked: a write is refused, naming the exact call and the profile's mark.
+ *  - the clear of the mark: the operator's to make. Orthanc marks it
+ *    operator_approval (scope "always"), so the ladder asks for it; with a
+ *    manifest that does not, this gate asks instead of letting it run blind.
+ *  - the mark unreadable or `configure list` dead: asks: a write never runs on a
+ *    stack the plugin could not check.
+ */
+export function readOnlyStackGate(
+  mark: StackMark,
+  path: string,
+  args: readonly string[],
+  manifest: readonly ManifestCommand[],
+): { outcome: 'ask' | 'block'; reason: string } | null {
+  if (classifyOrthancCommand(path, manifest) === 'read') return null
+  const call = [path, ...args].join(' ').trim()
+  if (mark.readOnly === null) {
+    return {
+      outcome: 'ask',
+      reason: `orthanc configure list gave no answer, so orthanc_cli cannot tell whether the stack '${mark.name}' is marked read-only. '${call}' runs only if the operator approves it; check the stack with /profile.`,
+    }
+  }
+  if (mark.readOnly !== true) return null
+  if (clearsReadOnlyMark(path, args)) {
+    // The shipped manifest marks the clear operator_approval, so the ladder asks once; asking here too would ask twice.
+    if (operatorApprovalQuestion(path, args, manifest) !== null) return null
+    return {
+      outcome: 'ask',
+      reason: `'${call}' clears the read-only mark on stack '${mark.name}' (orthanc configure list: read_only true), which the operator put there with 'orthanc configure profile set ${mark.name} --read-only'. It runs only if the operator approves it.`,
+    }
+  }
+  return {
+    outcome: 'block',
+    reason: `Stack '${mark.name}' is marked read-only (orthanc configure list: read_only true), so '${call}' was not run: no write runs on a read-only stack, in any approval mode. Reads run. Only the operator clears the mark, with 'orthanc configure profile set ${mark.name} --no-read-only'.`,
+  }
+}
+
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
 const branchCore = (value: string) =>
   value

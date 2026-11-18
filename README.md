@@ -133,7 +133,17 @@ the same one or clearing it keeps them. An `orthanc_cli` write that passes
 `--profile` is refused in every mode: orthanc reads the last `--profile` it is
 given, so the write would leave the stack `/profile` picked. A read may name
 another stack. `configure use` and `configure set-default` are refused too,
-because they change the stack a later session starts on. Outside FDE mode `/namespace` steers discovery
+because they change the stack a later session starts on. A stack the operator
+marked read-only (orthanc v0.7.8: `orthanc configure profile set <name>
+--read-only`, also `configure profile create --read-only`) runs no write in any
+approval mode: `orthanc_cli` reads the profile's `read_only` mark from
+`configure list` and refuses before the approval ladder and before orthanc
+starts, naming the exact call and the mark. Reads run — that is what such a
+stack is for. `configure profile set <name> --no-read-only`, which clears the
+mark, asks the operator in every mode, `yolo` included, because the mark is
+theirs. A `configure list` that gives no answer is not read as "writable": the
+write is put to the operator and never runs blind. `/profile` and `orthanc_help`
+say which stacks are read-only. Outside FDE mode `/namespace` steers discovery
 only; the gate does not deny writes outside it. FDE mode holds a session to it
 (below).
 
