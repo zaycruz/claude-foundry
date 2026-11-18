@@ -151,9 +151,10 @@ mark is on: the question names the stack the call names. The plugin writes
 nothing into orthanc's config directory (`~/.config/foundry`, or
 `$XDG_CONFIG_HOME/foundry`), where `profile-settings.json` keeps the mark: file
 writes there are refused, as is any shell command that names the directory and
-can change files (`rm -rf`, `mv`, `find -delete`, a glob, an unpacked tar) —
-removing that file gets past both gates, so reading it is fine and touching it
-is the operator's. A stack `configure list` says nothing about is unknown, not
+can change files (`rm -rf`, `mv`, `find -delete`, a glob, an unpacked tar, even a
+`cp` of it out, which is the same shape to anything short of a shell parser) —
+removing that file gets past both gates, so reading it (`cat`, `ls`, `jq`) is
+fine and touching it is the operator's. A stack `configure list` says nothing about is unknown, not
 writable: the write goes to the operator and never runs blind, while reads and
 plans are not held up. `/profile` and `orthanc_help` say which stacks are
 read-only. Outside FDE mode `/namespace` steers discovery only; the gate does not

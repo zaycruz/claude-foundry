@@ -1600,6 +1600,17 @@ export function rulesWriteReason(tool: string, input: Record<string, unknown>, c
 const SHELL_CHANGES =
   /(\brm\b|\brmdir\b|\bmv\b\b|\bunlink\b|\bshred\b|\btruncate\b|\bdd\b|\btee\b|\binstall\b|\btouch\b|\bchmod\b|\bchattr\b|\bln\b|\brsync\b|\btar\b|\bcp\b|\bunzip\b|\bcpio\b|\bditto\b|\bxargs\b|\bfind\b|\bsed\b|\bpatch\b|\bgit\b|\bpython[0-9.]*\b|\bnode\b|\bperl\b|\bruby\b|\bphp\b|\bbun\b|\bdeno\b|-delete\b|-exec(?:dir)?\b|>)/
 const SHELL_BARE_MARK_FILE = /(^|[\s'"=<>|;&(`])profile-settings\.(json|lock)\b/i
+// A mark file named anywhere in the command, a glob included (`profile-*.json`).
+const SHELL_MARK_NAMED = /(?:profile-settings\.(?:json|lock)|profile-\S*)\b/i
+const SHELL_SEARCES = /\b(find|rm|rmdir|mv|unlink|shred|truncate|xargs)\b/i
+
+/** A path token that is the mark store, something under it, or a directory holding it. */
+function relatedToStore(token: string, cwd: string, home: string, dir: string): boolean {
+  const path = token.replace(/\/+$/, '')
+  if (path === '' || !path.includes('/')) return false
+  const found = normalizedPath(path, cwd, home)
+  return found === dir || found.startsWith(`${dir}/`) || (found !== '/' && dir.startsWith(found))
+}
 
 export const PROFILE_STORE_WRITE_REASON =
   'orthanc keeps each stack read_only mark in its own config dir (~/.config/foundry/profile-settings.json), so the plugin writes nothing there and only the operator edits it. Ask the operator to run orthanc configure profile set <name> --read-only or --no-read-only: an agent that rewrites or removes that file gets past both the plugin gate and orthanc own read-only gate.'
@@ -1631,11 +1642,16 @@ export function profileStoreWriteReason(
   if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
   if (tool === 'Bash' && typeof input.command === 'string') {
     const command = input.command
-      .replace(/^~(?=\/|$)/gm, home)
+      .replace(/(^|[\s'"=<>|;&(`])~(?=\/|[\s'";|&)]|$)/g, (_match, before: string) => `${before}${home}`)
       .replace(/\$\{?(?:HOME|XDG_CONFIG_HOME)\}?/g, match => (match.includes('XDG') ? (configHome.trim() === '' ? `${home}/.config` : configHome.trim()) : home))
+    const tokens = command.split(/[\s'"`;|&()<>=,]+/)
     // The dir, or anything under it, named as its own word: `rm -rf <dir>`,
     // `tar -xzf t.tgz -C <dir>`, `<dir>/profile-*.json`, `find <dir> -delete`.
-    if (command.split(/[\s'"`;|&()<>=,]+/).some(token => token !== '' && inside(token.replace(/\/+$/, ''))) && SHELL_CHANGES.test(command))
+    if (tokens.some(token => token !== '' && inside(token.replace(/\/+$/, ''))) && SHELL_CHANGES.test(command))
+      return PROFILE_STORE_WRITE_REASON
+    // `find ~/.config -name profile-settings.json -delete`: the store is named by the
+    // search pattern, not by the path, so a search rooted above it counts too.
+    if (SHELL_MARK_NAMED.test(command) && SHELL_SEARCES.test(command) && tokens.some(token => relatedToStore(token, cwd, home, dir)))
       return PROFILE_STORE_WRITE_REASON
     // `cd <dir> && rm profile-settings.json`: the working directory says which file,
     // and a bare name with no writer anywhere else in the tree stays free.

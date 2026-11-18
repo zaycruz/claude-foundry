@@ -472,6 +472,14 @@ test('Q12: what can change orthanc config dir cannot remove the mark', async ($,
     'sed -i s/rich// ~/.config/foundry/profile-settings.json',
     'printf "{}" > ~/.config/foundry/profile-settings.json',
     'jq ".read_only = []" ~/.config/foundry/profile-settings.json > /tmp/y && mv /tmp/y ~/.config/foundry/profile-settings.json',
+    // The store named by a search pattern from above it, and the home-relative and
+    // $-prefixed spellings of the directory.
+    'find ~ -name profile-*.json -delete',
+    'find $HOME/.config -name profile-settings.json -delete',
+    'rm -rf $HOME/.config/foundry',
+    // A copy out of the directory is refused too: `cp a b` and `cp b a` are the
+    // same shape to anything short of a shell parser, and the safe side is the operator's.
+    'cp -r ~/.config/foundry /tmp/backup',
   ]) {
     const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
     if (deny === '') denied.push(command)
@@ -486,6 +494,7 @@ test('Q12: what can change orthanc config dir cannot remove the mark', async ($,
     'orthanc configure list',
     'git commit -m document the profile-settings guard',
     'cp app/config/profile-settings.json /tmp/b.json',
+    'find /home/tester/projects -name profile-settings.json -delete',
   ])
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
   expect(typeof (await fileTool($, 'Bash', { command: 'tar czf /tmp/b.tgz ~/.config/foundry' })).deny).toBe('string')
