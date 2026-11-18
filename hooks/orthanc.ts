@@ -63,24 +63,38 @@ function flagsFrom(args: unknown): ManifestFlag[] {
   if (!Array.isArray(args)) return []
   return args.filter(isRecord).flatMap(arg =>
     typeof arg.flag === 'string'
-      ? [{ flag: arg.flag, takesValue: arg.takes_value === true, ...(typeof arg.default === 'string' ? { default: arg.default } : {}) }]
+      ? [{
+          flag: arg.flag,
+          takesValue: arg.takes_value === true,
+          // A default carried as a JSON number counts too: read as none, a
+          // waiting command would fall back to the 300 s floor in silence.
+          ...(typeof arg.default === 'string' || typeof arg.default === 'number' ? { default: String(arg.default) } : {}),
+        }]
       : [],
   )
 }
 
 // orthanc_cli's process timer. Waiting commands (repository checks wait,
-// ontology branch-index-status --wait, sql wait, ai-fde run, …) run as long as
-// their own --timeout, plus --publish-grace after the checks pass. The timer
-// gives them that wait, any fixed time Orthanc adds around it, one poll
-// interval (Orthanc can overshoot its deadline by one) and a margin, so Orthanc
-// reports its own timeout instead of being killed. The floor is the old fixed
-// 300 s; the cap is Orthanc's longest default wait (ai-fde run: 1800 s plus
-// 370 s around it) plus the margin, or more for a command whose own defaults
-// need more, so a call with its defaults is never refused. A call that would
-// need more is refused before Orthanc starts.
+// ontology branch-index-status --wait, sql wait, ai-fde run, models deployment
+// get --wait, …) run as long as their own deadline, plus --publish-grace after
+// the checks pass. The timer gives them that wait, any fixed time Orthanc adds
+// around it, one poll interval (Orthanc can overshoot its deadline by one) and
+// a margin, so Orthanc reports its own timeout instead of being killed. The
+// floor is the old fixed 300 s; the cap is Orthanc's longest default wait
+// (ai-fde run: 1800 s plus 370 s around it) plus the margin, or more for a
+// command whose own defaults need more, so a call with its defaults is never
+// refused. A call that would need more is refused before Orthanc starts.
 const CLI_MARGIN_S = 120
 export const CLI_TIMEOUT_FLOOR_MS = 300_000
-const WAIT_FLAGS = ['--timeout', '--publish-grace']
+// A command names its own wait with one of these: --timeout for the waits that
+// poll a Foundry job, --timeout-seconds for the ones whose deadline is the run
+// request itself (functions execute, ontology query-execute: "an AIP Logic
+// function calls a language model, so a run can take minutes") and for
+// models deployment get|list --wait (orthanc 0.7.8). No command in v0.7.7 or
+// v0.7.8 declares both; one that someday does gets the sum, which is a longer
+// timer, never a shorter one.
+const DEADLINE_FLAGS = ['--timeout', '--timeout-seconds']
+const WAIT_FLAGS = [...DEADLINE_FLAGS, '--publish-grace']
 const POLL_FLAGS = ['--interval', '--poll-interval']
 
 // What the manifest cannot say about a command's wait (orthanc-source
@@ -111,15 +125,26 @@ function flagArgument(args: readonly string[], flag: string): string | undefined
   return value
 }
 
+/** The flag that sets this command's own wait: the one it declares (--timeout,
+ * or --timeout-seconds for the commands that name it so), the one a call
+ * passes when no manifest entry was found, or --timeout. Every answer to
+ * "which flag names this command's wait" comes from here, so a timer, a
+ * refusal and a stopped hint never name three different flags. */
+export function deadlineFlagOf(command: ManifestCommand | undefined, given?: (flag: string) => boolean): string {
+  return DEADLINE_FLAGS.find(flag => (command?.flags ?? []).some(entry => entry.flag === flag) || (given?.(flag) ?? false)) ?? '--timeout'
+}
+
 export type CliWait = {
   timeoutMs: number
   neededMs: number
   /** The cap for this command: the general cap, or what its own defaults need when that is more. */
   capMs: number
   overCap: boolean
-  /** The largest --timeout that fits, when one does. */
+  /** The flag that sets this command's wait: --timeout, or --timeout-seconds for the commands that name it so. */
+  deadlineFlag: string
+  /** The largest value of `deadlineFlag` that fits, when one does. */
   maxTimeoutS?: number
-  /** The flags the call passed that put it over the cap, --timeout when one smaller would fit. */
+  /** The flags the call passed that put it over the cap, `deadlineFlag` when one smaller would fit. */
   overFlags?: string[]
 }
 
@@ -160,20 +185,23 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     return wait === 0 ? 0 : wait + (extra?.aroundS ?? 0) + Math.max(...POLL_FLAGS.map(secondsOf)) + CLI_MARGIN_S
   }
   const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
+  // The flag to name in the refusal: the one this command or this call uses.
+  const deadlineFlag = deadlineFlagOf(command, given)
   const totalS = waits ? totalOf(seconds) : 0
-  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false }
+  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false, deadlineFlag }
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
   const overCap = neededMs > capMs
-  if (!overCap) return { timeoutMs: neededMs, neededMs, capMs, overCap }
-  const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
-  // When no --timeout fits, the other passed flags are what to make smaller.
-  const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== '--timeout' && given(flag) && seconds(flag) > 0)
-  const overFlags = fits > 0 ? ['--timeout'] : others
+  if (!overCap) return { timeoutMs: neededMs, neededMs, capMs, overCap, deadlineFlag }
+  const fits = Math.floor(capMs / 1000 - (totalS - seconds(deadlineFlag)))
+  // When no value of that flag fits, the other passed flags are what to make smaller.
+  const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== deadlineFlag && given(flag) && seconds(flag) > 0)
+  const overFlags = fits > 0 ? [deadlineFlag] : others
   return {
     timeoutMs: capMs,
     neededMs,
     capMs,
     overCap,
+    deadlineFlag,
     ...(fits > 0 ? { maxTimeoutS: fits } : {}),
     ...(overFlags.length > 0 ? { overFlags } : {}),
   }
@@ -186,9 +214,9 @@ export const cliTimeoutMs = (command: ManifestCommand | undefined, args: readonl
 export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelope {
   const cap = wait.capMs / 1000
   const needed = Math.ceil(wait.neededMs / 1000)
-  const smaller = wait.overFlags?.length ? wait.overFlags.join(' or ') : '--timeout'
+  const smaller = wait.overFlags?.length ? wait.overFlags.join(' or ') : wait.deadlineFlag
   const ways = [
-    wait.maxTimeoutS === undefined ? `Pass a smaller ${smaller}` : `Pass --timeout ${wait.maxTimeoutS} or less`,
+    wait.maxTimeoutS === undefined ? `Pass a smaller ${smaller}` : `Pass ${smaller} ${wait.maxTimeoutS} or less`,
     WAIT_EXTRAS[command.path]?.detachHint,
     command.kind === 'read-only' ? 'and call it again if it times out: the wait is a read' : undefined,
   ].filter(Boolean)
@@ -215,7 +243,7 @@ function stoppedHint(command: ManifestCommand, reason: 'timeout' | 'cancelled'):
   if (extra) return extra.stoppedHint
   if (command.kind === 'read-only') {
     return reason === 'timeout'
-      ? 'It is a read: call it again to keep waiting, with a --timeout that fits.'
+      ? `It is a read: call it again to keep waiting, with a ${deadlineFlagOf(command)} that fits.`
       : 'It is a read: call it again to keep waiting.'
   }
   return 'Read the matching Foundry state before any retry.'
