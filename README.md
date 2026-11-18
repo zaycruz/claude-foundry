@@ -129,7 +129,11 @@ mod never falls back to Foundry REST.
 `/project` and the Compass pickers list only its projects, `/search` stays under
 its path, and the prompt tells Claude to do the same. Choosing a different
 namespace clears the projects and Compass resources picked before; choosing
-the same one or clearing it keeps them. Outside FDE mode it steers discovery
+the same one or clearing it keeps them. An `orthanc_cli` write that passes
+`--profile` is refused in every mode: orthanc reads the last `--profile` it is
+given, so the write would leave the stack `/profile` picked. A read may name
+another stack. `configure use` and `configure set-default` are refused too,
+because they change the stack a later session starts on. Outside FDE mode `/namespace` steers discovery
 only; the gate does not deny writes outside it. FDE mode holds a session to it
 (below).
 
