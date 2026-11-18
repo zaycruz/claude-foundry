@@ -22,7 +22,13 @@ says so instead of falling back to REST.
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
   judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
   delete, `--force`) and release tags ask, protected branches ask, and a call
-  repeated three times is blocked. In `yolo` only a write on main asks:
+  repeated three times is blocked. An applied outbound, credential or access
+  write (webhook create or update, `connectivity source secret set`, egress,
+  `rest-source create`, `dev-console scope add`, `admin` writes, role grants)
+  takes no branch and changes the live enrollment, so it asks in every mode,
+  `yolo` too; a plan asks no one. The class comes from the manifest's
+  `operator_approval_scope` (a built-in list covers an Orthanc that sends none
+  yet). In `yolo` only a write on main, or one of those, asks:
   deletes, `--force` writes and release tags run at once, and the loop guard
   is off. A write naming `main`, `master` or `HEAD` as its branch (any
   spelling: `--branch=main`, `-b master`, `-bmain`, or as a positional, as in

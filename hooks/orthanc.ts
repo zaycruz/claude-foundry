@@ -51,9 +51,22 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
           input: typeof entry.input === 'string' ? entry.input : undefined,
           flags: flagsFrom(entry.args),
+          ...approvalFrom(entry),
         }]
       : [],
   )
+}
+
+/** The approval class a manifest entry names, top level or inside `operator_approval`; nothing when it names none. */
+function approvalFrom(entry: Record<string, unknown>): Pick<ManifestCommand, 'operator_approval_scope' | 'operator_approval'> {
+  const scope = (value: unknown) => (typeof value === 'string' && value.trim() !== '' ? value : undefined)
+  const block = isRecord(entry.operator_approval) ? entry.operator_approval : undefined
+  const top = scope(entry.operator_approval_scope)
+  const inner = scope(block?.scope)
+  return {
+    ...(top !== undefined ? { operator_approval_scope: top } : {}),
+    ...(inner !== undefined ? { operator_approval: { scope: inner } } : {}),
+  }
 }
 
 function flagsFrom(args: unknown): ManifestFlag[] {
