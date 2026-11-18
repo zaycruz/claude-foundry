@@ -52,11 +52,32 @@
 //      default wait.
 //  W18 orthanc raises a command's default wait past the cap and every call
 //      with that default is refused.
+//
+// From orthanc v0.7.8 (the release asset's own agent-manifest), where a command
+// says how long it will wait in a flag the timer had never seen:
+//  W19 `models deployment get --wait` (new in 0.7.8) waits `--timeout-seconds`
+//      (its own default 300) and polls every `--poll-interval` (5). The timer
+//      knows only --timeout and --publish-grace, so it gives the 300 s floor:
+//      orthanc_cli kills orthanc at 300 s, before its own 300 s deadline can
+//      expire, and the agent gets a plugin timeout instead of an answer. The
+//      same spelling is on `models deployment list --wait`.
+//  W20 An operator or model that raises `--timeout-seconds` (the AIP Logic runs
+//      `functions execute`, `functions query execute[-by-rid]` and `ontology
+//      query-execute` carry their deadline in it, default 300: "a run can take
+//      minutes") is cut at the floor with no refusal, so a mutation is stopped
+//      while it may still be running in Foundry.
+//  W21 A waiting command that is not waiting (`--wait` absent, `--wait=false`)
+//      is given a long timer it never needs, or the waiting case loses the
+//      poll interval it overshoots its deadline by.
+//  W22 An over-cap `--timeout-seconds` is refused with "pass a smaller
+//      --timeout", a flag the command does not have.
+//  W23 A command whose `--timeout-seconds` is an HTTP timeout (`search`,
+//      `verify`: default 30) is refused or over-timed by the change.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, notRunFailure } from './orthanc'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, notRunFailure, overCapFailure } from './orthanc'
 import type { ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
@@ -91,6 +112,32 @@ const IMPORT_RUN: ManifestCommand = {
     { flag: '--timeout', takesValue: true, default: '600' },
     { flag: '--apply', takesValue: false },
   ],
+}
+
+// Straight from the orthanc v0.7.8 agent-manifest (flags, kinds and defaults).
+const DEPLOYMENT_GET: ManifestCommand = {
+  path: 'models deployment get',
+  kind: 'read-only',
+  flags: [
+    { flag: '--wait', takesValue: false },
+    { flag: '--timeout-seconds', takesValue: true, default: '300' },
+    { flag: '--poll-interval', takesValue: true, default: '5' },
+    { flag: '--output', takesValue: true },
+  ],
+}
+const FUNCTIONS_EXECUTE: ManifestCommand = {
+  path: 'functions execute',
+  kind: 'mutation',
+  flags: [
+    { flag: '--timeout-seconds', takesValue: true, default: '300' },
+    { flag: '--branch', takesValue: true },
+    { flag: '--apply', takesValue: false },
+  ],
+}
+const SEARCH: ManifestCommand = {
+  path: 'search',
+  kind: 'read-only',
+  flags: [{ flag: '--timeout-seconds', takesValue: true, default: '30' }],
 }
 
 // orthanc's ai-fde run deadline: startup 300 + timeout + margin (timeout / 10, 5 to 60) + exit grace 10.
@@ -191,6 +238,47 @@ test('W18: a manifest default above the fallback raises the cap for that command
   expect(seconds(cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '5000']).capMs)).toBe(2290)
 })
 
+test('W19 W21: a command that sets its wait with --timeout-seconds gets that wait, its poll overshoot and the margin', async () => {
+  // models deployment get --wait: 300 (its own default) + 5 (one poll interval) + 120.
+  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait']))).toBe(300 + 5 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '900']))).toBe(900 + 5 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds=900']))).toBe(900 + 5 + MARGIN_S)
+  // The last value wins, as orthanc reads it.
+  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--timeout-seconds', '600']))).toBe(600 + 5 + MARGIN_S)
+  // A raised --poll-interval is the overshoot orthanc can run past its deadline.
+  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '30']))).toBe(60 + 30 + MARGIN_S)
+  // W21: not waiting keeps the floor.
+  expect(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+  expect(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait=false'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+})
+
+test('W20: an AIP Logic run carries its deadline in --timeout-seconds and is not cut at the floor', async () => {
+  expect(seconds(cliTimeoutMs(FUNCTIONS_EXECUTE, ['fn', '--apply']))).toBe(300 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(FUNCTIONS_EXECUTE, ['fn', '--apply', '--timeout-seconds', '900']))).toBe(900 + MARGIN_S)
+  // A plan (no --apply) does not run the function: the floor.
+  expect(cliTimeoutMs(FUNCTIONS_EXECUTE, ['fn', '--timeout-seconds', '900'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+})
+
+test('W23: --timeout-seconds as an HTTP timeout costs nothing under the floor', async () => {
+  expect(cliTimeoutMs(SEARCH, ['acme'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+  // A caller that raises it gets the patience it asked for: 600 + 120.
+  expect(seconds(cliTimeoutMs(SEARCH, ['acme', '--timeout-seconds', '600']))).toBe(600 + MARGIN_S)
+})
+
+test('W22: an over-cap --timeout-seconds names itself and the largest value that fits', async () => {
+  // cap 2290 - (5 poll + 120 margin) = 2165.
+  const over = cliWait(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '2400'])
+  expect({ overCap: over.overCap, cap: seconds(over.capMs), max: over.maxTimeoutS, flags: over.overFlags })
+    .toEqual({ overCap: true, cap: 2290, max: 2165, flags: ['--timeout-seconds'] })
+  expect(seconds(over.timeoutMs)).toBe(2290)
+  const text = JSON.stringify(overCapFailure(DEPLOYMENT_GET, over))
+  expect(text).toContain('--timeout-seconds 2165')
+  expect(text).not.toContain('--timeout 2165')
+  // A --poll-interval too big to fit names itself, not --timeout.
+  const poll = cliWait(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '3000'])
+  expect({ overCap: poll.overCap, max: poll.maxTimeoutS, flags: poll.overFlags }).toEqual({ overCap: true, max: undefined, flags: ['--poll-interval'] })
+})
+
 // ---------- through the tool: the plugin loaded, orthanc faked, the clock mocked ----------
 
 const envelope = (data: unknown) =>
@@ -201,7 +289,7 @@ const MANIFEST = envelope({
   commands: [
     { path: 'configure list', kind: 'local', args: [] },
     { path: 'ontology list', kind: 'read-only', args: [] },
-    ...[AI_FDE_RUN, CHECKS_WAIT].map(command => ({ path: command.path, kind: command.kind, args: manifestArgs(command) })),
+    ...[AI_FDE_RUN, CHECKS_WAIT, DEPLOYMENT_GET, FUNCTIONS_EXECUTE].map(command => ({ path: command.path, kind: command.kind, args: manifestArgs(command) })),
   ],
 })
 
@@ -455,4 +543,30 @@ test('W14: an over-cap call is refused before the approval ladder asks the opera
   parsed(await call($, 'ai-fde run', ['do it', '--apply', '--detach']))
   expect(h.asks.length).toBe(1)
   expect(h.runs.map(run => run.line)).toEqual(['ai-fde run do it --apply --detach'])
+})
+
+test('W19 W20: through the tool, a --timeout-seconds wait runs past the floor and is refused over the cap', async ($, on) => {
+  const { h, clock } = harness(on)
+  h.child = 'hang'
+  const running = call($, 'models deployment get', ['ri.d.1', '--wait', '--timeout-seconds', '300'])
+  // 300 + 5 + 120 = 425 s: past the 300 s floor, and stopped there.
+  expect(await after(clock, running, 301_000)).toBe(false)
+  expect(await after(clock, running, 123_000)).toBe(true)
+  const error = parsed(await running).errors[0]!
+  expect({ reason: error.reason, timer: error.timeout_seconds }).toEqual({ reason: 'timeout', timer: 425 })
+  expect(h.runs).toEqual([{ line: 'models deployment get ri.d.1 --wait --timeout-seconds 300', timeoutMs: 425_000 }])
+  // A mutation whose deadline is the request is not cut at the floor either:
+  // 900 + 120 = 1020 s, past the 600 s $.process.run cut, so it is streamed.
+  const fn = call($, 'functions execute', ['fn', '--branch', 'ri.branch..branch.agent-demo', '--apply', '--timeout-seconds', '900'])
+  expect(await after(clock, fn, 1019_000)).toBe(false)
+  expect(await after(clock, fn, 2000)).toBe(true)
+  expect(parsed(await fn).errors[0]!.timeout_seconds).toBe(1020)
+  expect(h.spawns).toEqual(['functions execute fn --branch ri.branch..branch.agent-demo --apply --timeout-seconds 900'])
+  // Over the cap: refused with its own flag named, and orthanc never started.
+  const before = { spawns: [...h.spawns], runs: [...h.runs] }
+  const over = parsed(await call($, 'models deployment get', ['ri.d.1', '--wait', '--timeout-seconds', '2400']))
+  expect(over.errors[0]!.type).toBe('timeout-over-cap')
+  expect(over.errors[0]!.max_timeout_seconds).toBe(2165)
+  expect(String(over.errors[0]!.message)).toContain('--timeout-seconds 2165')
+  expect({ spawns: h.spawns.length, runs: h.runs.length }).toEqual({ spawns: before.spawns.length, runs: before.runs.length })
 })
