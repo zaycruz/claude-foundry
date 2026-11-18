@@ -54,6 +54,12 @@
 //  R19 A binary that does not report its version gives a notice that reads
 //      "changed from 0.6.0 to of unknown version".
 //
+// From board task FND-2 (yolo asks only on main, manifest operator_approval_scope):
+//  R20 The binary is upgraded to one whose manifest adds operator_approval_scope
+//      (or downgraded to one without it): the guard keeps the old scope, so a
+//      work-branch write asks in yolo after the upgrade, or runs unasked after
+//      the downgrade.
+//
 // Synthetic binaries and a synthetic file system only.
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
@@ -73,8 +79,8 @@ type Binary = {
   version: string | null
   groups: string[]
   manifest?: 'ok' | 'garbage' | 'empty' | 'error'
-  /** Extra commands, with their kind. */
-  extra?: { path: string; kind: string }[]
+  /** Extra commands, with their kind (and any other manifest keys). */
+  extra?: ({ path: string; kind: string } & Record<string, unknown>)[]
   /** agent-manifest of this binary takes this long. */
   delayMs?: number
 }
@@ -511,4 +517,24 @@ test('R19: a binary that does not report its version gets a plain notice', async
   const notice = (await help($)).split('\n')[0]!
   expect(notice).toContain('from orthanc 0.6.0 to an orthanc that did not report its version')
   expect(notice.includes('of unknown version')).toBe(false)
+})
+
+test('R20: an upgrade that adds operator_approval_scope, and a downgrade that drops it, change what yolo asks', async ($, on) => {
+  const { h } = harness(on)
+  const RID = 'ri.branch..branch.b0000000-0000-4000-8000-0000000000f4'
+  const roles = (scope: boolean) => ({
+    path: 'global-branch roles set',
+    kind: 'mutation',
+    operator_approval: { when_all_flags: ['--apply'] },
+    ...(scope ? { operator_approval_scope: 'work-branch' } : {}),
+  })
+  h.binaries.set(SYSTEM, { version: '0.6.0', groups: ['ontology'], extra: [roles(false)] })
+  expect((await cli($, 'global-branch roles set', [RID, '--apply'])).errors).toEqual([])
+  expect(h.asks.length).toBe(1)
+  install(h, SYSTEM, { version: '0.7.1', groups: ['ontology'], extra: [roles(true)] })
+  expect((await cli($, 'global-branch roles set', [RID, '--apply'])).data).toEqual({ ran: `global-branch roles set ${RID} --apply`, by: '0.7.1' })
+  expect(h.asks.length).toBe(1)
+  install(h, SYSTEM, { version: '0.6.1', groups: ['ontology'], extra: [roles(false)] }, 300)
+  expect((await cli($, 'global-branch roles set', [RID, '--apply'])).errors).toEqual([])
+  expect(h.asks.length).toBe(2)
 })
