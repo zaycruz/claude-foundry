@@ -90,8 +90,9 @@ export const CLI_TIMEOUT_FLOOR_MS = 300_000
 // poll a Foundry job, --timeout-seconds for the ones whose deadline is the run
 // request itself (functions execute, ontology query-execute: "an AIP Logic
 // function calls a language model, so a run can take minutes") and for
-// models deployment get|list --wait (orthanc 0.7.8). No command declares both;
-// one that someday does only ever gets the longer timer.
+// models deployment get|list --wait (orthanc 0.7.8). No command in v0.7.7 or
+// v0.7.8 declares both; one that someday does gets the sum, which is a longer
+// timer, never a shorter one.
 const DEADLINE_FLAGS = ['--timeout', '--timeout-seconds']
 const WAIT_FLAGS = [...DEADLINE_FLAGS, '--publish-grace']
 const POLL_FLAGS = ['--interval', '--poll-interval']

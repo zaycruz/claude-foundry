@@ -287,17 +287,23 @@ test('W22: an over-cap --timeout-seconds names itself and the largest value that
   // A --poll-interval too big to fit names itself, not --timeout.
   const poll = cliWait(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '3000'])
   expect({ overCap: poll.overCap, max: poll.maxTimeoutS, flags: poll.overFlags }).toEqual({ overCap: true, max: undefined, flags: ['--poll-interval'] })
+  // An HTTP timeout raised past the cap is refused too, with the largest value
+  // that fits. Before this change the same call was killed at the 300 s floor.
+  const http = cliWait(SEARCH, ['acme', '--timeout-seconds', '3600'])
+  expect({ overCap: http.overCap, max: http.maxTimeoutS, flags: http.overFlags }).toEqual({ overCap: true, max: 2170, flags: ['--timeout-seconds'] })
 })
 
 test('W24: the hint on a call the timer stopped names the flag that command waits with', async () => {
-  const stopped = (command: ManifestCommand) =>
-    String(withStoppedHint({ ...failure('orthanc-launch-error', 'aborted', command.path, { reason: 'timeout' }) }, command).errors?.[0]?.hint ?? '')
+  const stopped = (command: ManifestCommand) => {
+    const stopped_ = withStoppedHint(failure('orthanc-launch-error', 'aborted', command.path, { reason: 'timeout' }), command)
+    const [first] = Array.isArray(stopped_.errors) ? stopped_.errors : []
+    return String((first as { hint?: string } | undefined)?.hint ?? '')
+  }
   expect(stopped(DEPLOYMENT_GET)).toContain('--timeout-seconds that fits')
   expect(stopped(DEPLOYMENT_GET)).not.toContain('with a --timeout that fits')
   // A command that waits with --timeout keeps the words it had.
   expect(stopped(CHECKS_WAIT)).toContain('--timeout that fits')
-  // A cancelled read says nothing about a flag; ai-fde run keeps its own hint.
-  expect(stopped({ ...DEPLOYMENT_GET })).toContain('call it again')
+  // ai-fde run keeps its own hint, whatever the kind.
   expect(stopped({ ...AI_FDE_RUN, kind: 'read-only' })).toContain('ai-fde status')
 })
 
@@ -604,6 +610,8 @@ test('W19 W20: through the tool, a --timeout-seconds wait runs past the floor an
   expect(await after(clock, fn, 1019_000)).toBe(false)
   expect(await after(clock, fn, 2000)).toBe(true)
   expect(parsed(await fn).errors[0]!.timeout_seconds).toBe(1020)
+  // The write may have landed: a stopped mutation is not worded as a retryable read.
+  expect(String(parsed(await fn).errors[0]!.hint)).toContain('before any retry')
   expect(h.spawns).toEqual(['functions execute fn --branch ri.branch..branch.agent-demo --apply --timeout-seconds 900'])
   // Over the cap: refused with its own flag named, and orthanc never started.
   const before = { spawns: [...h.spawns], runs: [...h.runs] }
