@@ -9,10 +9,10 @@
 // Ways this can fail, written before the code:
 //  C1  In yolo an applied outbound, credential or access write runs with no ask,
 //      or runs when declined or when no one can be asked.
-//  C2  The class comes from command names, so a command the manifest marks with
-//      `operator_approval_scope` (or `operator_approval.scope`) but the plugin has
-//      never heard of runs in yolo. The manifest's word must be enough.
-//  C3  The manifest field is dropped on the way in (manifestFrom), so C2 holds
+//  C2  The class comes from command names alone, so a command the manifest marks
+//      `operator_approval` but the plugin has never heard of runs in yolo. The
+//      manifest's mark must be enough (it is main's mechanism, PR #7).
+//  C3  The manifest mark is dropped on the way in (manifestFrom), so C2 holds
 //      only in a unit test and not in a real session.
 //  C4  A plan (no --apply) asks. It changes nothing: it must run, in every mode.
 //  C5  A read of the same group (webhook list, source list) asks.
@@ -20,7 +20,7 @@
 //  C7  Another mode loosens: ask-always, allow-edits and auto stop asking.
 //  C8  A spelling of --apply is missed (--APPLY, --apply=true, the flag inside the
 //      command string), so the write runs unasked.
-//  C9  An unknown scope word in the manifest is ignored instead of asking.
+//  C9  A command marked by the manifest and also in the floor asks twice.
 //  C10 The prompt in yolo does not say these writes ask.
 //  C11 A write that is also a write on main asks twice, or an error (no branch)
 //      stops being an error because it is also a class.
@@ -31,7 +31,7 @@
 // Synthetic stack only.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { approvalClass, classifyCall, ladderDecision, type ManifestCommand } from './policy'
+import { approvalClass, classifyCall, ladderDecision } from './policy'
 import { manifestFrom } from './orthanc'
 
 const CLI = 'mcp__foundry__orthanc_cli'
@@ -41,8 +41,8 @@ type Mode = (typeof MODES)[number]
 
 const envelope = (data: unknown) =>
   JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors: [], meta: {}, warnings: [], artifacts: [], pagination: null })
-// As the 0.7.7 manifest has them: no scope word. One command, `connectivity vault rotate`,
-// is unknown to the plugin and carries the manifest's scope word; another carries it nested.
+// As the 0.7.7 manifest has them: no operator_approval. Two commands the plugin has no name
+// for carry the manifest's mark: `connectivity vault rotate` always, `connectivity beacon send` with --apply.
 const COMMANDS: { path: string; kind: string; extra?: Record<string, unknown> }[] = [
   { path: 'connectivity source secret set', kind: 'mutation' },
   { path: 'connectivity source list', kind: 'read-only' },
@@ -57,10 +57,8 @@ const COMMANDS: { path: string; kind: string; extra?: Record<string, unknown> }[
   { path: 'resource-role grant', kind: 'mutation' },
   { path: 'dataset create', kind: 'mutation' },
   { path: 'workshop module publish', kind: 'mutation' },
-  { path: 'connectivity vault rotate', kind: 'mutation', extra: { operator_approval_scope: 'credential' } },
-  { path: 'connectivity beacon send', kind: 'mutation', extra: { operator_approval: { when_all_flags: ['--apply'], scope: 'outbound' } } },
-  { path: 'connectivity oddity set', kind: 'mutation', extra: { operator_approval_scope: 'telepathy' } },
-  // Carries operator_approval with no scope: that is the older kind of approval, not a class.
+  { path: 'connectivity vault rotate', kind: 'mutation', extra: { operator_approval: 'always' } },
+  { path: 'connectivity beacon send', kind: 'mutation', extra: { operator_approval: { when_all_flags: ['--apply'] } } },
   { path: 'repository checks required remove', kind: 'mutation', extra: { operator_approval: { when_all_flags: ['--apply', '--allow-weaken'] } } },
 ]
 const MANIFEST = envelope({ commands: COMMANDS.map(({ path, kind, extra }) => ({ path, kind, args: [], ...extra })) })
@@ -132,8 +130,11 @@ const APPLIED: [string, string[], string][] = [
   ['dev-console scope add', ['app-1', '--scope', 'api:read', '--apply'], 'access'],
   ['admin group create', ['analysts', '--apply'], 'access'],
   ['resource-role grant', ['ri.compass.main.folder.c0000000-0000-4000-8000-0000000000c1', '--apply'], 'access'],
-  ['connectivity vault rotate', [SOURCE, '--apply'], 'credential'],
-  ['connectivity beacon send', [SOURCE, '--apply'], 'outbound'],
+  ]
+// Asks of the manifest's own mark, not the class table.
+const MARKED: [string, string[]][] = [
+  ['connectivity vault rotate', [SOURCE, '--apply']],
+  ['connectivity beacon send', [SOURCE, '--apply']],
 ]
 const PLANS: [string, string[]][] = APPLIED.map(([command, args]) => [command, args.filter(arg => arg !== '--apply')])
 const READS: [string, string[]][] = [
@@ -193,43 +194,33 @@ for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
   })
 }
 
-test('C2 C3: a command only the manifest marks (scope top level or nested) asks in yolo; an unknown scope word asks too', async ($, on) => {
+test('C2 C3: a command only the manifest marks asks in yolo; declined it does not run', async ($, on) => {
   const h = harness(on)
   h.answer = 'Decline'
-  for (const [command, args] of [
-    ['connectivity vault rotate', [SOURCE, '--apply']],
-    ['connectivity beacon send', [SOURCE, '--apply']],
-    ['connectivity oddity set', [SOURCE, '--apply']],
-  ] as [string, string[]][]) {
+  for (const [command, args] of MARKED) {
     const before = h.asked.length
     const wrote = await write($, command, args)
     expect({ command, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ command, denied: true, asked: 1 })
+    expect(ran(h, command)).toEqual([])
   }
-  expect(h.asked.at(-1)).toContain('telepathy write')
+  // beacon send is marked only when --apply is given: its plan runs.
+  expect((await write($, 'connectivity beacon send', [SOURCE])).deny).toBe(undefined)
 })
 
-test('C2 C3: manifestFrom keeps the scope word, top level and nested, and drops an empty one', () => {
-  const commands = manifestFrom(JSON.parse(MANIFEST))
-  const by = (path: string) => commands.find(command => command.path === path)
-  expect(by('connectivity vault rotate')?.operator_approval_scope).toBe('credential')
-  expect(by('connectivity beacon send')?.operator_approval?.scope).toBe('outbound')
-  expect(by('connectivity source secret set')?.operator_approval_scope).toBe(undefined)
-  const empty = manifestFrom({ schema_version: 'x', data: { commands: [{ path: 'a b', kind: 'mutation', operator_approval_scope: '  ', operator_approval: { scope: 3 } }] } } as never)
-  expect(empty[0]?.operator_approval_scope).toBe(undefined)
-  expect(empty[0]?.operator_approval).toBe(undefined)
+test('C3: manifestFrom keeps the manifest mark', () => {
+  const by = (path: string) => manifestFrom(JSON.parse(MANIFEST)).find(command => command.path === path)
+  expect(by('connectivity vault rotate')?.operatorApproval).toBe('always')
+  expect(by('connectivity beacon send')?.operatorApproval).toEqual({ when_all_flags: ['--apply'] })
+  expect(by('connectivity source secret set')?.operatorApproval).toBe(undefined)
 })
 
-test('C2: the manifest overrides nothing it does not name, and a manifest scope beats the floor', () => {
-  const manifest: ManifestCommand[] = [
-    { path: 'connectivity webhook create', kind: 'mutation', operator_approval_scope: 'access' },
-    { path: 'dataset create', kind: 'mutation' },
-    { path: 'repository checks required remove', kind: 'mutation', operator_approval: { when_all_flags: ['--apply'] } },
-  ]
-  expect(approvalClass('connectivity webhook create', manifest)).toBe('access')
-  expect(approvalClass('connectivity webhook update', manifest)).toBe('outbound')
-  expect(approvalClass('dataset create', manifest)).toBe(null)
-  expect(approvalClass('repository checks required remove', manifest)).toBe(null)
-  expect(approvalClass('admin org create', manifest)).toBe('access')
+test('C2: the floor names only the writes in its table', () => {
+  expect(approvalClass('connectivity webhook create')).toBe('outbound')
+  expect(approvalClass('connectivity source secret set')).toBe('credential')
+  expect(approvalClass('project add-orgs')).toBe('access')
+  expect(approvalClass('dataset create')).toBe(null)
+  expect(approvalClass('admin org create')).toBe('access')
+  expect(approvalClass('global-branch roles set')).toBe(null)
 })
 
 test('C8: every spelling of --apply asks, in the args or inside the command string', async ($, on) => {
@@ -269,13 +260,15 @@ test('C10: the yolo prompt says these writes ask; so do the other prompts', asyn
 test('C11: an applied class write with a branch problem is still an error, and one on main asks once', () => {
   const manifest = manifestFrom(JSON.parse(MANIFEST))
   // A class write is no excuse for a missing branch where the branch rule needs one.
-  const classified = classifyCall(CLI, { command: 'dataset create', args: ['/Tester/x', '--apply'] }, [{ path: 'dataset create', kind: 'mutation', operator_approval_scope: 'access' }], null)
-  expect(classified?.approval).toBe('access')
+  const classified = classifyCall(CLI, { command: 'resource-role grant', args: ['r'] }, [{ path: 'resource-role grant', kind: 'mutation' }], null)
+  expect(classified?.approval).toBe(undefined)
+  const grant = classifyCall(CLI, { command: 'resource-role grant', args: ['r', '--apply'] }, [{ path: 'resource-role grant', kind: 'mutation' }], null)
+  expect(grant?.approval).toBe('access')
   const onMain = classifyCall(CLI, { command: 'workshop module publish', args: ['m', '--apply'] }, manifest, null)
   expect(onMain?.targetsProtected).toBe(true)
   const decision = ladderDecision('yolo', { ...onMain!, approval: 'access' })
   expect(decision.outcome).toBe('ask')
-  const error = ladderDecision('yolo', { ...classified!, error: 'no branch' })
+  const error = ladderDecision('yolo', { ...grant!, error: 'no branch' })
   expect(error).toEqual({ outcome: 'block', reason: 'no branch' })
 })
 
