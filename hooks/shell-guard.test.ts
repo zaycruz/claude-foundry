@@ -60,6 +60,12 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'functions search', kind: 'read-only' },
   { path: 'dataset create', kind: 'mutation' },
   { path: 'proposal merge', kind: 'mutation' },
+  { path: 'ontology object-upsert', kind: 'mutation' },
+  { path: 'ontology action-apply', kind: 'mutation' },
+  { path: 'global-branch create', kind: 'mutation' },
+  { path: 'repository push', kind: 'mutation' },
+  { path: 'repository tag create', kind: 'mutation', flags: [{ flag: '--apply', takesValue: false }] },
+  { path: 'dataset create-from-csv', kind: 'mutation', flags: [{ flag: '--apply', takesValue: false }] },
   { path: 'sql export', kind: 'read-only' },
   { path: 'ai-fde tools list', kind: 'local' },
   { path: 'smoke schedule', kind: 'local' },
@@ -157,4 +163,60 @@ test('S1 E2E: a Python heredoc that edits text naming orthanc runs through the g
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   const ran = (await $.tool.call({ tool: 'Bash', command: PASSES[0]![1] } as never)) as { deny?: string }
   expect(ran.deny).toBe(undefined)
+})
+
+// FND-4 review: judged by what the call does. A variable or substitution in the
+// arguments does not hide a path the guard can read; a refusal only for what the
+// ladder names.
+const outcomes = (command: string) => {
+  const classified = bash(command)
+  return classified === null ? null : MODES.map(mode => ladderDecision(mode, classified, approve).outcome)
+}
+const TAG = 'ri.stemma.main.repository.abc'
+const HASH = '0123456789abcdef0123456789abcdef01234567'
+
+test('R1: a promotion or a main-only write stops with a variable or substitution in its arguments', () => {
+  for (const command of [
+    'orthanc proposal merge p',
+    'orthanc proposal merge "$P"',
+    'P=p; orthanc proposal merge $P',
+    'orthanc proposal merge "$(cat p.txt)"',
+    'orthanc ontology object-upsert "$OBJ"',
+  ]) {
+    expect({ command, outcomes: outcomes(command) }).toEqual({ command, outcomes: ['block', 'block', 'block', 'block'] })
+  }
+})
+
+test('R2: a release tag apply asks, literal or with a variable; its dry run runs', () => {
+  const literal = `orthanc repository tag create ${TAG} refs/tags/v1 --commit-hash ${HASH} --apply`
+  const variable = `orthanc repository tag create ${TAG} "$TAG" --commit-hash ${HASH} --apply`
+  // yolo runs a tag on a work branch (tag.test.ts G1); every other mode asks.
+  for (const command of [literal, variable]) {
+    expect({ command, outcomes: outcomes(command)?.slice(0, 3) }).toEqual({ command, outcomes: ['ask', 'ask', 'ask'] })
+  }
+  expect(outcomes(`orthanc repository tag create ${TAG} "$TAG" --commit-hash ${HASH}`)).toBe(null)
+})
+
+test('R3: a write naming main asks in every mode, never a plain block', () => {
+  for (const command of ['orthanc dataset create x --branch main --apply', 'orthanc dataset create x --branch=HEAD', 'orthanc dataset create x -b master']) {
+    expect({ command, outcomes: outcomes(command) }).toEqual({ command, outcomes: ['ask', 'ask', 'ask', 'ask'] })
+  }
+})
+
+test('R4: a dry run on main runs; the same call with --apply asks', () => {
+  expect(outcomes('orthanc dataset create-from-csv t f c.csv --branch main')).toBe(null)
+  expect(outcomes('orthanc dataset create-from-csv t f c.csv --branch main --apply')).toEqual(['ask', 'ask', 'ask', 'ask'])
+})
+
+test('R5: writes off main run, whatever their branch name or shape', () => {
+  for (const command of [
+    'orthanc global-branch create foo',
+    'orthanc ontology action-apply a --branch agent/foo',
+    `orthanc repository push ${TAG} refs/heads/x`,
+    `orthanc repository push ${TAG} refs/heads/x refs/heads/agent-x`,
+  ]) {
+    expect({ command, result: outcomes(command) }).toEqual({ command, result: null })
+  }
+  // A push to the default branch still stops.
+  expect(outcomes(`orthanc repository push ${TAG} refs/heads/x refs/heads/master`)?.every(outcome => outcome !== 'run')).toBe(true)
 })

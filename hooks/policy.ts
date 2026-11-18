@@ -1135,12 +1135,38 @@ function shellClassification(
     // A read the manifest marks for operator approval is judged like a write.
     if (classifyOrthancCommand(call.path, manifest) === 'read' && !manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)) continue
     const args = words.slice(start + 1 + call.path.split(' ').length)
-    // The branch rule reads literal words. A word the shell expands is unreadable: allowed.
+    // The guard names only what the ladder names: a promotion or a main-only
+    // write (judged by the command path alone), a write naming main or HEAD, a
+    // write with no branch (it lands on main), a release tag apply, a command the
+    // manifest marks for operator approval. Every other branch-rule refusal
+    // (a branch name it dislikes, a push with other positionals) is not named.
+    // A word the shell expands cannot be read: the path and the literal flags are still judged.
     const readable = !words.slice(start + 1).some(word => UNREADABLE_WORD.test(word))
     const classified = orthancClassification(call.path, args, { command: call.path, args }, workingBranch, manifest)
-    const named = classified.targetsProtected || classified.release !== undefined || classified.operatorApproval !== undefined || (readable && classified.error !== undefined)
-    if (!named) continue
-    return readable ? classified : { ...classified, error: undefined }
+    const declaresApply = manifest.some(entry => entry.path === call.path && entry.flags?.some(flag => flag.flag === '--apply'))
+    // A dry run changes nothing: a command that declares --apply and was not given it.
+    const dryRun = declaresApply && !argsNameFlag(args, ['--apply'])
+    let error: string | undefined
+    if (PROMOTIONS.has(call.path) || MAIN_ONLY_WRITES.has(call.path) || argsNameFlag(args, ['--allow-default-branch'])) {
+      error = branchRuleReason(call.path, args) ?? classified.error
+    } else if (call.path === 'repository push') {
+      const found = positionals(args)
+      if (found.length === 3 && isProtectedValue(found[2]!)) error = classified.error
+    } else if (readable && BRANCH_REQUIRED_PATHS.has(call.path) && flagValues(args, BRANCH_FLAGS).length === 0) {
+      error = classified.error
+    }
+    const tagApply = call.path === 'repository tag create' && argsNameFlag(args, ['--apply'])
+    const release = tagApply
+      ? (classified.release ?? `'repository tag create --apply' publishes a release tag; the guard cannot read all of its arguments, so the operator decides.`)
+      : undefined
+    const targetsProtected = classified.targetsProtected && !dryRun
+    if (error === undefined && !targetsProtected && release === undefined && classified.operatorApproval === undefined) continue
+    return {
+      ...classified,
+      targetsProtected,
+      error,
+      ...(release !== undefined ? { release } : {}),
+    }
   }
   return null
 }
