@@ -48,7 +48,9 @@ says so instead of falling back to REST.
   create`/`replace`) must name its `branchName`. Before `orchestration schedules
   run`/`unpause` or `connectivity import run`, the guard reads the stored
   schedule or import: if it builds main, names no branch, or cannot be read,
-  the call asks the operator. A release tag
+  the call asks the operator. Before `dataset transactions commit` or `abort`,
+  the guard reads `dataset branches list <dataset>`: unless the transaction is
+  the latest of a work branch only, the call asks the operator. A release tag
   (`repository tag create --apply`) is not blocked: outside `yolo` it asks the
   operator, naming the tag, the commit and the repository. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not

@@ -369,9 +369,11 @@ function releaseTagCall(args: readonly string[]): { release: string } | { error:
 // A schedule's build action is a JSON positional that names its branch inside.
 const ACTION_BRANCH_WRITES = new Set(['orchestration schedules create', 'orchestration schedules replace'])
 const ACTION_VALUE_FLAGS = new Set(['--trigger', '--name', '--description'])
-// These start builds on the branch stored in a schedule or an import, so the
-// guard reads it first (storedBranchReads) and judges what it finds.
-export const STORED_BRANCH_RUNS = new Set(['orchestration schedules run', 'orchestration schedules unpause', 'connectivity import run'])
+// These write on a branch stored in Foundry: a schedule's or an import's builds,
+// or the branch a dataset transaction was opened on. The guard reads it first
+// (storedBranchReads, storedBranchesFrom) and judges what it finds.
+const TRANSACTION_CLOSES = new Set(['dataset transactions commit', 'dataset transactions abort'])
+export const STORED_BRANCH_RUNS = new Set(['orchestration schedules run', 'orchestration schedules unpause', 'connectivity import run', ...TRANSACTION_CLOSES])
 const BRANCH_KEYS = new Set(['branch', 'branchname', 'branch_name'])
 
 /** Every string under a branch key (branchName, branch, branch_name), at any depth. */
@@ -383,8 +385,12 @@ export function branchesIn(value: unknown): string[] {
   )
 }
 
-/** The orthanc reads (argv) that return the stored schedule or import a run starts. */
+/** The orthanc reads (argv) that return the stored schedule, import or dataset branches a call writes on. */
 export function storedBranchReads(command: string, args: readonly string[]): string[][] {
+  if (TRANSACTION_CLOSES.has(command)) {
+    const [dataset, transaction] = positionals(args)
+    return dataset?.startsWith('ri.') && transaction?.startsWith('ri.') ? [['dataset', 'branches', 'list', dataset]] : []
+  }
   const rid = positionals(args).find(arg => arg.startsWith('ri.'))
   if (rid === undefined) return []
   if (command === 'connectivity import run') {
@@ -395,6 +401,21 @@ export function storedBranchReads(command: string, args: readonly string[]): str
     return kinds.map(each => ['connectivity', 'import', `get-${each}`, rid, ...extra])
   }
   return [['orchestration', 'schedules', 'get', rid]]
+}
+
+/** The branches one stored read names for this call. For a transaction commit or
+ * abort: the branches whose latest transaction (an open one is the latest) is
+ * this one; none found reads as main. */
+export function storedBranchesFrom(command: string, args: readonly string[], data: unknown): string[] {
+  if (!TRANSACTION_CLOSES.has(command)) return branchesIn(data)
+  const transaction = positionals(args)[1]
+  const rows = typeof data === 'object' && data !== null ? (data as { branches?: unknown }).branches : undefined
+  if (!Array.isArray(rows)) return []
+  return rows.flatMap(row => {
+    if (typeof row !== 'object' || row === null) return []
+    const { name, transaction_rid: latest } = row as { name?: unknown; transaction_rid?: unknown }
+    return typeof name === 'string' && latest === transaction ? [name] : []
+  })
 }
 
 /** A schedule action's branches, or why it is refused. */
