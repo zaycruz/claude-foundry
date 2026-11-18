@@ -385,11 +385,23 @@ export function branchesIn(value: unknown): string[] {
   )
 }
 
+/** A transaction commit's or abort's dataset and transaction, or null unless the
+ * args hold exactly one RID of each, as the two positionals in that order: a
+ * second RID anywhere (behind a flag, after `=`) makes what orthanc closes unplain. */
+function transactionTarget(args: readonly string[]): { dataset: string; transaction: string } | null {
+  const rids = args.flatMap(arg => unquote(arg).split('=')).map(word => unquote(word)).filter(word => word.startsWith('ri.'))
+  const [dataset, transaction, ...rest] = positionals(args)
+  if (rids.length !== 2 || rest.length > 0 || dataset === undefined || transaction === undefined) return null
+  return dataset === rids[0] && transaction === rids[1] && dataset.startsWith('ri.foundry.main.dataset.') && transaction.startsWith('ri.foundry.main.transaction.')
+    ? { dataset, transaction }
+    : null
+}
+
 /** The orthanc reads (argv) that return the stored schedule, import or dataset branches a call writes on. */
 export function storedBranchReads(command: string, args: readonly string[]): string[][] {
   if (TRANSACTION_CLOSES.has(command)) {
-    const [dataset, transaction] = positionals(args)
-    return dataset?.startsWith('ri.') && transaction?.startsWith('ri.') ? [['dataset', 'branches', 'list', dataset]] : []
+    const target = transactionTarget(args)
+    return target === null ? [] : [['dataset', 'branches', 'list', target.dataset]]
   }
   const rid = positionals(args).find(arg => arg.startsWith('ri.'))
   if (rid === undefined) return []
@@ -405,12 +417,13 @@ export function storedBranchReads(command: string, args: readonly string[]): str
 
 /** The branches one stored read names for this call. For a transaction commit or
  * abort: the branches whose latest transaction (an open one is the latest) is
- * this one; none found reads as main. */
+ * this one; none found, or a list with another page, reads as main. */
 export function storedBranchesFrom(command: string, args: readonly string[], data: unknown): string[] {
   if (!TRANSACTION_CLOSES.has(command)) return branchesIn(data)
-  const transaction = positionals(args)[1]
-  const rows = typeof data === 'object' && data !== null ? (data as { branches?: unknown }).branches : undefined
-  if (!Array.isArray(rows)) return []
+  const transaction = transactionTarget(args)?.transaction
+  const listing = typeof data === 'object' && data !== null ? (data as { branches?: unknown; next_page_token?: unknown }) : {}
+  const rows = listing.branches
+  if (transaction === undefined || !Array.isArray(rows) || (listing.next_page_token != null && listing.next_page_token !== '')) return []
   return rows.flatMap(row => {
     if (typeof row !== 'object' || row === null) return []
     const { name, transaction_rid: latest } = row as { name?: unknown; transaction_rid?: unknown }
