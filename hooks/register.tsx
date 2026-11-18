@@ -407,7 +407,10 @@ async function stackMark($: EngineInterface): Promise<StackMark> {
   const entry = named ?? rows.find(found => found.is_default === true)
   // No rows at all: nothing is configured, and an env-credential run has no profile
   // for a mark to belong to (orthanc skips those, RO6/RO21), so there is no mark.
-  if (entry === undefined) return { name: wanted ?? 'default', readOnly: false }
+  if (rows.length === 0) return { name: wanted ?? 'default', readOnly: false }
+  // Rows, but no default and nothing picked: the stack is not identifiable, so the
+  // mark is unknown and the gate asks rather than answering "writable".
+  if (entry === undefined) return { name: wanted ?? 'default', readOnly: null }
   return { name: asString(entry.name), readOnly: profileReadOnlyMark(entry) }
 }
 

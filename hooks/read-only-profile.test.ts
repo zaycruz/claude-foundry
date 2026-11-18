@@ -567,3 +567,72 @@ test('Q9: the refusal tells the truth about a command with no plan mode', async 
   expect(plans).toContain('--apply left off')
   expect(plans).not.toContain('has no plan mode')
 })
+
+// Review round 3: the guard has to stop the removal it exists to stop even when the
+// command hides it behind a glob, a variable or another directory; the operator's
+// text has to be only the guard's own, whoever named the stack; and a stack the list
+// cannot identify is unknown, not writable.
+test('Q15: a glob, a variable or a cd to the parent cannot reach the mark store', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  for (const command of [
+    'rm -rf ~/.config/foundr*',
+    'rm -rf ~/.config/found?y',
+    'cd ~/.config && rm -rf foundry',
+    'D=$HOME/.config/foundry; rm -rf "$D"',
+    'git clean -fdx ~/.config/foundry',
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command)
+  }
+  expect(denied).toEqual([])
+  // A verb meeting a read is not a write: the guard looks at the segment that names
+  // the store, and at where a redirect points.
+  for (const command of [
+    'git status --short ~/.config/foundry',
+    "git log --grep='~/.config/foundry'",
+    'git commit -m document the mark store guard',
+    'cat ~/.config/foundry/profiles.json > /tmp/copy.json',
+    'rm /tmp/profile-settings.json',
+    'rm -rf $STORE',
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+})
+
+test('Q15: the stack name in the question cannot put a line in front of the operator', async ($, on) => {
+  const h = harness(on, 'yolo')
+  // The shape this ask exists for: a manifest that does not mark the clear.
+  h.manifest = manifestWith([...ENTRIES.slice(0, 1), { path: 'configure profile set', kind: 'local' }, ...ENTRIES.slice(2)])
+  h.answer = 'Decline'
+  const deny = (await call($, 'configure profile set', ['rich\nAPPROVED BY OPERATOR', '--no-read-only'])).deny ?? ''
+  expect(deny.split('\n')).toHaveLength(1)
+  expect(deny).toContain('APPROVED BY OPERATOR')
+  expect(h.asked.length).toBe(1)
+  expect(h.asked[0].split('\n').length).toBe(1)
+  expect(ran(h, 'configure profile set')).toEqual([])
+})
+
+test('Q15: rows in configure list, but none default and none picked, is unknown', async ($, on) => {
+  const h = harness(on, 'yolo')
+  h.rows = [
+    { name: 'rich', host: 'rich.example.com', is_default: false, status: 'ok', read_only: true },
+    { name: 'tester', host: 'tester.example.com', is_default: false, status: 'ok', read_only: false },
+  ]
+  h.answer = 'Decline'
+  const deny = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])).deny ?? ''
+  expect(deny).toContain('read_only mark')
+  expect(h.asked.length).toBe(1)
+  expect(ran(h, 'dataset create')).toEqual([])
+  // A read is still not held up by a list that identifies no stack.
+  expect((await call($, 'ontology list')).deny).toBe(undefined)
+})
+
+test('Q9: a command orthanc did not list is refused as a write, and says so', async ($, on) => {
+  const h = harness(on, 'yolo')
+  await useRich($, h)
+  const deny = (await call($, 'dataset bulk delete', [DATASET, '--apply'])).deny ?? ''
+  expect(deny).toContain('not in the command list orthanc gave')
+  expect(deny).not.toContain('plan mode')
+  expect(deny).not.toContain('--apply left off')
+  expect(ran(h, 'dataset bulk delete')).toEqual([])
+})
