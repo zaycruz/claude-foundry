@@ -81,6 +81,8 @@
 //  W25 A manifest that carries a default as a JSON number (300, not "300")
 //      reads as no default, so the wait falls back to the floor again: the
 //      same cut, back by the side door.
+//  W26 An over-cap HTTP timeout (`search --timeout-seconds 3600`) is refused
+//      with a largest value that does not fit its own arithmetic.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
@@ -287,10 +289,6 @@ test('W22: an over-cap --timeout-seconds names itself and the largest value that
   // A --poll-interval too big to fit names itself, not --timeout.
   const poll = cliWait(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '3000'])
   expect({ overCap: poll.overCap, max: poll.maxTimeoutS, flags: poll.overFlags }).toEqual({ overCap: true, max: undefined, flags: ['--poll-interval'] })
-  // An HTTP timeout raised past the cap is refused too, with the largest value
-  // that fits. Before this change the same call was killed at the 300 s floor.
-  const http = cliWait(SEARCH, ['acme', '--timeout-seconds', '3600'])
-  expect({ overCap: http.overCap, max: http.maxTimeoutS, flags: http.overFlags }).toEqual({ overCap: true, max: 2170, flags: ['--timeout-seconds'] })
 })
 
 test('W24: the hint on a call the timer stopped names the flag that command waits with', async () => {
@@ -325,6 +323,14 @@ test('W25: a manifest default carried as a number still sets the wait', async ()
     },
   })
   expect(seconds(cliTimeoutMs(loaded[0], ['ri.d.1', '--wait']))).toBe(300 + 5 + MARGIN_S)
+})
+
+test('W26: an over-cap HTTP timeout names the largest value that actually fits', async () => {
+  // No poll interval, so cap 2290 - 120 margin = 2170.
+  const over = cliWait(SEARCH, ['acme', '--timeout-seconds', '3600'])
+  expect({ overCap: over.overCap, max: over.maxTimeoutS, flags: over.overFlags }).toEqual({ overCap: true, max: 2170, flags: ['--timeout-seconds'] })
+  // The value it names fits: the same call at that value is not over the cap.
+  expect(cliWait(SEARCH, ['acme', '--timeout-seconds', '2170']).overCap).toBe(false)
 })
 
 // ---------- through the tool: the plugin loaded, orthanc faked, the clock mocked ----------
