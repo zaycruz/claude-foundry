@@ -279,7 +279,8 @@ test('F21 F22: a tag apply with no branch asks in every mode, yolo too (FND-2, t
   const push = (args: string[]) => classifyCall(CLI, { command: 'repository push', args }, MANIFEST, null)
   expect(blockedEverywhere(push(['--apply', 'ri.stemma.main.repository.x', 'refs/heads/a', 'refs/heads/main']))).toBe(true)
   expect(blockedEverywhere(push(['ri.stemma.main.repository.x', 'refs/heads/main']))).toBe(true)
-  expect(push(['--apply', '--profile', 'acme', 'ri.stemma.main.repository.x', 'refs/heads/agent-a', 'refs/heads/agent-a'])?.error).toBe(undefined)
+  // A value flag between the flags and the refs (--profile was used here before 0.6.2; it is now refused, P1 in profile.test.ts).
+  expect(push(['--apply', '--repo-dir', 'acme','ri.stemma.main.repository.x', 'refs/heads/agent-a', 'refs/heads/agent-a'])?.error).toBe(undefined)
 })
 
 test('F24: the agent cannot write the operator rules', async () => {
