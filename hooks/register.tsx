@@ -102,6 +102,7 @@ import {
   ORTHANC_CLI,
   ORTHANC_HELP,
   parseApprovalMode,
+  canonicalProfileName,
   profileReadOnlyMark,
   profileStoreWriteReason,
   readOnlyStackGate,
@@ -396,9 +397,16 @@ async function stackMark($: EngineInterface): Promise<StackMark> {
   const wanted = profileArg(await currentScope($))
   const envelope = await runOrthanc($, ['configure', 'list'], undefined, 30_000)
   if (isErrorEnvelope(envelope)) return { name: wanted ?? 'default', readOnly: null }
-  const entries = listItems(envelope, 'profiles')
-  const entry = entries.find(found => asString(found.name) === wanted) ?? entries.find(found => found.is_default === true)
-  // No row for it (a deleted profile): orthanc has nothing to run a write on either.
+  const rows = listItems(envelope, 'profiles')
+  // Match the way orthanc matches a mark: canonical name (RO3). The stack is the one
+  // /profile picked, or the default when nothing was picked, which is what orthanc
+  // picks too. A named stack with no row is not the default stack, so its mark is
+  // unknown and the gate asks instead of borrowing another stack's answer.
+  const named = wanted === undefined ? undefined : rows.find(found => canonicalProfileName(asString(found.name)) === canonicalProfileName(wanted))
+  if (wanted !== undefined && named === undefined) return { name: wanted, readOnly: null }
+  const entry = named ?? rows.find(found => found.is_default === true)
+  // No rows at all: nothing is configured, and an env-credential run has no profile
+  // for a mark to belong to (orthanc skips those, RO6/RO21), so there is no mark.
   if (entry === undefined) return { name: wanted ?? 'default', readOnly: false }
   return { name: asString(entry.name), readOnly: profileReadOnlyMark(entry) }
 }
@@ -545,6 +553,16 @@ async function sessionCwd($: EngineInterface): Promise<string> {
 async function homeDir($: EngineInterface): Promise<string> {
   try {
     return (await $.env.get('HOME'))?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+// Orthanc resolves its config dir from XDG_CONFIG_HOME when the operator set it
+// (profiles.rs config_dir), so the mark-store guard has to resolve it the same way.
+async function xdgConfigHome($: EngineInterface): Promise<string> {
+  try {
+    return (await $.env.get('XDG_CONFIG_HOME'))?.trim() ?? ''
   } catch {
     return ''
   }
@@ -1662,7 +1680,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (rulesReason) return { deny: rulesReason }
   // orthanc keeps the read_only mark in profile-settings.json: an agent that
   // rewrites it clears a mark past both this gate and orthanc's own.
-  const profileStoreReason = profileStoreWriteReason(tool, input, await sessionCwd($), await homeDir($))
+  const profileStoreReason = profileStoreWriteReason(tool, input, await sessionCwd($), await homeDir($), await xdgConfigHome($))
   if (profileStoreReason) return { deny: profileStoreReason }
   if (tool === 'Bash' && typeof input.command === 'string') {
     if (gitPushNamesFoundry(input.command)) return { deny: FOUNDRY_GIT_PUSH_REASON }

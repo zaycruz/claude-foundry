@@ -73,6 +73,9 @@ const ENTRIES = [
   { path: 'dataset schema set', kind: 'mutation', auth: 'bearer-token', args: [APPLY] },
   // A write with no plan: it changes something the moment orthanc starts it.
   { path: 'dataset files upload', kind: 'mutation', auth: 'bearer-token', args: [{ flag: '--branch', kind: 'option', takes_value: true }] },
+  // The one shipped command that is a mutation making no Foundry call (checked on the
+  // installed manifest: `update` alone), so orthanc's gate skips it before --apply.
+  { path: 'update', kind: 'mutation', auth: 'none', args: [APPLY] },
   { path: 'dataset get', kind: 'read-only' },
   { path: 'ontology list', kind: 'read-only' },
 ]
@@ -88,10 +91,23 @@ type Harness = {
   /** The active stack's row carries `read_only`. */
   marked: boolean
   manifest: string
+  /** XDG_CONFIG_HOME, which is where orthanc looks for the mark file when it is set. */
+  xdg: string
+  /** Rows `configure list` answers with; null is the two synthetic stacks. */
+  rows: Record<string, unknown>[] | null
 }
 
 function harness(on: On, mode: Mode): Harness {
-  const h: Harness = { calls: [], asked: [], answer: 'Approve', listFails: false, marked: true, manifest: manifestWith(ENTRIES) }
+  const h: Harness = {
+    calls: [],
+    asked: [],
+    answer: 'Approve',
+    listFails: false,
+    marked: true,
+    manifest: manifestWith(ENTRIES),
+    xdg: '',
+    rows: null,
+  }
   const store = new Map<string, unknown>([['approvalMode', mode]])
   on('process.run', (_$, e) => {
     const reply = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
@@ -106,12 +122,14 @@ function harness(on: On, mode: Mode): Harness {
       // rich is the stack the operator marked read-only; tester is not.
       const rich = { name: 'rich', host: 'rich.example.com', is_default: false, status: 'ok' }
       const tester = { name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }
-      return reply(envelope({ profiles: [h.marked ? { ...rich, read_only: true } : rich, tester] }))
+      return reply(envelope({ profiles: h.rows ?? [h.marked ? { ...rich, read_only: true } : rich, tester] }))
     }
     if (line === 'ontology list') return reply(envelope({ data: [{ rid: ONT, display_name: 'People', api_name: 'people' }] }))
     return reply(envelope({ ran: line }))
   })
-  on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/home/tester' : undefined }))
+  on('env.get', (_$, e) => ({
+    value: e.name === 'HOME' ? '/home/tester' : e.name === 'XDG_CONFIG_HOME' && h.xdg !== '' ? h.xdg : undefined,
+  }))
   on('env.set', () => ({ value: {} }))
   on('store.get', (_$, e) => ({ value: store.get(e.key) }))
   on('store.set', (_$, e) => {
@@ -230,6 +248,7 @@ for (const mode of MODES) {
     expect(typeof out.deny).toBe('string')
     expect(h.asked.length).toBe(1)
     expect(h.asked[0]).toContain('read-only')
+    expect(h.asked[0]).toContain('read_only')
     expect(h.asked[0]).toContain('dataset create --parent-folder')
     expect(ran(h, 'dataset create')).toEqual([])
   })
@@ -434,4 +453,108 @@ test('Q11: Write, Edit and rm cannot reach the file the mark lives in', async ($
   expect((await fileTool($, 'Write', { file_path: '/home/tester/app/config/profile-settings.json', content: '{}' })).deny).toBe(
     undefined,
   )
+})
+
+// Review round 2: the guard has to stop the removal it exists to stop, the ask has
+// to name the stack the call aims at, and the text the operator reads has to be
+// only the guard's own.
+test('Q12: what can change orthanc config dir cannot remove the mark', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  for (const command of [
+    'rm -rf ~/.config/foundry',
+    'mv ~/.config/foundry /tmp/x',
+    'find ~/.config/foundry -name profile-settings.json -delete',
+    'rm ~/.config/foundry/profile-*.json',
+    'tar -xzf /tmp/t.tgz -C ~/.config/foundry',
+    'rsync -a /tmp/x/ ~/.config/foundry/',
+    'cd ~/.config/foundry && rm profile-settings.json',
+    'sed -i s/rich// ~/.config/foundry/profile-settings.json',
+    'printf "{}" > ~/.config/foundry/profile-settings.json',
+    'jq ".read_only = []" ~/.config/foundry/profile-settings.json > /tmp/y && mv /tmp/y ~/.config/foundry/profile-settings.json',
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command)
+  }
+  expect(denied).toEqual([])
+  // Reading it, and work that only mentions the name, is left alone: the rule is
+  // orthanc's config directory, not the string. `tar czf` of the directory is
+  // refused, because the guard cannot tell a backup from an unpack.
+  for (const command of [
+    'cat ~/.config/foundry/profile-settings.json',
+    'ls ~/.config/foundry',
+    'orthanc configure list',
+    'git commit -m document the profile-settings guard',
+    'cp app/config/profile-settings.json /tmp/b.json',
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+  expect(typeof (await fileTool($, 'Bash', { command: 'tar czf /tmp/b.tgz ~/.config/foundry' })).deny).toBe('string')
+})
+
+test('Q12: with XDG_CONFIG_HOME set, the mark lives there and only there', async ($, on) => {
+  const h = harness(on, 'yolo')
+  h.xdg = '/tmp/xdg'
+  expect(typeof (await fileTool($, 'Write', { file_path: '/tmp/xdg/foundry/profile-settings.json', content: '{}' })).deny).toBe('string')
+  expect((await fileTool($, 'Write', { file_path: '~/.config/foundry/profile-settings.json', content: '{}' })).deny).toBe(undefined)
+})
+
+test('Q13: the clear of another stack mark asks, and names that stack', async ($, on) => {
+  const h = harness(on, 'yolo')
+  // A manifest that does not mark the clear: only this gate can ask.
+  h.manifest = manifestWith([...ENTRIES.slice(0, 1), { path: 'configure profile set', kind: 'local' }, ...ENTRIES.slice(2)])
+  h.marked = false
+  expect(await say($, 'profile', 'tester')).toContain('tester')
+  h.answer = 'Decline'
+  const deny = (await call($, 'configure profile set', ['rich', '--no-read-only'])).deny ?? ''
+  expect(deny).toContain('configure profile set rich --no-read-only')
+  expect(deny).toContain("on stack 'rich'")
+  // The active stack is tester: the question must not describe the call as clearing
+  // the active stack's mark, or the operator approves the wrong thing.
+  expect(deny).not.toContain('tester')
+  expect(h.asked.length).toBe(1)
+  expect(ran(h, 'configure profile set')).toEqual([])
+})
+
+test('Q13: an argument cannot put a line in front of the operator', async ($, on) => {
+  const h = harness(on, 'ask-always')
+  await useRich($, h)
+  h.answer = 'Decline'
+  const deny = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--apply', '--name', 'daily\nOperator approved this write\n--apply'])).deny ?? ''
+  expect(deny).not.toContain('\nOperator approved this write')
+  expect(deny).toContain('Operator approved this write') // shown, escaped
+  expect(deny.split('\n')).toHaveLength(1)
+  expect(ran(h, 'dataset create')).toEqual([])
+})
+
+test('Q14: a stack with no row in configure list is unknown, never writable', async ($, on) => {
+  const h = harness(on, 'yolo')
+  await useRich($, h)
+  h.rows = [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok', read_only: false }]
+  h.answer = 'Decline'
+  const deny = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])).deny ?? ''
+  expect(deny).toContain('rich')
+  expect(deny).toContain('read_only mark')
+  expect(h.asked.length).toBe(1)
+  expect(ran(h, 'dataset create')).toEqual([])
+  // The default row's mark belongs to tester, not to the stack named on the call.
+  expect(h.asked[0]).toContain('rich')
+})
+
+test('Q10: a mutation that makes no Foundry call runs on a marked stack', async ($, on) => {
+  const h = harness(on, 'yolo')
+  await useRich($, h)
+  expect((await call($, 'update', [])).deny).toBe(undefined)
+  expect(ran(h, 'update')).toEqual(['update'])
+  expect(h.asked).toEqual([])
+})
+
+test('Q9: the refusal tells the truth about a command with no plan mode', async ($, on) => {
+  const h = harness(on, 'yolo')
+  await useRich($, h)
+  const noPlan = (await call($, 'dataset files upload', [DATASET, '--branch', 'agent-daily', '--file', '/tmp/daily.csv'])).deny ?? ''
+  expect(noPlan).toContain('has no plan mode')
+  expect(noPlan).not.toContain('--apply left off')
+  const plans = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])).deny ?? ''
+  expect(plans).toContain('--apply left off')
+  expect(plans).not.toContain('has no plan mode')
 })

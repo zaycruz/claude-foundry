@@ -139,18 +139,25 @@ marked read-only (orthanc v0.7.8: `orthanc configure profile set <name>
 approval mode: `orthanc_cli` reads the profile's `read_only` mark from
 `configure list` and refuses before the approval ladder and before orthanc
 starts, naming the exact call and the mark. What does run is what orthanc's own
-gate runs: reads, plans (the same mutation with `--apply` left off, or set to
-`false`) and local commands, so an agent can still preview a change on such a
-stack. A mutation whose manifest entry has no `--apply` flag writes the moment
-orthanc starts it, so it is refused. `configure profile set <name>
---no-read-only`, which clears the mark, asks the operator in every mode, `yolo`
-included, because the mark is theirs — and `Write`, `Edit` and `rm` on orthanc's
-`~/.config/foundry/profile-settings.json`, the file the mark lives in, are
-refused for the same reason. A `configure list` that gives no answer is not read as "writable": the
-write is put to the operator and never runs blind, while reads and plans are not
-held up. `/profile` and `orthanc_help` say which stacks are read-only. Outside
-FDE mode `/namespace` steers discovery only; the gate does not deny writes
-outside it. FDE mode holds a session to it (below).
+gate runs: reads, plans and local commands, so an agent can still preview a
+change on such a stack. A plan is the same call with `--apply` left off: it is a
+plain flag, and leaving it off is how orthanc asks for a plan. Use that spelling
+in FDE mode too, because there `--apply=false` counts as an apply and will not
+run as a preview. A mutation whose manifest entry has no `--apply` flag writes the
+moment orthanc starts it, so it is refused, and the refusal says so instead of
+telling the agent to plan. `configure profile set <name> --no-read-only`, which
+clears the mark, asks the operator in every mode, `yolo` included, whoever the
+mark is on: the question names the stack the call names. The plugin writes
+nothing into orthanc's config directory (`~/.config/foundry`, or
+`$XDG_CONFIG_HOME/foundry`), where `profile-settings.json` keeps the mark: file
+writes there are refused, as is any shell command that names the directory and
+can change files (`rm -rf`, `mv`, `find -delete`, a glob, an unpacked tar) —
+removing that file gets past both gates, so reading it is fine and touching it
+is the operator's. A stack `configure list` says nothing about is unknown, not
+writable: the write goes to the operator and never runs blind, while reads and
+plans are not held up. `/profile` and `orthanc_help` say which stacks are
+read-only. Outside FDE mode `/namespace` steers discovery only; the gate does not
+deny writes outside it. FDE mode holds a session to it (below).
 
 ## FDE mode
 
