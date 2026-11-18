@@ -246,7 +246,9 @@ test('W19 W21: a command that sets its wait with --timeout-seconds gets that wai
   // The last value wins, as orthanc reads it.
   expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--timeout-seconds', '600']))).toBe(600 + 5 + MARGIN_S)
   // A raised --poll-interval is the overshoot orthanc can run past its deadline.
-  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '30']))).toBe(60 + 30 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '600', '--poll-interval', '30']))).toBe(600 + 30 + MARGIN_S)
+  // A short wait still gets the 300 s floor: 60 + 30 + 120 is under it.
+  expect(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait', '--timeout-seconds', '60', '--poll-interval', '30'])).toBe(CLI_TIMEOUT_FLOOR_MS)
   // W21: not waiting keeps the floor.
   expect(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1'])).toBe(CLI_TIMEOUT_FLOOR_MS)
   expect(cliTimeoutMs(DEPLOYMENT_GET, ['ri.d.1', '--wait=false'])).toBe(CLI_TIMEOUT_FLOOR_MS)
@@ -551,7 +553,8 @@ test('W19 W20: through the tool, a --timeout-seconds wait runs past the floor an
   const running = call($, 'models deployment get', ['ri.d.1', '--wait', '--timeout-seconds', '300'])
   // 300 + 5 + 120 = 425 s: past the 300 s floor, and stopped there.
   expect(await after(clock, running, 301_000)).toBe(false)
-  expect(await after(clock, running, 123_000)).toBe(true)
+  expect(await after(clock, running, 123_000)).toBe(false)
+  expect(await after(clock, running, 2_000)).toBe(true)
   const error = parsed(await running).errors[0]!
   expect({ reason: error.reason, timer: error.timeout_seconds }).toEqual({ reason: 'timeout', timer: 425 })
   expect(h.runs).toEqual([{ line: 'models deployment get ri.d.1 --wait --timeout-seconds 300', timeoutMs: 425_000 }])
