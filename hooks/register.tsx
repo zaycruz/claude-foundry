@@ -103,13 +103,16 @@ import {
   ORTHANC_HELP,
   parseApprovalMode,
   profileReadOnlyMark,
+  profileStoreWriteReason,
   readOnlyStackGate,
+  clearsReadOnlyMark,
   resolveOrthancCommand,
   rulesWriteReason,
   branchesIn,
   STORED_BRANCH_RUNS,
   storedBranchReads,
   type StackMark,
+  wouldWriteOnStack,
 } from './policy'
 import {
   domainPatterns,
@@ -311,7 +314,7 @@ async function renderHelp($: EngineInterface, input: { group?: string; command?:
         ? []
         : [
             `Read-only stacks: ${marked.map(profile => profile.name).join(', ')} (orthanc configure list: read_only true).`,
-            'orthanc_cli refuses every write on them before it asks anyone; only the operator clears the mark.',
+            'orthanc_cli refuses every write on them before it asks anyone; reads and plans (the same call with --apply left off) run. Only the operator clears the mark.',
             '',
           ]
     return withNotes([...stacks, renderListing(commands, input)].join('\n'))
@@ -1268,7 +1271,9 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     if (profile === undefined) return 'No stack selected.'
     const next = await activateProfile($, profile)
     return `Foundry stack: ${next.profile}${next.ontology ? `, ontology ${next.ontology.name}` : ''}.${
-      profile.readOnly ? ' It is marked read-only (orthanc configure list: read_only true): orthanc_cli runs reads only; no write runs, in any approval mode.' : ''
+      profile.readOnly
+        ? ' It is marked read-only (orthanc configure list: read_only true): orthanc_cli runs reads, plans (a mutation with --apply left off) and local commands; no write runs, in any approval mode.'
+        : ''
     }`
   }
   if (picker.kind === 'ontology') {
@@ -1655,6 +1660,10 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (rootReason) return { deny: rootReason }
   const rulesReason = rulesWriteReason(tool, input, await sessionCwd($), await homeDir($))
   if (rulesReason) return { deny: rulesReason }
+  // orthanc keeps the read_only mark in profile-settings.json: an agent that
+  // rewrites it clears a mark past both this gate and orthanc's own.
+  const profileStoreReason = profileStoreWriteReason(tool, input, await sessionCwd($), await homeDir($))
+  if (profileStoreReason) return { deny: profileStoreReason }
   if (tool === 'Bash' && typeof input.command === 'string') {
     if (gitPushNamesFoundry(input.command)) return { deny: FOUNDRY_GIT_PUSH_REASON }
     const directories = gitPushDirectories(input.command)
@@ -1708,10 +1717,14 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   // --read-only`, v0.7.8) runs no write. The mark is read here, before the ladder
   // and before orthanc starts, so the refusal names the call and asks no one; a
   // mark that cannot be read asks instead, and the clear of the mark is the
-  // operator's. Reads run: they are what a read-only stack is for.
+  // operator's. What runs is what orthanc's own gate runs: reads, plans (the same
+  // mutation with --apply left off) and local commands.
   if (tool === ORTHANC_CLI && manifest.length > 0) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
-    if (resolved.path !== '' && classifyOrthancCommand(resolved.path, manifest) === 'mutation') {
+    // The clear of the mark is a local command, so wouldWriteOnStack is false for
+    // it; the gate still has to see it, or a manifest without the shipped
+    // operator_approval mark would clear the operator's mark unasked.
+    if (resolved.path !== '' && (wouldWriteOnStack(resolved.path, resolved.args, manifest) || clearsReadOnlyMark(resolved.path, resolved.args))) {
       const gate = readOnlyStackGate(await stackMark($), resolved.path, resolved.args, manifest)
       if (gate !== null) {
         note.foundry = true

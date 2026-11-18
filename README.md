@@ -138,14 +138,19 @@ marked read-only (orthanc v0.7.8: `orthanc configure profile set <name>
 --read-only`, also `configure profile create --read-only`) runs no write in any
 approval mode: `orthanc_cli` reads the profile's `read_only` mark from
 `configure list` and refuses before the approval ladder and before orthanc
-starts, naming the exact call and the mark. Reads run — that is what such a
-stack is for. `configure profile set <name> --no-read-only`, which clears the
-mark, asks the operator in every mode, `yolo` included, because the mark is
-theirs. A `configure list` that gives no answer is not read as "writable": the
-write is put to the operator and never runs blind. `/profile` and `orthanc_help`
-say which stacks are read-only. Outside FDE mode `/namespace` steers discovery
-only; the gate does not deny writes outside it. FDE mode holds a session to it
-(below).
+starts, naming the exact call and the mark. What does run is what orthanc's own
+gate runs: reads, plans (the same mutation with `--apply` left off, or set to
+`false`) and local commands, so an agent can still preview a change on such a
+stack. A mutation whose manifest entry has no `--apply` flag writes the moment
+orthanc starts it, so it is refused. `configure profile set <name>
+--no-read-only`, which clears the mark, asks the operator in every mode, `yolo`
+included, because the mark is theirs — and `Write`, `Edit` and `rm` on orthanc's
+`~/.config/foundry/profile-settings.json`, the file the mark lives in, are
+refused for the same reason. A `configure list` that gives no answer is not read as "writable": the
+write is put to the operator and never runs blind, while reads and plans are not
+held up. `/profile` and `orthanc_help` say which stacks are read-only. Outside
+FDE mode `/namespace` steers discovery only; the gate does not deny writes
+outside it. FDE mode holds a session to it (below).
 
 ## FDE mode
 

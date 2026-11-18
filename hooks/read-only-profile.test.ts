@@ -24,6 +24,16 @@
 //     manifest marks it.
 //  Q7 orthanc_help's first lines and /profile say nothing about which stacks are
 //     read-only, so the agent learns it by being refused.
+//  Q9 The plugin is stricter than orthanc: a plan (the same mutation with
+//     --apply left off, or set false) is refused on a marked stack, though
+//     orthanc runs "reads, plans and local commands", so an agent cannot preview
+//     a change on a customer stack. A mutation with no --apply flag has no plan
+//     to leave off, so it stays a write (orthanc reads that as no flag, RO14).
+//  Q10 A local command (marking another stack, reading the aliases) is refused
+//     too, though orthanc's gate skips kind local, so the operator's agent cannot
+//     even add a mark while the active stack is read-only.
+//  Q11 Nothing guards profile-settings.json, where orthanc keeps the mark, so a
+//     Write, Edit or rm clears a mark past both the plugin gate and orthanc's.
 //
 // Synthetic stacks only.
 import type { On } from 'claude-code'
@@ -48,13 +58,21 @@ const error = JSON.stringify({
   artifacts: [],
   pagination: null,
 })
+const APPLY = { flag: '--apply', kind: 'option', takes_value: false }
 const ENTRIES = [
   { path: 'configure list', kind: 'local' },
-  // The shipped shape of the clear (orthanc #SRC-163): operator_approval, scope "always".
-  { path: 'configure profile set', kind: 'local', operator_approval: 'always', operator_approval_scope: 'always' },
+  // The shipped shape of the clear (orthanc #SRC-163, src/manifest.rs:88): only
+  // --no-read-only is operator_approval, scope "always"; --read-only is not.
+  { path: 'configure profile set', kind: 'local', operator_approval: { when_all_flags: ['--no-read-only'] }, operator_approval_scope: 'always' },
   { path: 'configure profile create', kind: 'local' },
-  { path: 'dataset create', kind: 'mutation' },
-  { path: 'dataset schema set', kind: 'mutation' },
+  { path: 'alias list', kind: 'local' },
+  // Shapes copied from `orthanc agent-manifest`: every mutation declares --apply
+  // (checked on the shipped 0.7.7 manifest: 205 mutations, 0 without it), so a call
+  // with the flag left off is a plan, exactly as orthanc's own gate reads it.
+  { path: 'dataset create', kind: 'mutation', auth: 'bearer-token', args: [APPLY] },
+  { path: 'dataset schema set', kind: 'mutation', auth: 'bearer-token', args: [APPLY] },
+  // A write with no plan: it changes something the moment orthanc starts it.
+  { path: 'dataset files upload', kind: 'mutation', auth: 'bearer-token', args: [{ flag: '--branch', kind: 'option', takes_value: true }] },
   { path: 'dataset get', kind: 'read-only' },
   { path: 'ontology list', kind: 'read-only' },
 ]
@@ -299,4 +317,121 @@ test('Q8: /fde on a stack marked read-only names the refused call and creates no
   expect(said).toContain('FDE mode stays off')
   expect(h.calls.some(call => call.startsWith('global-branch create'))).toBe(false)
   expect(h.asked).toEqual([])
+})
+
+// Orthanc's own gate runs "reads, plans and local commands" (read_only_gate.rs:
+// a would-be write is a mutation whose --apply is not Some(false); a command
+// with no --apply flag writes the moment it starts). The plugin must not be
+// stricter: an agent on a customer stack still has to be able to preview.
+const PLANS: [string, string[]][] = [
+  // The flag left off: orthanc prints the request and changes nothing.
+  ['dataset create', ['--parent-folder', FOLDER, '--name', 'daily']],
+  ['dataset schema set', [DATASET, '--branch', 'agent-daily', '--schema-json', '{"fields":[]}', '--apply=false']],
+  ['dataset schema set', [DATASET, '--branch', 'agent-daily', '--schema-json', '{"fields":[]}', '--APPLY=NO']],
+]
+const APPLIED: [string, string[]][] = [
+  ['dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply']],
+  ['dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply=true']],
+  ['dataset schema set', [DATASET, '--branch', 'agent-daily', '--schema-json', '{"fields":[]}', '--apply']],
+]
+
+for (const mode of MODES) {
+  test(`Q9: in ${mode} mode a plan runs on a stack marked read-only`, async ($, on) => {
+    const h = harness(on, mode)
+    await useRich($, h)
+    for (const [command, args] of PLANS) {
+      const before = ran(h, command).length
+      const out = await call($, command, args)
+      expect({ command, args, deny: out.deny }).toEqual({ command, args, deny: undefined })
+      // One orthanc start for the plan, no second attempt behind a refusal.
+      expect({ command, args, starts: ran(h, command).length - before }).toEqual({ command, args, starts: 1 })
+    }
+    // What the mark says about a plan: nothing. ask-always puts every mutation to
+    // the operator, and auto asks where its own rules say so — both are the
+    // ladder's business before the mark existed. The mark must not add a refusal
+    // or a question of its own, so an agent can still preview a change.
+    expect(h.asked.join('\n')).not.toContain('read_only')
+    if (mode === 'yolo') expect(h.asked).toEqual([])
+  })
+}
+
+for (const mode of MODES) {
+  test(`Q9: in ${mode} mode the same call with --apply set is refused, however it is spelled`, async ($, on) => {
+    const h = harness(on, mode)
+    await useRich($, h)
+    for (const [command, args] of APPLIED) {
+      const deny = (await call($, command, args)).deny ?? ''
+      expect({ command, args, denied: deny !== '' }).toEqual({ command, args, denied: true })
+      expect(deny).toContain('Reads and plans run')
+      expect(ran(h, command)).toEqual([])
+    }
+    expect(h.asked).toEqual([])
+  })
+}
+
+test('Q9: a write with no plan to leave off is refused, not read as a plan', async ($, on) => {
+  const h = harness(on, 'yolo')
+  await useRich($, h)
+  const args = [DATASET, '--branch', 'agent-daily', '--file', '/tmp/daily.csv']
+  const deny = (await call($, 'dataset files upload', args)).deny ?? ''
+  expect(deny).toContain('dataset files upload')
+  expect(deny).toContain('read_only')
+  expect(ran(h, 'dataset files upload')).toEqual([])
+  expect(h.asked).toEqual([])
+})
+
+for (const mode of MODES) {
+  test(`Q10: in ${mode} mode local commands run on a stack marked read-only`, async ($, on) => {
+    const h = harness(on, mode)
+    await useRich($, h)
+    // Marking another stack, and reading the local config: orthanc runs these on a
+    // marked stack (its gate skips kind local), so the plugin runs them too.
+    for (const [command, args] of [
+      ['configure profile set', ['tester', '--read-only']],
+      ['alias list', []],
+    ] as [string, string[]][]) {
+      const before = ran(h, command).length
+      const out = await call($, command, args)
+      expect({ command, args, deny: out.deny }).toEqual({ command, args, deny: undefined })
+      expect({ command, starts: ran(h, command).length - before }).toEqual({ command, starts: 1 })
+    }
+    // No ask comes from the read-only mark. ask-always still puts these to the
+    // operator, as it did before the mark existed, and the shipped manifest marks
+    // the clear operator_approval; Q6 covers that call.
+    expect(h.asked.join('\n')).not.toContain('read_only')
+    if (mode === 'yolo') expect(h.asked).toEqual([])
+  })
+}
+
+// Orthanc keeps the mark in profile-settings.json in its config dir,
+// $XDG_CONFIG_HOME/foundry or ~/.config/foundry (src/profile_settings.rs,
+// profiles.rs config_dir). Rewriting it from the agent side clears a mark past
+// the plugin gate and orthanc's own.
+const MARK_FILE = '~/.config/foundry/profile-settings.json'
+const fileTool = ($: Engine, tool: string, input: Record<string, unknown> = {}) =>
+  ($.tool.call({ tool, ...input } as never) as Promise<{ deny?: string }>)
+
+test('Q11: Write, Edit and rm cannot reach the file the mark lives in', async ($, on) => {
+  harness(on, 'yolo')
+  for (const [tool, input] of [
+    ['Write', { file_path: MARK_FILE, content: '{"read_only":[]}' }],
+    ['Edit', { file_path: '/home/tester/.config/foundry/profile-settings.json', old_string: 'rich', new_string: '' }],
+    ['Bash', { command: `rm -f ${MARK_FILE}` }],
+    ['Bash', { command: `echo '{"read_only":[]}' > /home/tester/.config/foundry/profile-settings.json` }],
+    // The same command from inside the config dir, where the path names no directory.
+    ['Bash', { command: 'cd ~/.config/foundry && rm profile-settings.json' }],
+  ] as [string, Record<string, unknown>[] | Record<string, unknown>][]) {
+    const deny = (await fileTool($, tool, input as Record<string, unknown>)).deny ?? ''
+    expect({ tool, denied: deny !== '' }).toEqual({ tool, denied: true })
+    expect(deny).toContain('profile-settings.json')
+    expect(deny).toContain('configure profile set')
+  }
+  // Reading it, writing another file with that name, and writing anywhere else
+  // are left alone: the rule is orthanc's config file, not the file name.
+  expect((await fileTool($, 'Read', { file_path: MARK_FILE })).deny).toBe(undefined)
+  expect((await fileTool($, 'Bash', { command: `cat ${MARK_FILE}` })).deny).toBe(undefined)
+  expect((await fileTool($, 'Write', { file_path: '/home/tester/notes.md', content: 'x' })).deny).toBe(undefined)
+  expect((await fileTool($, 'Write', { file_path: '/home/tester/app/config/profile-settings.json', content: '{}' })).deny).toBe(
+    undefined,
+  )
 })
