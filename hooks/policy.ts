@@ -498,9 +498,11 @@ function releaseTagCall(args: readonly string[]): { release: string; releaseOnWo
 // A schedule's build action is a JSON positional that names its branch inside.
 const ACTION_BRANCH_WRITES = new Set(['orchestration schedules create', 'orchestration schedules replace'])
 const ACTION_VALUE_FLAGS = new Set(['--trigger', '--name', '--description'])
-// These start builds on the branch stored in a schedule or an import, so the
-// guard reads it first (storedBranchReads) and judges what it finds.
-export const STORED_BRANCH_RUNS = new Set(['orchestration schedules run', 'orchestration schedules unpause', 'connectivity import run'])
+// These write on a branch stored in Foundry: a schedule's or an import's builds,
+// or the branch a dataset transaction was opened on. The guard reads it first
+// (storedBranchReads, storedBranchesFrom) and judges what it finds.
+const TRANSACTION_CLOSES = new Set(['dataset transactions commit', 'dataset transactions abort'])
+export const STORED_BRANCH_RUNS = new Set(['orchestration schedules run', 'orchestration schedules unpause', 'connectivity import run', ...TRANSACTION_CLOSES])
 const BRANCH_KEYS = new Set(['branch', 'branchname', 'branch_name'])
 
 /** Every string under a branch key (branchName, branch, branch_name), at any depth. */
@@ -512,8 +514,24 @@ export function branchesIn(value: unknown): string[] {
   )
 }
 
-/** The orthanc reads (argv) that return the stored schedule or import a run starts. */
+/** A transaction commit's or abort's dataset and transaction, or null unless the
+ * args hold exactly one RID of each, as the two positionals in that order: a
+ * second RID anywhere (behind a flag, after `=`) makes what orthanc closes unplain. */
+function transactionTarget(args: readonly string[]): { dataset: string; transaction: string } | null {
+  const rids = args.flatMap(arg => unquote(arg).split('=')).map(word => unquote(word)).filter(word => word.startsWith('ri.'))
+  const [dataset, transaction, ...rest] = positionals(args)
+  if (rids.length !== 2 || rest.length > 0 || dataset === undefined || transaction === undefined) return null
+  return dataset === rids[0] && transaction === rids[1] && dataset.startsWith('ri.foundry.main.dataset.') && transaction.startsWith('ri.foundry.main.transaction.')
+    ? { dataset, transaction }
+    : null
+}
+
+/** The orthanc reads (argv) that return the stored schedule, import or dataset branches a call writes on. */
 export function storedBranchReads(command: string, args: readonly string[]): string[][] {
+  if (TRANSACTION_CLOSES.has(command)) {
+    const target = transactionTarget(args)
+    return target === null ? [] : [['dataset', 'branches', 'list', target.dataset]]
+  }
   const rid = positionals(args).find(arg => arg.startsWith('ri.'))
   if (rid === undefined) return []
   if (command === 'connectivity import run') {
@@ -524,6 +542,22 @@ export function storedBranchReads(command: string, args: readonly string[]): str
     return kinds.map(each => ['connectivity', 'import', `get-${each}`, rid, ...extra])
   }
   return [['orchestration', 'schedules', 'get', rid]]
+}
+
+/** The branches one stored read names for this call. For a transaction commit or
+ * abort: the branches whose latest transaction (an open one is the latest) is
+ * this one; none found, or a list with another page, reads as main. */
+export function storedBranchesFrom(command: string, args: readonly string[], data: unknown): string[] {
+  if (!TRANSACTION_CLOSES.has(command)) return branchesIn(data)
+  const transaction = transactionTarget(args)?.transaction
+  const listing = typeof data === 'object' && data !== null ? (data as { branches?: unknown; next_page_token?: unknown }) : {}
+  const rows = listing.branches
+  if (transaction === undefined || !Array.isArray(rows) || (listing.next_page_token != null && listing.next_page_token !== '')) return []
+  return rows.flatMap(row => {
+    if (typeof row !== 'object' || row === null) return []
+    const { name, transaction_rid: latest } = row as { name?: unknown; transaction_rid?: unknown }
+    return typeof name === 'string' && latest === transaction ? [name] : []
+  })
 }
 
 /** A schedule action's branches, or why it is refused. */

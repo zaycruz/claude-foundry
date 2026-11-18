@@ -104,7 +104,7 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
-  branchesIn,
+  storedBranchesFrom,
   STORED_BRANCH_RUNS,
   storedBranchReads,
 } from './policy'
@@ -1576,8 +1576,8 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
   }
 }
 
-// A run of a stored schedule or import builds the branch stored in it: read it
-// first. Null when no read answered (the ladder then asks); undefined when the
+// A run of a stored schedule or import builds the branch stored in it, and a
+// transaction commit or abort writes the branch it was opened on: read it first. Null when no read answered (the ladder then asks); undefined when the
 // call is not such a run.
 async function storedBranches($: EngineInterface, tool: string, input: Record<string, unknown>, manifest: readonly ManifestCommand[]): Promise<string[] | null | undefined> {
   if (tool !== ORTHANC_CLI) return undefined
@@ -1590,7 +1590,7 @@ async function storedBranches($: EngineInterface, tool: string, input: Record<st
     const envelope = await runOrthanc($, argv, profile, 60_000).catch(() => null)
     if (envelope === null || isErrorEnvelope(envelope)) continue
     answered = true
-    found.push(...branchesIn(envelope.data))
+    found.push(...storedBranchesFrom(resolved.path, resolved.args, envelope.data))
   }
   return answered ? found : null
 }
