@@ -22,7 +22,14 @@ says so instead of falling back to REST.
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
   judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
   delete, `--force`) and release tags ask, protected branches ask, and a call
-  repeated three times is blocked. In `yolo` only a write on main asks:
+  repeated three times is blocked. An applied outbound, credential or access
+  write (webhook create or update, `connectivity source secret set`, egress,
+  `rest-source create`, `dev-console scope add`, `admin` writes, role, org and
+  marking changes) takes no branch and changes the live enrollment, so it asks
+  in every mode, `yolo` too; a plan asks no one. A manifest entry marked
+  `operator_approval` asks the same way, and a built-in list covers an Orthanc
+  that does not mark these yet. In `yolo` only a write on main, or one of
+  those, asks:
   deletes and `--force` writes run at once, and the loop guard is off. A
   release tag with no `--branch <global branch RID>` is a release on main and
   asks in `yolo` too. A write that Orthanc's agent manifest marks

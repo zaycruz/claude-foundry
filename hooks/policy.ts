@@ -86,6 +86,44 @@ const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-ups
 // Writes that change main and take no branch: each is a write on main, so it
 // asks the operator in every mode, yolo too.
 const MAIN_WRITES = new Set(['workshop module publish'])
+
+// Approval classes: writes that take no branch and change the live enrollment,
+// so they are writes on main in all but name. Each asks the operator in every
+// mode, yolo too, when it is applied; a plan (no --apply) asks no one.
+//  outbound    Foundry calls an external system or sends data out
+//  credential  a secret, certificate, OAuth client secret or token
+//  access      egress, export settings, CORS, ingress, client installations, role grants
+// The manifest is the source: a write it marks `operator_approval` asks in every
+// mode (see operatorApprovalQuestion), and a renamed command keeps that. The
+// tables below are the floor for an Orthanc whose manifest marks none of these
+// yet (0.7.7). They add to the manifest, never replace it, and name only
+// commands Orthanc has. `global-branch roles set` is not here: the manifest
+// marks it, and yolo may skip that ask when its scope shows a work branch.
+export const APPROVAL_CLASSES = ['outbound', 'credential', 'access'] as const
+export type ApprovalClass = (typeof APPROVAL_CLASSES)[number] | (string & {})
+const floor = (scope: ApprovalClass, paths: string[]) => paths.map(path => [path, scope] as [string, ApprovalClass])
+const APPROVAL_FLOOR: ReadonlyMap<string, ApprovalClass> = new Map<string, ApprovalClass>([
+  ...floor('outbound', ['connectivity webhook create', 'connectivity webhook update']),
+  ...floor('credential', ['connectivity source secret set']),
+  ...floor('access', [
+    'connectivity egress ensure', 'connectivity rest-source create', 'connectivity source create-s3',
+    'dev-console scope add', 'dev-console scope remove', 'dev-console scope update',
+    'resource-role grant', 'resource-role revoke',
+    'project add-orgs', 'project remove-orgs', 'resource add-markings', 'resource remove-markings',
+    'marketplace installation create', 'marketplace installation upgrade', 'marketplace installation uninstall',
+  ]),
+])
+const APPROVAL_PREFIXES: readonly [string, ApprovalClass][] = [['admin ', 'access']]
+const APPROVAL_MEANING: Record<string, string> = {
+  outbound: 'Foundry calls an external system or sends data out',
+  credential: 'it sets, rotates or revokes a secret, certificate or token',
+  access: 'it changes who or what can reach Foundry',
+}
+
+/** The approval class of a write from the floor table. Null: none. */
+export function approvalClass(path: string): ApprovalClass | null {
+  return APPROVAL_FLOOR.get(path) ?? APPROVAL_PREFIXES.find(([prefix]) => path.startsWith(prefix))?.[1] ?? null
+}
 // Writes that name their branch as a positional. Any positional naming main
 // counts (a flag the guard does not know can shift the positions), so these
 // ask for main in every mode; over-reading only asks more.
@@ -138,6 +176,8 @@ export type GateClassification = {
   proposedName?: string
   /** The question to put to the operator for a release tag apply. */
   release?: string
+  /** An applied write of an approval class (outbound, credential, access): it asks in every mode. */
+  approval?: ApprovalClass
   /** True when the tag is linked to one global branch RID: yolo skips the release ask. */
   releaseOnWorkBranch?: true
   /** The question to put to the operator for a write the manifest marks operator_approval. */
@@ -1195,7 +1235,12 @@ export function classifyCall(
     if (STACK_COMMANDS.has(resolved.path)) {
       return unreadableCall(input, workingBranch, `'${resolved.path}' changes orthanc's default stack, which a later session starts on. The stack is the operator's: they switch it with /profile.`)
     }
-    return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
+    const classified = orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
+    const approval = approvalClass(resolved.path)
+    // Only an applied write asks: a plan changes nothing.
+    return approval !== null && classified.kind === 'mutation' && !classified.error && argsNameFlag(resolved.args, ['--apply'])
+      ? { ...classified, approval }
+      : classified
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {
@@ -1243,6 +1288,14 @@ export function ladderDecision(
   }
   const command = classification.command ?? '(foundry mcp write)'
   const note = verdict ? ` ${verdict.reason}` : ''
+  // An outbound, credential or access write changes the live enrollment and takes no branch:
+  // it asks in every mode, yolo too, and is refused when no one can be asked.
+  if (classification.approval) {
+    return {
+      outcome: 'ask',
+      reason: `'${command}' is ${/^[aeiou]/.test(classification.approval) ? 'an' : 'a'} ${classification.approval} write (${APPROVAL_MEANING[classification.approval] ?? 'the manifest marks it for approval'}). It changes the live enrollment, takes no branch, and asks in every mode, ${mode} too. It runs only if the operator approves; run it without --apply to see the plan.`,
+    }
+  }
   // Yolo asks only for a write naming main: no write lands on main without the operator.
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
@@ -1274,8 +1327,9 @@ export function modeGuidance(mode: ApprovalMode): string {
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
+    'So does an applied outbound, credential or access write (a webhook, a source secret, egress, a scope or role grant): it takes no branch and changes the live enrollment. A plan asks no one. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes and --force writes run at once, ' +
+      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main and an outbound, credential or access write: deletes and --force writes run at once, ' +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
