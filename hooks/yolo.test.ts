@@ -85,6 +85,15 @@
 //      cannot read, is refused; naming main asks). A run or unpause reads the
 //      stored branch first: main, none, or a read that fails asks; a work
 //      branch runs in yolo with no ask.
+//  Y21 A commit or abort of a dataset transaction names no branch: the branch is
+//      the one the transaction was opened on, stored in Foundry. One opened on
+//      master or main ran in yolo, allow-edits and auto with no ask (0.6.0). The
+//      guard reads `dataset branches list <dataset>` first; each branch row
+//      carries its latest transaction, which an open one is. A transaction that
+//      is the latest of master or main, of no branch, of a work branch and of
+//      master at once, a commit with no transaction RID, or a read that fails
+//      asks; no one to ask, it is refused. One that is the latest of a work
+//      branch only runs in yolo with no ask.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
@@ -112,6 +121,14 @@ const STORED: Record<string, { kind?: 'file' | 'table'; data: unknown }> = {
   [IMPORT(1)]: { kind: 'file', data: { rid: IMPORT(1), datasetRid: 'ri.foundry.main.dataset.x', branchName: 'master' } },
   [IMPORT(2)]: { kind: 'table', data: { rid: IMPORT(2), datasetRid: 'ri.foundry.main.dataset.x' } },
   [IMPORT(3)]: { kind: 'table', data: { rid: IMPORT(3), datasetRid: 'ri.foundry.main.dataset.x', branchName: 'agent-orders' } },
+}
+const DS = (n: number) => `ri.foundry.main.dataset.d0000000-0000-4000-8000-00000000000${n}`
+const TXN = (n: number) => `ri.foundry.main.transaction.d0000000-0000-4000-8000-00000000000${n}`
+// What `dataset branches list <dataset>` answers: each branch with its latest transaction.
+const DATASET_BRANCHES: Record<string, { name: string; transaction_rid?: string }[]> = {
+  [DS(1)]: [{ name: 'master', transaction_rid: TXN(1) }, { name: 'agent-orders', transaction_rid: TXN(2) }, { name: 'agent-empty' }],
+  [DS(3)]: [{ name: 'agent-copy', transaction_rid: TXN(4) }, { name: 'master', transaction_rid: TXN(4) }],
+  [DS(4)]: [{ name: 'main', transaction_rid: TXN(5) }],
 }
 type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
 
@@ -147,6 +164,9 @@ const COMMANDS: [string, string][] = [
   ['branch-protection repo unprotect', 'mutation'],
   ['global-branch deploy', 'mutation'],
   ['repository pull-request merge', 'mutation'],
+  ['dataset branches list', 'read-only'],
+  ['dataset transactions commit', 'mutation'],
+  ['dataset transactions abort', 'mutation'],
   ['orchestration schedules create', 'mutation'],
   ['orchestration schedules replace', 'mutation'],
   ['orchestration schedules run', 'mutation'],
@@ -206,6 +226,11 @@ function harness(on: On, mode: Mode = 'yolo'): Harness {
       if (line.startsWith('connectivity import get-table') && stored.kind !== 'table') return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'not a table import' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       if (line.startsWith('connectivity import get-file') && stored.kind !== 'file') return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'not a file import' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       return reply(envelope(stored.data))
+    }
+    if (line.startsWith('dataset branches list ')) {
+      const branches = DATASET_BRANCHES[words[3] ?? '']
+      if (branches === undefined) return { value: { exitCode: 1, stdout: JSON.stringify({ schema_version: 'foundry-agent-v1', data: null, errors: [{ code: 'not_found', message: 'no such dataset' }], meta: {}, warnings: [], artifacts: [], pagination: null }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+      return reply(envelope({ branches, next_page_token: null }))
     }
     return reply(envelope({ ran: line }))
   })
@@ -774,4 +799,45 @@ test('Y20: in yolo a schedule or import on a work branch runs with no ask', asyn
   expect(h.asked).toEqual([])
   expect(ran(h, 'orchestration schedules run').length).toBe(1)
   expect(ran(h, 'connectivity import run').length).toBe(1)
+})
+
+// Y21: a transaction commit or abort lands on the branch the transaction was opened on.
+const TXN_ON_MAIN: [string, string[]][] = [
+  ['dataset transactions commit', [DS(1), TXN(1), '--apply']],
+  ['dataset transactions abort', [DS(1), TXN(1), '--apply']],
+  ['dataset transactions commit', [DS(4), TXN(5), '--apply']],
+  // On no branch the guard can see: it may be main.
+  ['dataset transactions commit', [DS(1), TXN(9), '--apply']],
+  // The latest of a work branch and of master at once.
+  ['dataset transactions commit', [DS(3), TXN(4), '--apply']],
+  // The read fails.
+  ['dataset transactions commit', [DS(2), TXN(1), '--apply']],
+  // No transaction RID to look up.
+  ['dataset transactions commit', [DS(1), '--apply']],
+]
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y21: in ${mode} mode a transaction commit or abort that may land on main asks; no one to ask, it is refused`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'throw'
+    for (const [command, args] of TXN_ON_MAIN) {
+      const before = h.asked.length
+      const wrote = await write($, command, args)
+      expect({ command, args, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ command, args, denied: true, asked: 1 })
+    }
+    expect(ran(h, 'dataset transactions')).toEqual([])
+  })
+}
+
+test('Y21: in yolo a transaction commit or abort on a work branch runs with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, args] of [
+    ['dataset transactions commit', [DS(1), TXN(2), '--apply']],
+    ['dataset transactions abort', [DS(1), TXN(2), '--apply']],
+  ] as [string, string[]][]) {
+    expect({ command, args, deny: (await write($, command, args)).deny }).toEqual({ command, args, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
+  expect(ran(h, 'dataset transactions').length).toBe(2)
+  expect(ran(h, `dataset branches list ${DS(1)}`).length).toBe(2)
 })
