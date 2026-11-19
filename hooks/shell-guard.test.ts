@@ -27,7 +27,9 @@
 //  S8  A local command that only lists or shows (`ai-fde tools list`,
 //      `smoke schedule`) is refused as a write.
 //  S9  A credential command in Bash is told to "run it with orthanc_cli", which
-//      refuses it too, so the agent works around a call nothing may run.
+//      refuses it too, so the agent works around a call nothing may run. Bash is
+//      the one lane that can feed a secret on stdin, so the check sits ahead of
+//      the read short-circuit: an entry Orthanc declares a read is still refused.
 //  K1  Interpreter code that names orthanc and starts a process runs:
 //      subprocess, os.system, os.exec*, child_process, Bun.spawn, system(),
 //      backticks and qx in Ruby and Perl, awk system() and getline, osascript
@@ -63,6 +65,9 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'auth store', kind: 'local', input: 'token-on-stdin' },
   { path: 'configure configure', kind: 'local', credentialStore: 'secret-service-or-file', flags: [{ flag: '--token-stdin', takesValue: false }] },
   { path: 'auth delete', kind: 'local', credentialStore: 'secret-service-or-file' },
+  // A store-marked entry Orthanc might one day call a read: Bash has no second
+  // gate behind the read short-circuit, so it must not reach one.
+  { path: 'credential show', kind: 'read-only', credentialStore: 'secret-service-or-file' },
 ]
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 const approve = { action: 'approve', reason: 'ok' } as const
@@ -156,9 +161,11 @@ test('S9: a credential command in Bash is sent to the operator, not to orthanc_c
   ]) {
     const error = classifyCall('Bash', { command: line }, MANIFEST, null)?.error ?? ''
     expect(error).toContain('needs a credential the operator types')
-    expect(error).toContain('/auth prints the command')
+    expect(error).toContain('/auth lists the credential commands')
     expect(error).not.toContain('with orthanc_cli')
   }
   // Clearing a stored credential types no secret: that call keeps the write routing.
   expect(classifyCall('Bash', { command: 'orthanc auth delete tester' }, MANIFEST, null)?.error).toContain("Run 'auth delete' with orthanc_cli")
+  // A read verb is not enough: the store mark still refuses, ahead of the short-circuit.
+  expect(classifyCall('Bash', { command: 'orthanc credential show' }, MANIFEST, null)?.error).toContain('needs a credential the operator types')
 })

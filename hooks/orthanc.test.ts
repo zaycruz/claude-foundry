@@ -23,10 +23,11 @@
 //      leaves the child running when it gives up.
 //  T15 The manifest's `credential_store` is dropped, so the hidden
 //      `configure configure` — which names no `input` — runs in every mode.
-//  T16 The store alone is treated as a secret going in, so `auth delete` and
-//      `configure delete`, which only clear it, are refused: yolo is meant to
-//      run those deletes.
-//  T17 A credential marker in a shape the guard cannot read reads as no marker.
+//  T16 The store alone refuses, so the two commands that only clear it
+//      (`auth delete`, `configure delete`) have to be named, and they are: yolo
+//      is meant to run those deletes.
+//  T17 A credential marker in a shape the guard cannot read reads as no marker,
+//      or a store mark that lists no flags at all reads as taking no secret.
 //  T18 The command names stop being enough on their own, so a binary that
 //      ships `auth store` with no field runs.
 //  T19 A command that can never run is marked where the agent reads it, so it is
@@ -242,6 +243,9 @@ test('T15 T16 T17 T18: which manifest entries name a secret the agent must not p
   // A marker the guard cannot read is still a marker, not an absence.
   expect(refused({ path: 'configure configure', kind: 'local', credential_store: ['keychain', 'file'], args: SECRET_FLAGS })).toBe(true)
   expect(isCredentialCommand(manifestFrom(ENVELOPE([{ path: 'auth store', kind: 'local', input: 7 }]))[0]!)).toBe(true)
+  // A store mark with no flags at all: still a store the command writes.
+  expect(refused({ path: 'configure configure', kind: 'local', credential_store: 'secret-service-or-file' })).toBe(true)
+  expect(refused({ path: 'some future store command', kind: 'local', credential_store: 'secret-service-or-file', args: [{ kind: 'option', flag: '--other', takes_value: true }] })).toBe(true)
   // Clears the store, types nothing: the deletes yolo runs (zay, 2026-11-17).
   expect(refused({ path: 'auth delete', kind: 'local', credential_store: 'secret-service-or-file' })).toBe(false)
   expect(refused({ path: 'configure delete', kind: 'local', credential_store: 'secret-service-or-file', args: [{ kind: 'option', flag: '--force', takes_value: false }] })).toBe(false)

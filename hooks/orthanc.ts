@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { type ManifestCommand, type ManifestFlag, isCredentialCommand } from './policy'
+import { CREDENTIAL_HINT, type ManifestCommand, type ManifestFlag, isCredentialCommand } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -46,8 +46,10 @@ export const failure = (type: string, message: string, operation: string, extra:
 // guard cannot read is kept as 'unreadable', so the command is refused: an
 // unreadable credential field is not an absent one. Same convention as
 // `operator_approval` below, which policy.ts reads raw and fails closed on.
-const credentialMarker = (value: unknown): string | undefined =>
-  value === null || value === undefined ? undefined : typeof value === 'string' ? value : 'unreadable'
+function credentialMarker(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  return typeof value === 'string' ? value : 'unreadable'
+}
 
 export function manifestFrom(envelope: Envelope): ManifestCommand[] {
   const commands = isRecord(envelope.data) && Array.isArray(envelope.data.commands) ? envelope.data.commands : []
@@ -58,10 +60,7 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           kind: typeof entry.kind === 'string' ? entry.kind : undefined,
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
           input: credentialMarker(entry.input),
-          ...(() => {
-            const store = credentialMarker(entry.credential_store)
-            return store === undefined ? {} : { credentialStore: store }
-          })(),
+          credentialStore: credentialMarker(entry.credential_store),
           flags: flagsFrom(entry.args),
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
@@ -216,7 +215,7 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
 export function credentialFailure(command: ManifestCommand): Envelope {
   return failure(
     'credential-command-denied',
-    `Orthanc command '${command.path}' needs a credential the operator types, so orthanc_cli will not run it. They run it in a terminal; /auth prints the command.`,
+    `Orthanc command '${command.path}' needs a credential the operator types, so orthanc_cli will not run it. ${CREDENTIAL_HINT}`,
     command.path,
   )
 }

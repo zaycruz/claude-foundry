@@ -48,12 +48,12 @@
 //      a secret of the operator's into their credential store two ways:
 //      `input` (`token-on-stdin` for `auth store`, `host-and-token` for
 //      `configure profile create` and `onboarding`) and, for the hidden
-//      `configure configure`, `credential_store` with `--token-stdin` /
-//      `--client-secret-stdin`. 0.6.2 refused the `token-on-stdin` spelling and
+//      `configure configure`, `credential_store` (it reads the secret on
+//      `--token-stdin` / `--client-secret-stdin`). 0.6.2 refused the `token-on-stdin` spelling and
 //      two names, so `configure profile create <name> --host … --token-stdin
 //      --force` — which replaces the credentials the profile every later call
 //      runs on — reached orthanc in every mode, and so did the hidden command.
-//      Now both spellings are refused by name, in every mode, with no orthanc
+//      Now both marks refuse, in every mode, with no orthanc
 //      call, and refused before the ladder: a call that cannot run asks no
 //      question and spends no auto-mode verdict (the seam W14 pins for an
 //      over-cap call). `auth delete` and `configure delete` name the store they

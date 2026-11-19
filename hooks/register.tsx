@@ -1461,6 +1461,7 @@ async function authText($: EngineInterface, args: string): Promise<string> {
     profile
       ? `  orthanc auth store --profile ${target} --host ${host}    # paste the token on stdin`
       : `  orthanc configure profile create    # new profile '${target}': host and token`,
+    `  Also operator-only, and refused here: any command orthanc_help marks 'operator-only'`,
     `Then run /onboard (or /profile ${target}) here to verify.`,
   ]
   if (profile) {
