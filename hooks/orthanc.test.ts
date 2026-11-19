@@ -212,9 +212,13 @@ test('T13 T14: a silent child past its deadline is stopped and the run rejects',
   expect(seen.returned).toBe(true)
 })
 
-// The manifest entries of the commands that name a credential, as Orthanc 0.7.10
-// writes them: `credential_store` is "secret-service-or-file" on five commands,
-// `input` on three, and `configure configure` carries the store and no input.
+// The manifest entries of the commands that name a credential, as the released
+// Orthanc 0.7.10 writes them (read from `orthanc agent-manifest` on 2026-11-19):
+// `credential_store` is "secret-service-or-file" on six commands — `auth store`,
+// `auth delete`, `configure configure`, `configure profile create`,
+// `configure delete`, `onboarding` — and `input` on three of those. The two
+// deletes name the store and no `input`; `configure configure` names the store
+// and no `input` either, which is why no rule reading only `input` ever saw it.
 const ENVELOPE = (commands: unknown[]) => ({
   schema_version: 'foundry-agent-v1',
   data: { commands },

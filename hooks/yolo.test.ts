@@ -591,6 +591,14 @@ test('Y11: in auto, dropping a credential asks the operator instead of meeting t
   expect(h.asked.length).toBe(CREDENTIAL_REMOVALS.length)
 })
 
+test('Y11: /auth names the commands the guard refuses, so a refusal points somewhere real', async ($, on) => {
+  harness(on)
+  const text = await say($, 'auth', 'tester')
+  for (const command of ['configure configure', 'configure profile create', 'onboarding']) {
+    expect({ command, text: text.includes(command) }).toEqual({ command, text: true })
+  }
+})
+
 test('Y12: an Orthanc write in Bash is refused in yolo and asks no one', async ($, on) => {
   const h = harness(on)
   expect(typeof (await shell($, `orthanc dataset create /Tester/scratch/x --branch agent-scratch --apply`)).deny).toBe('string')

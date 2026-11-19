@@ -1456,12 +1456,20 @@ async function authText($: EngineInterface, args: string): Promise<string> {
   const target = args.trim() || scope.profile
   const profile = (await listProfiles($)).find(entry => entry.name === target)
   const host = profile?.host || '<https://your-stack.palantirfoundry.com>'
+  const shown = profile ? 'auth store' : 'configure profile create'
+  // The guard refuses these and says the operator runs them; the operator has to
+  // be able to name them, so they are read from the same list the guard reads.
+  const refused = (await loadManifest($).catch(() => [] as readonly ManifestCommand[]))
+    .filter(entry => isCredentialCommand(entry))
+    .map(entry => entry.path)
+    .filter(path => path !== shown)
+    .sort()
   const lines = [
     `Credentials never pass through Claude. Run one of these in your own terminal:`,
     profile
       ? `  orthanc auth store --profile ${target} --host ${host}    # paste the token on stdin`
       : `  orthanc configure profile create    # new profile '${target}': host and token`,
-    `  Also operator-only, and refused here: any command orthanc_help marks 'operator-only'`,
+    ...(refused.length ? [`  Also operator-only, and refused through Claude: ${refused.join(', ')}`] : []),
     `Then run /onboard (or /profile ${target}) here to verify.`,
   ]
   if (profile) {
