@@ -239,8 +239,16 @@ function commandLine(command: ManifestCommand): string {
   return `${command.path}${traits ? ` — ${traits}` : ''}`
 }
 
+/**
+ * A command that takes a secret the operator types. Orthanc names how in the
+ * manifest's `input`: `token-on-stdin` (`auth store`) and `host-and-token`
+ * (`configure profile create`, `onboarding`). Every spelling of it is refused,
+ * not the two known names: an `input` the guard has never seen is still a
+ * secret the agent must not be asked to pass, and `configure profile create
+ * --force` replaces the credentials of the profile every later call runs on.
+ */
 export const isCredentialCommand = (command: ManifestCommand) =>
-  DENIED_COMMANDS.has(command.path) || command.input === 'token-on-stdin'
+  DENIED_COMMANDS.has(command.path) || command.input !== undefined
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
   const lines = [commandLine(command)]
