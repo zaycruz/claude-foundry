@@ -798,15 +798,33 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 // A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
   spaceCache.clear()
-  // Link types and interfaces are read off the bound branch, so they belong to it:
-  // binding another branch, or ending the mode, drops them out of context.
-  if ((await $.state.get(BRANCH)).value !== (fde?.branchRid ?? null)) {
-    const scope = await currentScope($)
-    await saveScope($, { ...scope, resources: { ...scope.resources, linkTypes: [], interfaces: [] } })
-  }
+  // Link types and interfaces are read off the branch the mode is bound to, so they
+  // go with that binding when it is replaced or ended. A first binding clears
+  // nothing: after a restart the picks restored from the store came from the branch
+  // /fde resume is about to rebind, not from main.
+  const earlier = await fdeState($)
+  if (earlier !== null && earlier.branchRid !== (fde?.branchRid ?? '')) await dropBranchPicks($, earlier.profile)
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
+}
+
+/**
+ * Takes the branch-read picks out of one stack's scope. That stack is not the
+ * active one after a /profile switch, and /profile is allowed while FDE mode is
+ * bound, so the picks are dropped where they were saved (same shape as
+ * storeNamespace, which reaches another stack's record for the same reason).
+ */
+async function dropBranchPicks($: EngineInterface, profile: string): Promise<void> {
+  const active = await currentScope($)
+  if (active.profile === profile) {
+    await saveScope($, { ...active, resources: { ...active.resources, linkTypes: [], interfaces: [] } })
+    return
+  }
+  const stored = await storedScopes($)
+  const entry = normalizeScope(stored[profile], profile, '')
+  if ((entry.resources.linkTypes?.length ?? 0) === 0 && (entry.resources.interfaces?.length ?? 0) === 0) return
+  await $.store.set('scopes', { ...stored, [profile]: { ...entry, resources: { ...entry.resources, linkTypes: [], interfaces: [] }, updatedAt: new Date().toISOString() } })
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
@@ -1199,7 +1217,7 @@ async function entitySource($: EngineInterface, kind: EntityKind, ontology: Foun
     title: `${def.label}${where}`,
     isMulti: true,
     items: toItems(entityRows(rowsOf(envelope, [def.rows]), def.hintKeys, def.separator)),
-    resourceKind: PICKER_RESOURCES[kind],
+    resourceKind: def.resource,
   }
 }
 
@@ -1331,6 +1349,7 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const repeated = new Set(merged.map(entry => entry.name).filter((name, index, all) => all.indexOf(name) !== index))
     return `${RESOURCE_LABELS[kind]}: ${merged.map(entry => `${entry.name}${repeated.has(entry.name) ? ` (${entry.rid})` : ''}`).join(', ') || 'none'}.`
   }
+  if (picker.kind !== 'object-type' && picker.kind !== 'action-type') return `The ${picker.kind} picker saves nothing: object types are picked with /object-type.`
   const key = picker.kind === 'action-type' ? 'actionTypes' : 'objectTypes'
   await saveScope($, { ...scope, [key]: chosen.map(item => ({ apiName: item.key, displayName: item.label })) })
   return `${picker.title}: ${chosen.map(item => item.label).join(', ') || 'none'}.`

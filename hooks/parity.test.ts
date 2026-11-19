@@ -303,6 +303,13 @@ const PROJECT = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-000000000
 const PROJECT_TWO = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-0000000000c2', name: 'Acme Ops', path: '/Acme/Ops' }
 const LINK_ONE = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d1', name: 'Orders' }
 const LINK_TWO = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d2', name: 'Contact' }
+// A second link named 'Orders', joining different object types: 16 of 59 link
+// types on a real ontology share a display name across joins, so a pick of two
+// of them has to say which is which.
+// 'Orders' names two links, and the picker's filter matches substrings of the name,
+// so the only filter that reaches one of them is its RID.
+const FIRST_ORDERS = 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d1'
+const LINK_DUP = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d3', name: 'Orders' }
 const IFACE = { rid: 'ri.ontology.main.interface.d0000000-0000-4000-8000-0000000000e1', name: 'Auditable' }
 const MONITOR = { rid: 'ri.object-sentinel.main.monitor.d0000000-0000-4000-8000-0000000000f1', name: 'Nightly sync' }
 const MONITOR_TWO = { rid: 'ri.object-sentinel.main.monitor.d0000000-0000-4000-8000-0000000000f2', name: 'Weekly rollup' }
@@ -311,6 +318,7 @@ const LINK_TYPES = [
   { api_name: 'orders', display_name: LINK_ONE.name, object_type_a: 'Account', object_type_b: 'Order', rid: LINK_ONE.rid },
   { api_name: 'contacts', display_name: LINK_TWO.name, object_type_a: 'Account', object_type_b: 'Contact', rid: LINK_TWO.rid },
   // A row orthanc cannot give a RID for: it is not pickable.
+  { api_name: 'shipments', display_name: LINK_DUP.name, object_type_a: 'Account', object_type_b: 'Shipment', rid: LINK_DUP.rid },
   { api_name: 'ghost', display_name: 'Ghost', object_type_a: 'Account' },
 ]
 const INTERFACES = [
@@ -352,7 +360,7 @@ function harness(on: On): Harness {
     }
     if (h.failExact.includes(line) || h.fail.some(command => line.startsWith(command))) return reply(envelope(null, [{ type: 'network-error', message: 'orthanc could not reach the stack' }]))
     if (line === 'agent-manifest') return reply(MANIFEST)
-    if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
+    if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }, { name: 'other', host: 'other.example.com', is_default: false, status: 'ok' }] }))
     if (line === 'ontology list')
       return reply(envelope({ data: [{ rid: ONT.rid, api_name: 'tester', display_name: ONT.name }, { rid: OTHER_ONT.rid, api_name: 'sandbox', display_name: OTHER_ONT.name }] }))
     if (line === 'space list') return reply(envelope({ spaces: [{ rid: SPACE.rid, display_name: SPACE.name, path: SPACE.path }] }))
@@ -414,7 +422,7 @@ test('L1 L3 L5 L6: /link-type and /interface pick from the selected ontology, an
   expect(listed).toContain(LINK_ONE.name)
   expect(listed).toContain('Account → Order')
   expect(listed.includes('Ghost')).toBe(false)
-  expect(await say($, 'link-type', LINK_ONE.name)).toContain(`Link types: ${LINK_ONE.name}`)
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
   expect(await say($, 'interface', IFACE.name)).toContain(`Interfaces: ${IFACE.name}`)
   expect(h.calls).toContain(`ontology interface-list ${ONT.rid}`)
   const picked = saved(h)
@@ -430,15 +438,17 @@ test('L1 L3 L5 L6: /link-type and /interface pick from the selected ontology, an
   // listing shows it as chosen.
   expect(await say($, 'link-type', LINK_TWO.name)).toContain(`Link types: ${LINK_ONE.name}, ${LINK_TWO.name}`)
   expect(saved(h).resources.linkTypes?.length).toBe(2)
+  // L3: two picks sharing a display name are named apart by their RIDs.
+  expect(await say($, 'link-type', 'Shipment')).toContain(`Link types: ${LINK_ONE.name} (${LINK_ONE.rid}), ${LINK_TWO.name}, ${LINK_DUP.name} (${LINK_DUP.rid})`)
   // L8: `clear` on one of them clears that kind and no other.
   expect(await say($, 'link-type', 'clear')).toContain('Cleared link types selection')
   expect(saved(h).resources.linkTypes).toBeUndefined()
   expect(saved(h).resources.interfaces?.length).toBe(1)
   expect(await say($, 'interface', 'clear')).toContain('Cleared interfaces selection')
   expect(saved(h).resources.interfaces).toBeUndefined()
-  expect(await say($, 'link-type', LINK_ONE.name)).toContain(LINK_ONE.name)
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
   // A different ontology drops them: they belong to the old one.
-  expect(await say($, 'ontology', OTHER_ONT.rid)).toContain(OTHER_ONT.name)
+  expect(await say($, 'ontology', OTHER_ONT.rid)).toContain(`${OTHER_ONT.name}. Projects, types, link types, interfaces, automations, functions and object instances were cleared.`)
   expect(saved(h).resources.linkTypes).toBeUndefined()
   expect(saved(h).resources.interfaces).toBeUndefined()
   expect((await prompt($)).includes('Link types:')).toBe(false)
@@ -456,12 +466,22 @@ test('L2: only FDE mode reads a branch, only while it is the scope\'s, and its p
   expect(h.calls).toContain(`ontology link-type-list ${ONT.rid} --branch ${BRANCH.rid}`)
   expect(await say($, 'interface', '')).toContain(BRANCH.name)
   expect(h.calls).toContain(`ontology interface-list ${ONT.rid} --branch ${BRANCH.rid}`)
-  expect(await say($, 'link-type', LINK_ONE.name)).toContain(`Link types: ${LINK_ONE.name}`)
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  expect(saved(h).resources.linkTypes?.length).toBe(1)
+  // A stack switch (allowed while bound) neither reads the branch there nor loses
+  // what was picked on it, and the branch is named again back on its own stack.
+  h.calls.length = 0
+  expect(await say($, 'profile', 'other')).toContain('Foundry stack: other')
+  // The other stack has its own scope, and the branch does not follow the binding there.
+  expect(await say($, 'link-type', '')).toContain('No ontology is selected')
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+  expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
+  expect(await say($, 'link-type', '')).toContain(BRANCH.name)
   expect(saved(h).resources.linkTypes?.length).toBe(1)
   // The operator points at another ontology: the binding no longer describes it,
   // so nothing is named, and the branch's picks went with the old ontology.
   h.calls.length = 0
-  expect(await say($, 'ontology', OTHER_ONT.rid)).toContain(OTHER_ONT.name)
+  expect(await say($, 'ontology', OTHER_ONT.rid)).toContain(`${OTHER_ONT.name}. Projects, types, link types, interfaces, automations, functions and object instances were cleared.`)
   expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
   expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
   expect(saved(h).resources.linkTypes).toBeUndefined()
@@ -475,6 +495,48 @@ test('L2: only FDE mode reads a branch, only while it is the scope\'s, and its p
   expect(await say($, 'interface', '')).toContain(IFACE.name)
   expect(h.calls).toContain(`ontology interface-list ${ONT.rid}`)
   expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+})
+
+test('L2: /fde resume keeps the picks that came off the branch it rebinds', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  // The store mirror exists for this: the session restarted, so FDE mode is off
+  // and /fde resume rebinds it. What was picked before the restart stays.
+  h.store.set('fdeOpen', {
+    goal: 'tidy the webhook',
+    profile: 'tester',
+    ontologyRid: ONT.rid,
+    branchRid: BRANCH.rid,
+    branchName: BRANCH.name,
+    startedAt: '2026-11-19T00:00:00.000Z',
+    plans: [],
+    applied: [],
+    namespace: null,
+    spaces: [],
+  })
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  expect(await say($, 'fde', 'resume')).toContain('Resumed.')
+  expect(saved(h).resources.linkTypes?.length).toBe(1)
+  expect(await say($, 'link-type', '')).toContain(BRANCH.name)
+  expect(h.calls).toContain(`ontology link-type-list ${ONT.rid} --branch ${BRANCH.rid}`)
+})
+
+test('L2: ending FDE mode while on another stack still drops that branch\'s picks', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  expect(await say($, 'fde', `--branch ${BRANCH.rid} tidy the webhook`)).toContain('FDE mode on')
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  // /profile while bound is allowed, and each stack keeps its own scope: the picks
+  // are in the bound stack's record, so ending the mode there clears that record.
+  expect(await say($, 'profile', 'other')).toContain('Foundry stack: other')
+  expect(saved(h).resources.linkTypes?.length).toBe(1)
+  expect(await say($, 'fde', 'end')).toContain('# FDE handoff')
+  expect(saved(h).resources.linkTypes).toBeUndefined()
+  expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
+  h.calls.length = 0
+  expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+  expect(saved(h).resources.linkTypes).toBeUndefined()
 })
 
 test('L4 L5 L8: /automation walks the projects or the namespace, filters with --name, and clears alone', async ($, on) => {
@@ -493,7 +555,7 @@ test('L4 L5 L8: /automation walks the projects or the namespace, filters with --
   expect(saved(h).resources.linkTypes).toEqual(undefined)
   // Under a namespace: only its projects, never the whole stack.
   h.projects = []
-  expect(await say($, 'namespace', SPACE.rid)).toContain(SPACE.name)
+  expect(await say($, 'namespace', SPACE.rid)).toContain(`${SPACE.name}. Projects, Compass resources and automations picked before were cleared.`)
   expect(await say($, 'automation', '')).toContain('No projects are visible in Acme Space')
   h.projects = [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }, { rid: PROJECT_TWO.rid, display_name: PROJECT_TWO.name, path: PROJECT_TWO.path }]
   expect(await say($, 'automation', '')).toContain(MONITOR.name)

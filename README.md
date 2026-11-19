@@ -126,10 +126,10 @@ commands and say so, naming the bead; the mod never falls back to Foundry REST.
 `/link-type` and `/interface` run `ontology link-type-list` and `ontology
 interface-list` on the ontology in scope. While FDE mode is bound to that
 ontology they read its branch (`--branch`, the way `ontology definition` reads a
-branch), so an FDE session picks the link types and interfaces of its own branch;
-otherwise they read the main branch, and the listing says which. The pick shows
-what each link joins and which object types implement each interface, and names
-the RID when a listing holds the same name twice.
+branch), so an FDE session picks the link types and interfaces of its own branch,
+and the listing names that branch; otherwise they read the main branch.
+The pick shows what each link joins and which object types implement each
+interface, and names the RID of every pick whose name another pick shares.
 `/automation` runs `automate list` under the selected projects, or under the
 namespace's, or every space when neither is picked, and passes its argument to
 `--name`.

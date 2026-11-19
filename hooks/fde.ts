@@ -409,8 +409,10 @@ export function adoptable(data: unknown, ontologyRid: string): { name: string } 
 
 /**
  * The branch an ontology listing may read: FDE mode's, and only while its stack
- * and ontology are the ones in scope — `/fde` binds that triple, and a later
- * /ontology or /profile pick unbinds it. Null reads the main branch.
+ * and ontology are the ones in scope. The binding itself survives a later
+ * /ontology or /profile pick (nothing unbinds it); this guard is what stops a
+ * surviving binding naming this ontology's or this stack's types as the branch's.
+ * Null reads the main branch.
  *
  * The session's other branch (`workingBranch`) must not be used here: when a
  * branch creation returns no RID the mod stores its *name* there, and nothing

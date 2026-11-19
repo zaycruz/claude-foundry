@@ -42,13 +42,14 @@ export const RESOURCE_LABELS: Record<FoundryResourceKind, string> = {
 
 /**
  * Ontology entities with a listing command of their own. `rows` is the envelope
- * field the rows come under, and `hintKeys` the fields that say what the row is
- * about: what a link joins, or which object types implement an interface.
+ * field the rows come under, `hintKeys` the fields that say what the row is about
+ * (what a link joins, which object types implement an interface), and `resource`
+ * the scope key a pick lands under.
  */
 export const ENTITY_KINDS = {
-  'link-type': { label: 'Link types', list: 'link-type-list', rows: 'link_types', hintKeys: ['object_type_a', 'object_type_b'], separator: ' → ' },
-  interface: { label: 'Interfaces', list: 'interface-list', rows: 'interfaces', hintKeys: ['implemented_by'], separator: ', ' },
-} as const
+  'link-type': { label: 'Link types', list: 'link-type-list', rows: 'link_types', hintKeys: ['object_type_a', 'object_type_b'], separator: ' → ', resource: 'linkTypes' },
+  interface: { label: 'Interfaces', list: 'interface-list', rows: 'interfaces', hintKeys: ['implemented_by'], separator: ', ', resource: 'interfaces' },
+} as const satisfies Record<string, { label: string; list: string; rows: string; hintKeys: readonly string[]; separator: string; resource: FoundryResourceKind }>
 
 export type EntityKind = keyof typeof ENTITY_KINDS
 
@@ -174,11 +175,14 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
   { name: 'mcp-status', description: 'Show Orthanc and Foundry stack status', action: { type: 'mcp-status' } },
 ]
 
-/** The scope key a picker writes, for the pickers that list one resource kind of their own. */
+/**
+ * The scope key a picker writes, for the pickers that list one resource kind of
+ * their own. The ontology entities come from ENTITY_KINDS, so a listing and its
+ * scope key cannot drift apart.
+ */
 export const PICKER_RESOURCES: Partial<Record<FoundryPickerKind, FoundryResourceKind>> = {
-  'link-type': 'linkTypes',
-  interface: 'interfaces',
   automation: 'automations',
+  ...Object.fromEntries(Object.entries(ENTITY_KINDS).map(([kind, def]) => [kind, def.resource])),
 }
 
 export const blockedText = (what: string, bead: string) =>
