@@ -44,7 +44,14 @@
 //      refused; the prompt in other modes stops saying tags ask.
 //  Y10 FDE mode loosens in yolo: an apply with no dry run runs. After its dry
 //      run, a bound delete runs without a dialog.
-//  Y11 A credential command (auth store) runs in yolo.
+//  Y11 A credential command runs in yolo. Orthanc names the commands that take
+//      a secret the operator types with a manifest `input`: `token-on-stdin`
+//      (`auth store`) and `host-and-token` (`configure profile create`,
+//      `onboarding`). 0.6.2 refused the `token-on-stdin` spelling and two names,
+//      so `configure profile create <name> --host … --token-stdin --force`,
+//      which replaces the credentials the profile every later call runs on,
+//      reached orthanc in every mode. Now any entry that names an `input` is
+//      refused by name, in every mode, with no orthanc call.
 //  Y12 An Orthanc write in Bash runs in yolo instead of going to orthanc_cli.
 //
 // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
@@ -121,9 +128,14 @@ type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
 
 const envelope = (data: unknown) =>
   JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors: [], meta: {}, warnings: [], artifacts: [], pagination: null })
-const COMMANDS: [string, string][] = [
+// path, kind, and the manifest's `input` when the command needs a secret the
+// operator types (orthanc marks those `token-on-stdin` or `host-and-token`).
+const COMMANDS: [string, string, string?][] = [
   ['configure list', 'local'],
-  ['auth store', 'local'],
+  ['auth store', 'local', 'token-on-stdin'],
+  ['configure profile create', 'local', 'host-and-token'],
+  ['configure profile set', 'local'],
+  ['onboarding', 'local', 'host-and-token'],
   ['ontology list', 'read-only'],
   ['global-branch create', 'mutation'],
   ['ontology object-type-delete', 'mutation'],
@@ -176,7 +188,9 @@ const COMMANDS: [string, string][] = [
   ['proposal accept', 'mutation'],
   ['proposal approve', 'mutation'],
 ]
-const MANIFEST = envelope({ commands: COMMANDS.map(([path, kind]) => ({ path, kind, args: [] })) })
+const MANIFEST = envelope({
+  commands: COMMANDS.map(([path, kind, input]) => ({ path, kind, args: [], ...(input ? { input } : {}) })),
+})
 
 type Answer = string | 'throw'
 type Harness = {
@@ -468,10 +482,45 @@ test('Y10: in FDE mode under yolo an apply still needs its dry run; then a bound
   expect(ran(h, 'ontology object-type-delete').filter(call => call.includes('--apply')).length).toBe(1)
 })
 
-test('Y11: a credential command does not run in yolo', async ($, on) => {
+const CREDENTIAL_CALLS: [string, string[]][] = [
+  ['auth store', ['tester']],
+  // Orthanc marks these `host-and-token`, not `token-on-stdin`: a name list
+  // misses them, and `--force` replaces the credentials of a live profile.
+  ['configure profile create', ['other', '--host', 'https://other.example.com', '--token-stdin']],
+  ['configure profile create', ['tester', '--host', 'https://tester.example.com', '--token-stdin', '--force']],
+  ['onboarding', []],
+]
+
+// What the tool answered with, for a call that never reached orthanc.
+const refusedWith = (wrote: { result?: unknown }) => {
+  if (typeof wrote.result !== 'string') return undefined
+  try {
+    const parsed = JSON.parse(wrote.result) as { errors?: { type?: string; message?: string }[] }
+    return parsed.errors?.[0]
+  } catch {
+    return undefined
+  }
+}
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y11: in ${mode} mode no credential command runs, whatever flag it carries`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'Approve'
+    for (const [command, args] of CREDENTIAL_CALLS) {
+      const error = refusedWith(await write($, command, args))
+      expect({ command, args, type: error?.type }).toEqual({ command, args, type: 'credential-command-denied' })
+      expect(error?.message ?? '').toContain(command)
+    }
+    for (const [command] of CREDENTIAL_CALLS) expect({ command, ran: ran(h, command) }).toEqual({ command, ran: [] })
+  })
+}
+
+test('Y11: in yolo a credential command is refused by name, and asks no one', async ($, on) => {
   const h = harness(on)
-  await write($, 'auth store', ['tester'])
-  expect(ran(h, 'auth store')).toEqual([])
+  const error = refusedWith(await write($, 'configure profile create', ['other', '--host', 'https://other.example.com', '--token-stdin']))
+  expect(error?.type).toBe('credential-command-denied')
+  expect(error?.message ?? '').toContain("'configure profile create'")
+  expect(h.asked).toEqual([])
 })
 
 test('Y12: an Orthanc write in Bash is refused in yolo and asks no one', async ($, on) => {
