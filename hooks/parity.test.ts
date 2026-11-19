@@ -298,6 +298,7 @@ test('foundry subagents get the Foundry block when they start; others do not', a
 const ONT = { rid: 'ri.ontology.main.ontology.d0000000-0000-4000-8000-0000000000a1', name: 'Tester Ontology' }
 const OTHER_ONT = { rid: 'ri.ontology.main.ontology.d0000000-0000-4000-8000-0000000000a2', name: 'Sandbox Ontology' }
 const BRANCH = { rid: 'ri.branch..branch.b0000000-0000-4000-8000-0000000000b1', name: 'agent/fde-wire-check' }
+const BRANCH_TWO = { rid: 'ri.branch..branch.b0000000-0000-4000-8000-0000000000b2', name: 'agent/fde-second' }
 const SPACE = { rid: 'ri.compass.main.space.d0000000-0000-4000-8000-0000000000c0', name: 'Acme Space', path: '/Acme' }
 const PROJECT = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-0000000000c1', name: 'Acme Platform', path: '/Acme/Platform' }
 const PROJECT_TWO = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-0000000000c2', name: 'Acme Ops', path: '/Acme/Ops' }
@@ -365,8 +366,10 @@ function harness(on: On): Harness {
       return reply(envelope({ data: [{ rid: ONT.rid, api_name: 'tester', display_name: ONT.name }, { rid: OTHER_ONT.rid, api_name: 'sandbox', display_name: OTHER_ONT.name }] }))
     if (line === 'space list') return reply(envelope({ spaces: [{ rid: SPACE.rid, display_name: SPACE.name, path: SPACE.path }] }))
     if (line.startsWith('project list')) return reply(envelope({ projects: h.projects }))
-    if (line.startsWith('global-branch get '))
-      return reply(envelope({ branch_record: { branch_rid: BRANCH.rid, branch_status: 'OPEN', display_name: BRANCH.name, ontology_rid: ONT.rid, description: '' } }))
+    if (line.startsWith('global-branch get ')) {
+      const asked = line.split(' ')[2] ?? BRANCH.rid
+      return reply(envelope({ branch_record: { branch_rid: asked, branch_status: 'OPEN', display_name: BRANCH.name, ontology_rid: ONT.rid, description: '' } }))
+    }
     if (line.startsWith('ontology link-type-list ')) return reply(envelope({ link_types: LINK_TYPES, total: LINK_TYPES.length }))
     if (line.startsWith('ontology interface-list ')) return reply(envelope({ interfaces: INTERFACES, total: INTERFACES.length }))
     if (line.startsWith('automate list')) {
@@ -407,6 +410,20 @@ const prompt = async ($: Engine) =>
   ((await $.classic.SubagentStart({ agent_id: 'a', agent_type: 'foundry:foundry-scout' } as never)).additionalContext ?? []).join('\n')
 /** What /profile picked for this stack, as the mod loads it (empty kinds drop out). */
 const saved = (h: Harness) => normalizeScope((h.store.get('scopes') as Record<string, unknown> | undefined)?.tester, 'tester', 'tester.example.com')
+
+/** A stored FDE binding, as the store mirror holds it for /fde resume after a restart. */
+const storedSession = () => ({
+  goal: 'tidy the webhook',
+  profile: 'tester',
+  ontologyRid: ONT.rid,
+  branchRid: BRANCH.rid,
+  branchName: BRANCH.name,
+  startedAt: '2026-11-19T00:00:00.000Z',
+  plans: [],
+  applied: [],
+  namespace: null,
+  spaces: [],
+})
 
 /** /profile tester, /ontology Tester Ontology. */
 async function open($: Engine) {
@@ -502,18 +519,7 @@ test('L2: /fde resume keeps the picks that came off the branch it rebinds', asyn
   await open($)
   // The store mirror exists for this: the session restarted, so FDE mode is off
   // and /fde resume rebinds it. What was picked before the restart stays.
-  h.store.set('fdeOpen', {
-    goal: 'tidy the webhook',
-    profile: 'tester',
-    ontologyRid: ONT.rid,
-    branchRid: BRANCH.rid,
-    branchName: BRANCH.name,
-    startedAt: '2026-11-19T00:00:00.000Z',
-    plans: [],
-    applied: [],
-    namespace: null,
-    spaces: [],
-  })
+  h.store.set('fdeOpen', storedSession())
   expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
   expect(await say($, 'fde', 'resume')).toContain('Resumed.')
   expect(saved(h).resources.linkTypes?.length).toBe(1)
@@ -536,6 +542,29 @@ test('L2: ending FDE mode while on another stack still drops that branch\'s pick
   h.calls.length = 0
   expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
   expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+  expect(saved(h).resources.linkTypes).toBeUndefined()
+})
+
+test('L2: /fde end after a restart still drops what that branch made', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  // The restart case the store mirror exists for: the session's binding is gone,
+  // the mirror still names the branch, and startupScope put its picks back. Both
+  // /fde end and a new /fde on act on that branch, so its picks go with it.
+  h.store.set('fdeOpen', storedSession())
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  expect(await say($, 'fde', 'end')).toContain('# FDE handoff')
+  expect(saved(h).resources.linkTypes).toBeUndefined()
+  expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+})
+
+test('L2: a new /fde on after a restart drops the picks of the branch it replaces', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  h.store.set('fdeOpen', storedSession())
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  expect(await say($, 'fde', `--branch ${BRANCH_TWO.rid} the second branch`)).toContain('FDE mode on')
   expect(saved(h).resources.linkTypes).toBeUndefined()
 })
 

@@ -799,15 +799,19 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
   spaceCache.clear()
   // Link types and interfaces are read off the branch the mode is bound to, so they
-  // go with that binding when it is replaced or ended. A first binding clears
-  // nothing: after a restart the picks restored from the store came from the branch
-  // /fde resume is about to rebind, not from main.
-  const earlier = await fdeState($)
+  // go with that binding when it is replaced or ended. The binding is looked for in
+  // the store too: after a restart the session atom is gone, and /fde end and a new
+  // /fde on still act on the branch the mirror names, whose picks startupScope put
+  // back into scope. A first binding with nothing behind it clears nothing.
+  const earlier = (await fdeState($)) ?? (await fdeFromEarlier($))
   if (earlier !== null && earlier.branchRid !== (fde?.branchRid ?? '')) await dropBranchPicks($, earlier.profile)
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
 }
+
+/** The scope keys that are read off the bound branch, taken from the entity table. */
+const branchReadKeys = Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, [] as FoundryResource[]]))
 
 /**
  * Takes the branch-read picks out of one stack's scope. That stack is not the
@@ -818,13 +822,13 @@ async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void>
 async function dropBranchPicks($: EngineInterface, profile: string): Promise<void> {
   const active = await currentScope($)
   if (active.profile === profile) {
-    await saveScope($, { ...active, resources: { ...active.resources, linkTypes: [], interfaces: [] } })
+    await saveScope($, { ...active, resources: { ...active.resources, ...branchReadKeys } })
     return
   }
   const stored = await storedScopes($)
   const entry = normalizeScope(stored[profile], profile, '')
-  if ((entry.resources.linkTypes?.length ?? 0) === 0 && (entry.resources.interfaces?.length ?? 0) === 0) return
-  await $.store.set('scopes', { ...stored, [profile]: { ...entry, resources: { ...entry.resources, linkTypes: [], interfaces: [] }, updatedAt: new Date().toISOString() } })
+  if (Object.keys(branchReadKeys).every(key => ((entry.resources as Record<string, FoundryResource[]>)[key]?.length ?? 0) === 0)) return
+  await $.store.set('scopes', { ...stored, [profile]: { ...entry, resources: { ...entry.resources, ...branchReadKeys }, updatedAt: new Date().toISOString() } })
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {

@@ -289,8 +289,12 @@ against your own stack, record real Orthanc output and replay it:
 
 ```
 FOUNDRY_E2E_PROFILE=<profile> FOUNDRY_E2E_PROJECT=<project rid> \
-FOUNDRY_E2E_ONTOLOGY=<ontology rid> ./scripts/record.sh
+FOUNDRY_E2E_ONTOLOGY=<ontology rid> FOUNDRY_E2E_SPACE=<namespace rid> \
+FOUNDRY_E2E_BRANCH=<open global branch rid on that ontology> ./scripts/record.sh
 ```
+
+`FOUNDRY_E2E_SPACE` is required; `FOUNDRY_E2E_BRANCH` is optional and records the
+branch-qualified link-type and interface reads FDE mode sends.
 
 That writes `hooks/fixtures.local.ts`, which `hooks/e2e.local.test.ts` replays.
 Both stay out of git: they hold your stack's data.
