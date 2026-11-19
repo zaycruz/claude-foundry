@@ -206,7 +206,9 @@ RID, and an open proposal on it is named when it is adopted. While bound:
 leaves the branch open: merging or closing it is the operator's call. If a
 session ends while bound, the next one offers `/fde resume`. The mode only
 adds checks. The branch rule and the approval ladder (with its destructive
-rule, outside `yolo`) judge every bound call as before.
+rule, outside `yolo`) judge every bound call as before. It changes context in
+one place: the link types and interfaces picked while a binding was in scope go
+with it, when `/fde end` ends it or another binding replaces it.
 
 ## Operator rules and auto mode
 

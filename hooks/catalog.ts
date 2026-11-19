@@ -81,10 +81,10 @@ export type CommandAction =
 export type CommandEntry = { name: string; description: string; argumentHint?: string; action: CommandAction }
 
 const CLEARABLE = '[filter | clear]'
-// Orthanc 0.7.7 and 0.7.10 list link types, interfaces and automations (they are
-// pickers now, and both versions were checked against a live stack) but still
-// have no egress-policy or certificate list, only `connectivity egress ensure`,
-// so those two keep waiting on this bead.
+// Orthanc lists link types, interfaces and automations (`ontology link-type-list`,
+// `ontology interface-list`, `automate list`; checked against 0.7.7 and 0.7.10 on a
+// live stack) but has no egress-policy or certificate list, only `connectivity
+// egress ensure`, so those two wait on this bead and say so.
 const LISTING_BEAD = 'orthanc-qm5'
 export const OBJECT_QUERY_BEAD = 'orthanc-4f7'
 
@@ -298,9 +298,9 @@ const namesOf = (value: unknown): string[] =>
 
 /**
  * Link-type and interface rows as resources. Agent rows carry `rid`, `display_name`
- * and `api_name` (read off a live stack), so the rid keys the pick and the display
- * name labels it: on that ontology 16 of 59 link types share a display name across
- * different joins, and the `hintKeys` fields say which is which.
+ * and `api_name`, so the rid keys the pick and the display name labels it: a live
+ * ontology had 59 link types, 16 of them sharing a display name across different
+ * joins, so the `hintKeys` fields say which is which.
  */
 export function entityRows(rows: readonly Record<string, unknown>[], hintKeys: readonly string[], separator: string): FoundryResource[] {
   const seen = new Set<string>()
@@ -311,6 +311,15 @@ export function entityRows(rows: readonly Record<string, unknown>[], hintKeys: r
     const name = asString(row.display_name) || asString(row.api_name) || rid
     return [{ rid, name, hint: hintKeys.flatMap(key => namesOf(row[key])).join(separator) }]
   })
+}
+
+/**
+ * The reply after a resource pick. A listing holds repeated names, so any name a
+ * second pick shares is named beside its rid.
+ */
+export function pickedText(kind: FoundryResourceKind, items: readonly FoundryResource[]): string {
+  const repeated = new Set(items.map(entry => entry.name).filter((name, index, all) => all.indexOf(name) !== index))
+  return `${RESOURCE_LABELS[kind]}: ${items.map(entry => `${entry.name}${repeated.has(entry.name) ? ` (${entry.rid})` : ''}`).join(', ') || 'none'}.`
 }
 
 /** The new selection, plus earlier selections the listing did not show. */

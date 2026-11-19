@@ -28,6 +28,7 @@ import {
   OBJECT_QUERY_BEAD,
   objectsQuery,
   ontologyChanged,
+  pickedText,
   PICKER_RESOURCES,
   RESOURCE_LABELS,
   resourceArgs,
@@ -798,11 +799,13 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 // A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
   spaceCache.clear()
-  // Link types and interfaces are read off the branch the mode is bound to, so they
-  // go with that binding when it is replaced or ended. The binding is looked for in
-  // the store too: after a restart the session atom is gone, and /fde end and a new
-  // /fde on still act on the branch the mirror names, whose picks startupScope put
-  // back into scope. A first binding with nothing behind it clears nothing.
+  // Link types and interfaces are the picks made under a binding: read off its
+  // branch while it matched the scope, off main otherwise. They go when that
+  // binding is replaced or ended, whichever branch a given pick came from. The
+  // binding is looked for in the store too: after a restart the session atom is
+  // gone, and /fde end and a new /fde on still act on the binding the mirror names,
+  // whose picks startupScope put back into scope. A first binding with nothing
+  // behind it clears nothing.
   const earlier = (await fdeState($)) ?? (await fdeFromEarlier($))
   if (earlier !== null && earlier.branchRid !== (fde?.branchRid ?? '')) await dropBranchPicks($, earlier.profile)
   await $.state.set(FDE, fde)
@@ -1207,6 +1210,27 @@ async function automateSource($: EngineInterface, scope: FoundryScope, query: st
 }
 
 /**
+ * `ontology object-type-list` / `ontology action-type-list` on the ontology in
+ * scope. These two read the main branch: the branch a session writes to is what
+ * `ontology definition --branch` shows, and the mod's plan gate is what refuses a
+ * type that is not on the branch.
+ */
+async function typeSource($: EngineInterface, kind: 'object-type' | 'action-type', ontology: FoundryNamed, profile: string): Promise<Source | string> {
+  const isAction = kind === 'action-type'
+  const envelope = await runOrthanc($, ['ontology', isAction ? 'action-type-list' : 'object-type-list', ontology.rid], profile, 120_000)
+  if (isErrorEnvelope(envelope)) return `${isAction ? 'action' : 'object'}-type-list failed: ${errorsOf(envelope)}`
+  return {
+    title: isAction ? 'Action types' : 'Object types',
+    isMulti: true,
+    items: listItems(envelope, isAction ? 'action_types' : 'object_types').map(entry => ({
+      key: asString(entry.api_name),
+      label: asString(entry.display_name) || asString(entry.api_name),
+      hint: asString(entry.api_name),
+    })),
+  }
+}
+
+/**
  * `ontology link-type-list` / `ontology interface-list` on the ontology in scope,
  * on FDE mode's branch when the session has one (readBranch), the way
  * `ontology definition --branch` reads one, so an FDE session picks the types of
@@ -1290,24 +1314,7 @@ async function pickerSource(
   const ontology = scope.ontology
   if (ontology === null) return 'No ontology is selected. Run /ontology first.'
   if (kind === 'link-type' || kind === 'interface') return entitySource($, kind, ontology, readBranch(await fdeState($), scope.profile, ontology.rid), scope.profile)
-  if (kind !== 'object-type' && kind !== 'action-type') return `The ${kind} picker lists nothing yet.`
-  const isAction = kind === 'action-type'
-  const envelope = await runOrthanc(
-    $,
-    ['ontology', isAction ? 'action-type-list' : 'object-type-list', ontology.rid],
-    scope.profile,
-    120_000,
-  )
-  if (isErrorEnvelope(envelope)) return `${isAction ? 'action' : 'object'}-type-list failed: ${errorsOf(envelope)}`
-  return {
-    title: isAction ? 'Action types' : 'Object types',
-    isMulti: true,
-    items: listItems(envelope, isAction ? 'action_types' : 'object_types').map(entry => ({
-      key: asString(entry.api_name),
-      label: asString(entry.display_name) || asString(entry.api_name),
-      hint: asString(entry.api_name),
-    })),
-  }
+  return typeSource($, kind, ontology, scope.profile)
 }
 
 async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readonly string[]): Promise<string> {
@@ -1348,12 +1355,8 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const asResource = (item: FoundryPickItem): FoundryResource => ({ rid: item.key, name: item.label, hint: item.hint })
     const merged = mergeSelections(scope.resources[kind] ?? [], chosen.map(asResource), picker.items.map(asResource))
     await saveScope($, { ...scope, resources: { ...scope.resources, [kind]: merged } })
-    // Listings hold repeated names (16 of 59 link types on a real ontology share a
-    // display name across different joins), so a repeated name names its rid.
-    const repeated = new Set(merged.map(entry => entry.name).filter((name, index, all) => all.indexOf(name) !== index))
-    return `${RESOURCE_LABELS[kind]}: ${merged.map(entry => `${entry.name}${repeated.has(entry.name) ? ` (${entry.rid})` : ''}`).join(', ') || 'none'}.`
+    return pickedText(kind, merged)
   }
-  if (picker.kind !== 'object-type' && picker.kind !== 'action-type') return `The ${picker.kind} picker saves nothing: object types are picked with /object-type.`
   const key = picker.kind === 'action-type' ? 'actionTypes' : 'objectTypes'
   await saveScope($, { ...scope, [key]: chosen.map(item => ({ apiName: item.key, displayName: item.label })) })
   return `${picker.title}: ${chosen.map(item => item.label).join(', ') || 'none'}.`

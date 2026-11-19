@@ -304,13 +304,11 @@ const PROJECT = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-000000000
 const PROJECT_TWO = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-0000000000c2', name: 'Acme Ops', path: '/Acme/Ops' }
 const LINK_ONE = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d1', name: 'Orders' }
 const LINK_TWO = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d2', name: 'Contact' }
-// A second link named 'Orders', joining different object types: 16 of 59 link
-// types on a real ontology share a display name across joins, so a pick of two
-// of them has to say which is which.
-// 'Orders' names two links, and the picker's filter matches substrings of the name,
-// so the only filter that reaches one of them is its RID.
-const FIRST_ORDERS = 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d1'
+// A second link also named 'Orders', joining other object types, so a reply that
+// names both has to say which is which. The picker's filter matches substrings of
+// the name, so the only filter that reaches one of them is its RID.
 const LINK_DUP = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d3', name: 'Orders' }
+const FIRST_ORDERS = 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d1'
 const IFACE = { rid: 'ri.ontology.main.interface.d0000000-0000-4000-8000-0000000000e1', name: 'Auditable' }
 const MONITOR = { rid: 'ri.object-sentinel.main.monitor.d0000000-0000-4000-8000-0000000000f1', name: 'Nightly sync' }
 const MONITOR_TWO = { rid: 'ri.object-sentinel.main.monitor.d0000000-0000-4000-8000-0000000000f2', name: 'Weekly rollup' }
@@ -318,8 +316,8 @@ const MONITOR_TWO = { rid: 'ri.object-sentinel.main.monitor.d0000000-0000-4000-8
 const LINK_TYPES = [
   { api_name: 'orders', display_name: LINK_ONE.name, object_type_a: 'Account', object_type_b: 'Order', rid: LINK_ONE.rid },
   { api_name: 'contacts', display_name: LINK_TWO.name, object_type_a: 'Account', object_type_b: 'Contact', rid: LINK_TWO.rid },
-  // A row orthanc cannot give a RID for: it is not pickable.
   { api_name: 'shipments', display_name: LINK_DUP.name, object_type_a: 'Account', object_type_b: 'Shipment', rid: LINK_DUP.rid },
+  // A row with no RID is not pickable.
   { api_name: 'ghost', display_name: 'Ghost', object_type_a: 'Account' },
 ]
 const INTERFACES = [
@@ -545,12 +543,12 @@ test('L2: ending FDE mode while on another stack still drops that branch\'s pick
   expect(saved(h).resources.linkTypes).toBeUndefined()
 })
 
-test('L2: /fde end after a restart still drops what that branch made', async ($, on) => {
+test('L2: /fde end after a restart drops the picks made under that binding', async ($, on) => {
   const h = harness(on)
   await open($)
   // The restart case the store mirror exists for: the session's binding is gone,
-  // the mirror still names the branch, and startupScope put its picks back. Both
-  // /fde end and a new /fde on act on that branch, so its picks go with it.
+  // the mirror still names it, and startupScope put the picks made under it back.
+  // Both /fde end and a new /fde on act on that binding, so its picks go with it.
   h.store.set('fdeOpen', storedSession())
   expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
   expect(await say($, 'fde', 'end')).toContain('# FDE handoff')
@@ -559,7 +557,7 @@ test('L2: /fde end after a restart still drops what that branch made', async ($,
   expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
 })
 
-test('L2: a new /fde on after a restart drops the picks of the branch it replaces', async ($, on) => {
+test('L2: a new /fde on after a restart drops the picks made under the binding it replaces', async ($, on) => {
   const h = harness(on)
   await open($)
   h.store.set('fdeOpen', storedSession())
