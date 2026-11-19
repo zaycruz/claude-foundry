@@ -128,14 +128,13 @@ type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
 
 const envelope = (data: unknown) =>
   JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors: [], meta: {}, warnings: [], artifacts: [], pagination: null })
-// path, kind, and the manifest's `input` when the command needs a secret the
-// operator types (orthanc marks those `token-on-stdin` or `host-and-token`).
-const COMMANDS: [string, string, string?][] = [
+// path and kind, plus the full entry for the commands the guard judges by
+// their credential fields (see CREDENTIAL_MANIFEST).
+const COMMANDS: [string, string][] = [
   ['configure list', 'local'],
-  ['auth store', 'local', 'token-on-stdin'],
-  ['configure profile create', 'local', 'host-and-token'],
   ['configure profile set', 'local'],
-  ['onboarding', 'local', 'host-and-token'],
+  ['auth delete', 'local'],
+  ['configure delete', 'local'],
   ['ontology list', 'read-only'],
   ['global-branch create', 'mutation'],
   ['ontology object-type-delete', 'mutation'],
@@ -188,8 +187,29 @@ const COMMANDS: [string, string, string?][] = [
   ['proposal accept', 'mutation'],
   ['proposal approve', 'mutation'],
 ]
+// The commands whose manifest entry names a credential: `input`, or
+// `credential_store` plus a flag that reads a secret from standard input.
+// `configure configure` is hidden, names no `input`, and replaces an existing
+// profile's credentials with `--force`.
+const CREDENTIAL_MANIFEST = [
+  { path: 'auth store', kind: 'local', input: 'token-on-stdin' },
+  { path: 'configure profile create', kind: 'local', input: 'host-and-token' },
+  { path: 'onboarding', kind: 'local', input: 'host-and-token' },
+  {
+    path: 'configure configure',
+    kind: 'local',
+    credential_store: 'secret-service-or-file',
+    args: [
+      { flag: '--token-stdin', takes_value: false },
+      { flag: '--client-secret-stdin', takes_value: false },
+    ],
+  },
+]
 const MANIFEST = envelope({
-  commands: COMMANDS.map(([path, kind, input]) => ({ path, kind, args: [], ...(input ? { input } : {}) })),
+  commands: [
+    ...COMMANDS.map(([path, kind]) => ({ path, kind, args: [] })),
+    ...CREDENTIAL_MANIFEST.map(entry => ({ args: [], ...entry })),
+  ],
 })
 
 type Answer = string | 'throw'
@@ -489,6 +509,9 @@ const CREDENTIAL_CALLS: [string, string[]][] = [
   ['configure profile create', ['other', '--host', 'https://other.example.com', '--token-stdin']],
   ['configure profile create', ['tester', '--host', 'https://tester.example.com', '--token-stdin', '--force']],
   ['onboarding', []],
+  // The hidden one: no `input`, only `credential_store` and `--token-stdin`.
+  // No `--profile`: a write naming a stack is refused before this gate.
+  ['configure configure', ['--host', 'https://other.example.com', '--auth-type', 'token', '--token-stdin', '--force']],
 ]
 
 // What the tool answered with, for a call that never reached orthanc.
@@ -521,6 +544,31 @@ test('Y11: in yolo a credential command is refused by name, and asks no one', as
   expect(error?.type).toBe('credential-command-denied')
   expect(error?.message ?? '').toContain("'configure profile create'")
   expect(h.asked).toEqual([])
+})
+
+// The gate reads a credential going IN. Taking one away names no secret, so
+// those are the deletes zay lets yolo run (2026-11-17), judged by the ladder.
+const CREDENTIAL_REMOVALS: [string, string[]][] = [
+  ['auth delete', ['tester']],
+  ['configure delete', ['tester']],
+]
+
+test('Y11: in yolo, dropping a credential runs as the delete it is', async ($, on) => {
+  const h = harness(on)
+  for (const [command, args] of CREDENTIAL_REMOVALS) {
+    expect((await write($, command, args)).deny).toBe(undefined)
+  }
+  expect(h.asked).toEqual([])
+  for (const [command] of CREDENTIAL_REMOVALS) expect(ran(h, command).length).toBe(1)
+})
+
+test('Y11: in auto, dropping a credential asks the operator instead of meeting the credential gate', async ($, on) => {
+  const h = harness(on, 'auto')
+  for (const [command, args] of CREDENTIAL_REMOVALS) {
+    const error = refusedWith(await write($, command, args))
+    expect({ command, deniedByCredentialGate: error?.type }).toEqual({ command, deniedByCredentialGate: undefined })
+  }
+  expect(h.asked.length).toBe(CREDENTIAL_REMOVALS.length)
 })
 
 test('Y12: an Orthanc write in Bash is refused in yolo and asks no one', async ($, on) => {
