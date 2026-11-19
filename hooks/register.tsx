@@ -74,6 +74,7 @@ import {
   isCredentialCommand,
   isErrorEnvelope,
   isOversized,
+  isRecord,
   isUsageError,
   listItems,
   manifestFrom,
@@ -805,16 +806,18 @@ async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void>
   // binding is looked for in the store too: after a restart the session atom is
   // gone, and /fde end and a new /fde on still act on the binding the mirror names,
   // whose picks startupScope put back into scope. A first binding with nothing
-  // behind it clears nothing.
+  // behind it clears nothing. The binding is stored first: if the clear cannot be
+  // saved, the session is left on the branch it was told about, not on the old one.
   const earlier = (await fdeState($)) ?? (await fdeFromEarlier($))
-  if (earlier !== null && earlier.branchRid !== (fde?.branchRid ?? '')) await dropBranchPicks($, earlier.profile)
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
+  if (earlier !== null && earlier.branchRid !== (fde?.branchRid ?? '')) await dropBranchPicks($, earlier.profile)
 }
 
-/** The scope keys that are read off the bound branch, taken from the entity table. */
-const branchReadKeys = Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, [] as FoundryResource[]]))
+/** The empty value of every scope key read off the bound branch; fresh each call. */
+const branchReadKeys = (): Record<string, FoundryResource[]> =>
+  Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, [] as FoundryResource[]]))
 
 /**
  * Takes the branch-read picks out of one stack's scope. That stack is not the
@@ -825,13 +828,14 @@ const branchReadKeys = Object.fromEntries(Object.values(ENTITY_KINDS).map(def =>
 async function dropBranchPicks($: EngineInterface, profile: string): Promise<void> {
   const active = await currentScope($)
   if (active.profile === profile) {
-    await saveScope($, { ...active, resources: { ...active.resources, ...branchReadKeys } })
+    await saveScope($, { ...active, resources: { ...active.resources, ...branchReadKeys() } })
     return
   }
   const stored = await storedScopes($)
   const entry = normalizeScope(stored[profile], profile, '')
-  if (Object.keys(branchReadKeys).every(key => ((entry.resources as Record<string, FoundryResource[]>)[key]?.length ?? 0) === 0)) return
-  await $.store.set('scopes', { ...stored, [profile]: { ...entry, resources: { ...entry.resources, ...branchReadKeys }, updatedAt: new Date().toISOString() } })
+  const cleared = branchReadKeys()
+  if (Object.keys(cleared).every(key => ((entry.resources as Record<string, FoundryResource[]>)[key]?.length ?? 0) === 0)) return
+  await $.store.set('scopes', { ...stored, [profile]: { ...entry, resources: { ...entry.resources, ...cleared }, updatedAt: new Date().toISOString() } })
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
@@ -1133,11 +1137,17 @@ async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigi
 
 // ---------- pickers ----------
 
-type Source = { title: string; isMulti: boolean; items: FoundryPickItem[]; resourceKind?: FoundryResourceKind }
+type Source = { title: string; isMulti: boolean; items: FoundryPickItem[]; resourceKind?: FoundryResourceKind; incomplete?: boolean }
 type PickerOptions = { resourceKind?: FoundryResourceKind; chain?: FoundryPickerKind[] }
 
 const toItems = (resources: readonly FoundryResource[]): FoundryPickItem[] =>
   resources.map(entry => ({ key: entry.rid, label: entry.name, hint: entry.hint }))
+
+/** Orthanc's note on a read, such as part of a branch listing coming from main. */
+const warningNote = (envelope: Envelope): string => {
+  const first = Array.isArray(envelope.warnings) ? envelope.warnings[0] : null
+  return isRecord(first) ? asString(first.message).slice(0, 90) : ''
+}
 
 async function inBatches<T, R>(values: readonly T[], size: number, run: (value: T) => Promise<R>): Promise<R[]> {
   const out: R[] = []
@@ -1201,7 +1211,9 @@ async function automateSource($: EngineInterface, scope: FoundryScope, query: st
   const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['automations'])), ['path'])
   return {
     // A root whose listing failed shrinks this list instead of failing it, so the
-    // title says when that happened.
+    // title says when that happened, and the listing is not applied on its own:
+    // the operator sees the short list before picking from it.
+    incomplete: failed.length > 0,
     title: `Automations${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}${failed.length === 0 ? '' : ` (${failed.length} of ${envelopes.length} listings failed)`}`,
     isMulti: true,
     items: toItems(rows),
@@ -1211,9 +1223,10 @@ async function automateSource($: EngineInterface, scope: FoundryScope, query: st
 
 /**
  * `ontology object-type-list` / `ontology action-type-list` on the ontology in
- * scope. These two read the main branch: the branch a session writes to is what
- * `ontology definition --branch` shows, and the mod's plan gate is what refuses a
- * type that is not on the branch.
+ * scope, on the main branch. Orthanc takes `--branch` on both, and the mod does
+ * not pass it here: a bound session picks its link types and interfaces off its
+ * own branch, and a write to a type that is not on the branch is refused by the
+ * branch rule and the plan gate, which judge the call itself.
  */
 async function typeSource($: EngineInterface, kind: 'object-type' | 'action-type', ontology: FoundryNamed, profile: string): Promise<Source | string> {
   const isAction = kind === 'action-type'
@@ -1241,8 +1254,11 @@ async function entitySource($: EngineInterface, kind: EntityKind, ontology: Foun
   const envelope = await runOrthanc($, ['ontology', def.list, ontology.rid, ...(branch === null ? [] : ['--branch', branch.rid])], profile, 120_000)
   const where = branch === null ? '' : ` on ${branch.name}`
   if (isErrorEnvelope(envelope)) return `${def.list}${where} failed: ${errorsOf(envelope)}`
+  // Orthanc warns when part of a branch read came from main (an interface's members).
+  // The listing carries the note, so the title cannot claim the branch for main's rows.
+  const note = warningNote(envelope)
   return {
-    title: `${def.label}${where}`,
+    title: `${def.label}${where}${note === '' ? '' : ` (orthanc: ${note})`}`,
     isMulti: true,
     items: toItems(entityRows(rowsOf(envelope, [def.rows]), def.hintKeys, def.separator)),
     resourceKind: def.resource,
@@ -1392,7 +1408,7 @@ async function openPicker($: EngineInterface, kind: FoundryPickerKind, source: S
   }
   const filtered = source.items.filter(item => matches(item, picker.filter))
   const only = filtered.length === 1 ? filtered[0] : undefined
-  if (query !== '' && only) return applyPick($, picker, [...new Set([...picker.chosen, only.key])])
+  if (query !== '' && only && !source.incomplete) return applyPick($, picker, [...new Set([...picker.chosen, only.key])])
   await $.state.set(PICKER, picker)
   const opened = await $.ui.open({ id: PANE, title: source.title, focus: true, closeOnEscape: true })
   if (!opened.isPlaced) {

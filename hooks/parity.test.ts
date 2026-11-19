@@ -23,12 +23,15 @@
 // L2  FDE mode is bound and the read omits --branch, so it lists main's types; or
 //     a branch that is not FDE's reaches the wire (the name a branch creation
 //     left as the working branch, or a binding whose ontology is not the one in
-//     scope), or the listing does not say which branch it read.
+//     scope), or the listing does not say which branch it read, or it hides what
+//     orthanc says it read off main, or the object and action type reads start
+//     naming a branch, or a clear that cannot be saved leaves the old binding.
 // L3  A row is keyed by something but its RID (the same type lands twice, or a
 //     row with no RID does), or the pick shows no clue what the link joins or
 //     which object types implement the interface.
 // L4  /automation walks outside the namespace in scope, ignores the selected
-//     projects, or throws the argument away instead of passing `--name`.
+//     projects, throws the argument away instead of passing `--name`, or picks
+//     from a walk whose listings partly failed without showing the operator.
 // L5  A pick lands under the wrong scope key, is missing from the prompt block,
 //     or /foundry does not count it or clears the wrong thing.
 // L6  Changing the ontology keeps link types, interfaces or automations picked
@@ -324,13 +327,17 @@ const INTERFACES = [
   { api_name: 'auditable', display_name: IFACE.name, implemented_by: [{ api_name: 'Account' }, { api_name: 'Order' }], rid: IFACE.rid },
   { api_name: 'versioned', display_name: 'Versioned', implemented_by: [], rid: 'ri.ontology.main.interface.d0000000-0000-4000-8000-0000000000e2' },
 ]
+// The two listings /object-type and /action-type read, for the argv pins.
+const OBJECT_TYPES = [{ api_name: 'Program', display_name: 'Program' }]
+const ACTION_TYPES = [{ api_name: 'upsert', display_name: 'Upsert' }]
+
 const AUTOMATIONS = [
   { rid: MONITOR.rid, name: MONITOR.name, path: `${PROJECT.path}/${MONITOR.name}`, folder_rid: PROJECT.rid },
   { rid: MONITOR_TWO.rid, name: MONITOR_TWO.name, path: `${PROJECT_TWO.path}/${MONITOR_TWO.name}`, folder_rid: PROJECT_TWO.rid },
 ]
 
-const envelope = (data: unknown, errors: unknown[] = []) =>
-  JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors, meta: {}, warnings: [], artifacts: [], pagination: null })
+const envelope = (data: unknown, errors: unknown[] = [], warnings: unknown[] = []) =>
+  JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors, meta: {}, warnings, artifacts: [], pagination: null })
 const MANIFEST = envelope({ commands: [{ path: 'ontology list', kind: 'read-only', args: [] }] })
 
 type Harness = {
@@ -341,12 +348,14 @@ type Harness = {
   fail: string[]
   /** Whole calls that fail, for a listing that fails at one root only. */
   failExact: string[]
+  /** Store keys whose write throws, for a save that cannot be made. */
+  failStore: string[]
   /** What `project list` returns. */
   projects: Record<string, unknown>[]
 }
 
 function harness(on: On): Harness {
-  const h: Harness = { calls: [], fail: [], failExact: [], store: new Map<string, unknown>([['approvalMode', 'yolo']]), projects: [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }] }
+  const h: Harness = { calls: [], fail: [], failExact: [], failStore: [], store: new Map<string, unknown>([['approvalMode', 'yolo']]), projects: [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }] }
   on('process.run', (_$, e) => {
     let words = e.argv.slice(1).filter(word => word !== '--agent' && word !== '--non-interactive')
     if (words[0] === '--profile') words = words.slice(2)
@@ -369,7 +378,13 @@ function harness(on: On): Harness {
       return reply(envelope({ branch_record: { branch_rid: asked, branch_status: 'OPEN', display_name: BRANCH.name, ontology_rid: ONT.rid, description: '' } }))
     }
     if (line.startsWith('ontology link-type-list ')) return reply(envelope({ link_types: LINK_TYPES, total: LINK_TYPES.length }))
-    if (line.startsWith('ontology interface-list ')) return reply(envelope({ interfaces: INTERFACES, total: INTERFACES.length }))
+    if (line.startsWith('ontology interface-list ')) {
+      // Orthanc's own note when a branch read takes an interface's members from main.
+      const warn = line.includes('--branch') ? [{ type: 'main-read', message: 'interface members were read on main' }] : []
+      return reply(envelope({ interfaces: INTERFACES, total: INTERFACES.length }, [], warn))
+    }
+    if (line.startsWith('ontology object-type-list ')) return reply(envelope({ object_types: OBJECT_TYPES }))
+    if (line.startsWith('ontology action-type-list ')) return reply(envelope({ action_types: ACTION_TYPES }))
     if (line.startsWith('automate list')) {
       const name = flag('--name')
       const folder = flag('--folder-rid')
@@ -387,6 +402,7 @@ function harness(on: On): Harness {
   })
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
   on('store.set', (_$, e) => {
+    if (h.failStore.includes(e.key)) throw new Error(`store write refused: ${e.key}`)
     h.store.set(e.key, e.value)
     return { value: undefined }
   })
@@ -566,6 +582,48 @@ test('L2: a new /fde on after a restart drops the picks made under the binding i
   expect(saved(h).resources.linkTypes).toBeUndefined()
 })
 
+test('L1: /object-type and /action-type list the ontology in scope, and stay on main', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  expect(await say($, 'object-type', '')).toContain('Program')
+  expect(h.calls).toContain(`ontology object-type-list ${ONT.rid}`)
+  expect(await say($, 'action-type', 'upsert')).toContain('Action types: Upsert')
+  expect(h.calls).toContain(`ontology action-type-list ${ONT.rid}`)
+  // FDE mode reads link types and interfaces off its branch; these two keep reading
+  // main. orthanc takes --branch on them too, so the absence is this mod's choice.
+  expect(await say($, 'fde', `--branch ${BRANCH.rid} tidy the webhook`)).toContain('FDE mode on')
+  h.calls.length = 0
+  expect(await say($, 'object-type', '')).toContain('Program')
+  expect(await say($, 'action-type', '')).toContain('Upsert')
+  expect(h.calls).toEqual([`ontology object-type-list ${ONT.rid}`, `ontology action-type-list ${ONT.rid}`])
+})
+
+test('L2: what orthanc warns about a branch read travels with the listing', async ($, on) => {
+  harness(on)
+  await open($)
+  expect(await say($, 'fde', `--branch ${BRANCH.rid} tidy the webhook`)).toContain('FDE mode on')
+  // The fake warns the way orthanc does when an interface's members came from main.
+  expect((await say($, 'interface', '')).toLowerCase()).toContain('orthanc: interface members were read on main')
+  expect(await say($, 'fde', 'end')).toContain('# FDE handoff')
+  expect((await say($, 'interface', '')).toLowerCase()).not.toContain('orthanc:')
+})
+
+test('L2: a clear that cannot be saved still ends the binding', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  expect(await say($, 'fde', `--branch ${BRANCH.rid} tidy the webhook`)).toContain('FDE mode on')
+  expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  // The store refuses the scopes write the clear needs. The mode still ends: the
+  // session is never left reading a branch its own state says it is off.
+  h.failStore = ['scopes']
+  expect(await say($, 'fde', 'end')).toContain('failed')
+  expect(h.store.get('fdeOpen')).toBe(null)
+  h.failStore = []
+  h.calls.length = 0
+  expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+})
+
 test('L4 L5 L8: /automation walks the projects or the namespace, filters with --name, and clears alone', async ($, on) => {
   const h = harness(on)
   await open($)
@@ -593,6 +651,14 @@ test('L4 L5 L8: /automation walks the projects or the namespace, filters with --
   const partial = await say($, 'automation', '')
   expect(partial).toContain(MONITOR.name)
   expect(partial).toContain('1 of 2 listings failed')
+  // A degraded walk is not applied on its own, even when one row matches: the
+  // operator has to see the short list before anything is saved from it.
+  h.failExact = [
+    `automate list --folder-rid ${PROJECT_TWO.rid}`,
+    `automate list --folder-rid ${PROJECT_TWO.rid} --name ${MONITOR.name}`,
+  ]
+  expect(await say($, 'automation', MONITOR.name)).not.toContain('Automations: ')
+  expect(saved(h).resources.automations).toBeUndefined()
   // A selected project roots the walk there.
   h.failExact = []
   expect(await say($, 'project', PROJECT.rid)).toContain(PROJECT.name)

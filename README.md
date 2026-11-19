@@ -132,7 +132,8 @@ The pick shows what each link joins and which object types implement each
 interface, and names the RID of every pick whose name another pick shares.
 `/automation` runs `automate list` under the selected projects, or under the
 namespace's, or every space when neither is picked, and passes its argument to
-`--name`.
+`--name`. When one of those listings fails, the result says how many did, and a
+short walk is never picked from on its own.
 
 `/namespace` scopes the context to one Compass namespace (orthanc's space):
 `/project` and the Compass pickers list only its projects, `/search` stays under
