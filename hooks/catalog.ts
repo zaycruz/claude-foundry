@@ -29,6 +29,9 @@ export type CompassKind = keyof typeof COMPASS_KINDS
 
 export const RESOURCE_LABELS: Record<FoundryResourceKind, string> = {
   ...Object.fromEntries(Object.entries(COMPASS_KINDS).map(([kind, def]) => [kind, def.label])),
+  linkTypes: 'Link types',
+  interfaces: 'Interfaces',
+  automations: 'Automations',
   mediaItems: 'Media items',
   objectInstances: 'Object instances',
   functions: 'Functions',
@@ -37,12 +40,17 @@ export const RESOURCE_LABELS: Record<FoundryResourceKind, string> = {
   searchResults: 'Search results',
 } as Record<FoundryResourceKind, string>
 
-/** Resource kinds that belong to the ontology and go when it changes. */
-const ONTOLOGY_KINDS: readonly FoundryResourceKind[] = ['objectInstances', 'functions']
+/**
+ * Resource kinds that belong to the ontology and go when it changes. Link types,
+ * interfaces and automations are in it too: the first two are entities of the
+ * ontology, and an automation watches an ontology's object sets.
+ */
+const ONTOLOGY_KINDS: readonly FoundryResourceKind[] = ['objectInstances', 'functions', 'linkTypes', 'interfaces', 'automations']
 
 /** Resource kinds addressed by a Compass path, so they go when the namespace changes. */
 const NAMESPACE_KINDS: readonly FoundryResourceKind[] = [
   ...(Object.keys(COMPASS_KINDS) as CompassKind[]),
+  'automations',
   'mediaItems',
   'permissions',
   'searchResults',
@@ -60,7 +68,9 @@ export type CommandAction =
 export type CommandEntry = { name: string; description: string; argumentHint?: string; action: CommandAction }
 
 const CLEARABLE = '[filter | clear]'
-const LINK_BEAD = 'orthanc-ra6'
+// Orthanc 0.7.10 lists link types, interfaces and automations (they are pickers
+// now) but still has no egress-policy or certificate list, only `connectivity
+// egress ensure`, so those two keep waiting on this bead.
 const LISTING_BEAD = 'orthanc-qm5'
 export const OBJECT_QUERY_BEAD = 'orthanc-4f7'
 
@@ -90,8 +100,8 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
   picker('project', 'project', 'Choose the Foundry projects in scope'),
   picker('object-type', 'object-type', 'Choose the ontology object types in scope'),
   picker('action-type', 'action-type', 'Choose the ontology action types in scope'),
-  blocked('link-type', 'ontology link types', LINK_BEAD),
-  blocked('interface', 'ontology interfaces', LINK_BEAD),
+  picker('link-type', 'link-type', 'Choose the ontology link types in scope'),
+  picker('interface', 'interface', 'Choose the ontology interfaces in scope'),
   resource('folder', 'folders'),
   resource('dataset', 'datasets'),
   resource('media-set', 'mediaSets'),
@@ -102,7 +112,7 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
   resource('aip-chatbot', 'aipChatbots'),
   blocked('egress-policy', 'egress policies', LISTING_BEAD),
   blocked('certificate', 'certificates', LISTING_BEAD),
-  blocked('automation', 'automations', LISTING_BEAD),
+  picker('automation', 'automation', 'Choose the Automate automations in scope'),
   {
     name: 'media-item',
     description: 'Add a media item by media-set RID and item path or RID',
@@ -150,6 +160,13 @@ export const COMMAND_TABLE: readonly CommandEntry[] = [
   { name: 'trace', description: 'Show trace export status (Langfuse/OTLP) and check the last Foundry trace landed', action: { type: 'trace' } },
   { name: 'mcp-status', description: 'Show Orthanc and Foundry stack status', action: { type: 'mcp-status' } },
 ]
+
+/** The scope key a picker writes, for the pickers that list one resource kind of their own. */
+export const PICKER_RESOURCES: Partial<Record<FoundryPickerKind, FoundryResourceKind>> = {
+  'link-type': 'linkTypes',
+  interface: 'interfaces',
+  automation: 'automations',
+}
 
 export const blockedText = (what: string, bead: string) =>
   `Orthanc cannot list ${what} yet, so this command is waiting on bead ${bead} ` +
@@ -253,6 +270,32 @@ export function resourceRows(rows: readonly Record<string, unknown>[], hintKeys:
   })
 }
 
+/** A row field as names: one string, or a list of strings or objects with a name. */
+const namesOf = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.flatMap(entry => (isRecord(entry) ? [asString(entry.display_name) || asString(entry.api_name) || asString(entry.name) || asString(entry.rid)] : [asString(entry)]))
+        .filter(Boolean)
+    : typeof value === 'string' && value !== ''
+      ? [value]
+      : []
+
+/**
+ * Link-type and interface rows as resources: the RID is the key, and the hint is
+ * what the row says the link joins (`object_type_a`, `object_type_b`) or who
+ * implements the interface (`implemented_by`), so a pick is recognisable without
+ * a second read.
+ */
+export function entityRows(rows: readonly Record<string, unknown>[], hintKeys: readonly string[], separator: string): FoundryResource[] {
+  const seen = new Set<string>()
+  return rows.flatMap(row => {
+    const rid = asString(row.rid)
+    if (rid === '' || seen.has(rid)) return []
+    seen.add(rid)
+    const name = asString(row.display_name) || asString(row.displayName) || asString(row.api_name) || asString(row.name) || rid
+    return [{ rid, name, hint: hintKeys.flatMap(key => namesOf(row[key])).join(separator) }]
+  })
+}
+
 /** The new selection, plus earlier selections the listing did not show. */
 export function mergeSelections(
   existing: readonly FoundryResource[],
@@ -327,6 +370,9 @@ const COMMAND_FOR: Record<FoundryResourceKind, string> = {
   sources: '/source',
   developerConsoles: '/developer-console',
   aipChatbots: '/aip-chatbot',
+  linkTypes: '/link-type',
+  interfaces: '/interface',
+  automations: '/automation',
   objectInstances: '/objects',
   functions: '/function',
   languageModels: '/language-model',

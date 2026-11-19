@@ -21,6 +21,9 @@ export type FoundryResourceKind =
   | 'languageModels'
   | 'permissions'
   | 'searchResults'
+  | 'linkTypes'
+  | 'interfaces'
+  | 'automations'
 
 /** One selected resource: its RID (or key), display name and a path or type hint. */
 export type FoundryResource = { rid: string; name: string; hint: string }
@@ -39,7 +42,17 @@ export type FoundryScope = {
 
 export type FoundryPickItem = { key: string; label: string; hint: string }
 
-export type FoundryPickerKind = 'profile' | 'ontology' | 'namespace' | 'project' | 'object-type' | 'action-type' | 'resource'
+export type FoundryPickerKind =
+  | 'profile'
+  | 'ontology'
+  | 'namespace'
+  | 'project'
+  | 'object-type'
+  | 'action-type'
+  | 'link-type'
+  | 'interface'
+  | 'automation'
+  | 'resource'
 
 export type FoundryPicker = {
   kind: FoundryPickerKind

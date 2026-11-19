@@ -113,17 +113,24 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/onboard`, `/mcp-status` | Check orthanc, profiles, stack, credentials, context |
 | `/auth [profile]` | How to store credentials, and whether they work |
 | `/profile`, `/ontology`, `/namespace`, `/project` | Choose the stack, ontology, namespace, projects |
-| `/object-type`, `/action-type` | Ontology types in scope |
-| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
+| `/object-type`, `/action-type`, `/link-type`, `/interface` | Ontology types in scope |
+| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` `/automation` | Compass resources and automations in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
 | `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt any open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
-filter, and `clear`. `/link-type`, `/interface`, `/egress-policy`,
-`/certificate` and `/automation` wait on Orthanc list commands and say so; the
-mod never falls back to Foundry REST.
+filter, and `clear`. `/egress-policy` and `/certificate` wait on Orthanc list
+commands and say so, naming the bead; the mod never falls back to Foundry REST.
+`/link-type` and `/interface` run `ontology link-type-list` and `ontology
+interface-list` on the ontology in scope, on the branch this session is working
+on when it has one (`--branch`, the way `ontology definition` reads a branch), so
+an FDE session picks the link types and interfaces of its own branch; the pick
+shows what each link joins and which object types implement each interface.
+`/automation` runs `automate list` under the selected projects, or under the
+namespace's, or every space when neither is picked, and passes its argument to
+`--name`.
 
 `/namespace` scopes the context to one Compass namespace (orthanc's space):
 `/project` and the Compass pickers list only its projects, `/search` stays under

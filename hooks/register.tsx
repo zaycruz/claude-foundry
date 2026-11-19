@@ -17,6 +17,7 @@ import {
   type CompassKind,
   contextLines,
   emptyScope,
+  entityRows,
   foundryTree,
   hasFocus,
   mergeSelections,
@@ -25,6 +26,7 @@ import {
   OBJECT_QUERY_BEAD,
   objectsQuery,
   ontologyChanged,
+  PICKER_RESOURCES,
   RESOURCE_LABELS,
   resourceArgs,
   resourceRows,
@@ -1109,15 +1111,21 @@ async function inBatches<T, R>(values: readonly T[], size: number, run: (value: 
   return out
 }
 
+/** The folder or project RIDs a Compass walk starts from: the selected projects, else every visible one. */
+async function compassRoots($: EngineInterface, scope: FoundryScope): Promise<string[] | string> {
+  const selected = scope.projects.map(project => project.rid)
+  if (selected.length > 0) return selected
+  const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
+  if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
+  return listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
+}
+
 /** Compass resources of one kind under the selected projects, or every visible project. */
 async function compassSource($: EngineInterface, scope: FoundryScope, kind: CompassKind, query: string): Promise<Source | string> {
   const def = COMPASS_KINDS[kind]
-  let roots = scope.projects.map(project => project.rid)
-  if (roots.length === 0) {
-    const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
-    if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
-    roots = listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
-  }
+  const found = await compassRoots($, scope)
+  if (typeof found === 'string') return found
+  const roots = found
   if (roots.length === 0) return `No projects are visible ${scope.namespace ? `in ${scope.namespace.name}` : 'on this stack'}. No selection was saved.`
   const search = kind === 'folders' && !query.trim() ? 'ri.compass.main.folder.' : query
   const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
@@ -1132,6 +1140,59 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
     items: toItems(rows),
     resourceKind: kind,
   }
+}
+
+/**
+ * `automate list` under the selected projects, or under the namespace in scope.
+ * With neither, one walk with no --folder-rid, which is every space; `--name` is
+ * orthanc's own filter, so the command's argument goes to it and not to the
+ * picker's.
+ */
+async function automateSource($: EngineInterface, scope: FoundryScope, query: string): Promise<Source | string> {
+  const name = query.trim()
+  // One root, '' = no --folder-rid, which walks every space.
+  let roots = ['']
+  if (scope.projects.length > 0) roots = scope.projects.map(project => project.rid)
+  else if (scope.namespace !== null) {
+    const found = await compassRoots($, scope)
+    if (typeof found === 'string') return found
+    if (found.length === 0) return `No projects are visible in ${scope.namespace.name}. No selection was saved.`
+    roots = found
+  }
+  const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
+    runOrthanc($, ['automate', 'list', ...(root === '' ? [] : ['--folder-rid', root]), ...(name === '' ? [] : ['--name', name])], scope.profile, 180_000),
+  )
+  const failed = envelopes.filter(isErrorEnvelope)
+  if (failed.length === envelopes.length && failed[0]) return `automate list failed: ${errorsOf(failed[0])}`
+  const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['automations'])), ['path'])
+  return {
+    title: `Automations${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}`,
+    isMulti: true,
+    items: toItems(rows),
+    resourceKind: 'automations',
+  }
+}
+
+/**
+ * `ontology link-type-list` / `ontology interface-list`, on main or on the
+ * branch this session works on, the way `ontology definition --branch` reads it,
+ * so an FDE session picks the types of its own branch.
+ */
+async function entitySource(
+  $: EngineInterface,
+  kind: 'link-type' | 'interface',
+  ontology: FoundryNamed,
+  branch: { rid: string; name: string } | null,
+  profile: string,
+): Promise<Source | string> {
+  const link = kind === 'link-type'
+  const list = link ? 'link-type-list' : 'interface-list'
+  const envelope = await runOrthanc($, ['ontology', list, ontology.rid, ...(branch === null ? [] : ['--branch', branch.rid])], profile, 120_000)
+  if (isErrorEnvelope(envelope)) return `${list} failed: ${errorsOf(envelope)}`
+  // The hint is what the link joins, or which object types implement the interface.
+  const items = entityRows(rowsOf(envelope, [link ? 'link_types' : 'interfaces']), link ? ['object_type_a', 'object_type_b'] : ['implemented_by'], link ? ' → ' : ', ')
+  const label = link ? 'Link types' : 'Interfaces'
+  return { title: branch === null ? label : `${label} on ${branch.name}`, isMulti: true, items, resourceKind: PICKER_RESOURCES[kind] }
 }
 
 async function pickerSource(
@@ -1195,7 +1256,13 @@ async function pickerSource(
       })),
     }
   }
+  if (kind === 'automation') return automateSource($, scope, query)
   if (scope.ontology === null) return 'No ontology is selected. Run /ontology first.'
+  if (kind === 'link-type' || kind === 'interface') {
+    const rid = (await $.state.get(BRANCH)).value ?? null
+    const fde = rid === null ? null : await fdeState($)
+    return entitySource($, kind, scope.ontology, rid === null ? null : { rid, name: fde !== null && fde.branchRid === rid ? fde.branchName : rid }, scope.profile)
+  }
   const isAction = kind === 'action-type'
   const envelope = await runOrthanc(
     $,
@@ -1248,7 +1315,7 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     await saveScope($, { ...scope, projects: chosen.map(item => ({ rid: item.key, name: item.label })) })
     return `Projects: ${chosen.map(item => item.label).join(', ') || 'none'}.`
   }
-  if (picker.kind === 'resource' && picker.resourceKind) {
+  if (picker.resourceKind !== undefined) {
     const kind = picker.resourceKind
     const asResource = (item: FoundryPickItem): FoundryResource => ({ rid: item.key, name: item.label, hint: item.hint })
     const merged = mergeSelections(scope.resources[kind] ?? [], chosen.map(asResource), picker.items.map(asResource))
@@ -1269,7 +1336,7 @@ function preselected(scope: FoundryScope, kind: FoundryPickerKind, resourceKind?
   if (kind === 'project') return scope.projects.map(project => project.rid)
   if (kind === 'object-type') return scope.objectTypes.map(type => type.apiName)
   if (kind === 'action-type') return scope.actionTypes.map(type => type.apiName)
-  if (kind === 'resource' && resourceKind) return (scope.resources[resourceKind] ?? []).map(entry => entry.rid)
+  if (resourceKind) return (scope.resources[resourceKind] ?? []).map(entry => entry.rid)
   return []
 }
 
@@ -1284,7 +1351,8 @@ async function openPicker($: EngineInterface, kind: FoundryPickerKind, source: S
     isMulti: source.isMulti,
     items: source.items,
     chosen: preselected(scope, kind, source.resourceKind),
-    filter: kind === 'resource' ? '' : query,
+    // These listings filter on the argument themselves; the picker starts unfiltered.
+    filter: kind === 'resource' || kind === 'automation' ? '' : query,
     chain,
   }
   const filtered = source.items.filter(item => matches(item, picker.filter))
@@ -1313,7 +1381,7 @@ async function runPicker($: EngineInterface, kind: FoundryPickerKind, args: stri
     if (kind === 'project') await saveScope($, { ...scope, projects: [] })
     if (kind === 'object-type') await saveScope($, { ...scope, objectTypes: [] })
     if (kind === 'action-type') await saveScope($, { ...scope, actionTypes: [] })
-    if (kind === 'resource' && options.resourceKind) {
+    if (options.resourceKind) {
       await saveScope($, { ...scope, resources: { ...scope.resources, [options.resourceKind]: [] } })
     }
     return `Cleared ${options.resourceKind ? RESOURCE_LABELS[options.resourceKind].toLowerCase() : kind} selection.`
@@ -1505,8 +1573,10 @@ async function clearFromTree($: EngineInterface, target: ClearTarget): Promise<v
 async function runEntry($: EngineInterface, entry: CommandEntry, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const action = entry.action
   switch (action.type) {
-    case 'picker':
-      return runPicker($, action.kind, args)
+    case 'picker': {
+      const resourceKind = PICKER_RESOURCES[action.kind]
+      return runPicker($, action.kind, args, resourceKind === undefined ? {} : { resourceKind })
+    }
     case 'resource':
       return runPicker($, 'resource', args, { resourceKind: action.kind })
     case 'blocked':
