@@ -119,6 +119,18 @@ const READ_VERBS = new Set([
   'preview', 'query', 'read', 'view', 'help', 'export', 'status', 'download',
 ])
 export const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
+// Orthanc names a command that takes a credential the operator types two ways:
+// `input`, or `credential_store` with a flag that reads the secret from standard
+// input. An agent must never be the one to hand a credential over, so a command
+// marked either way never runs. A command that only clears the store
+// (`auth delete`, `configure delete`) types nothing, so the ladder judges those
+// as the deletes they are. The names stay: a binary that ships the command
+// without either mark is refused too.
+const DOUBLE_DASH_STDIN = /^--[\w-]+-stdin$/
+export const isCredentialCommand = (command: ManifestCommand) =>
+  DENIED_COMMANDS.has(command.path) ||
+  command.input !== undefined ||
+  (command.credentialStore !== undefined && (command.flags ?? []).some(flag => DOUBLE_DASH_STDIN.test(flag.flag)))
 // Orthanc's global stack flag; it takes no abbreviation (`--prof` is a usage error).
 const PROFILE_FLAG = /^--profile(=|$)/
 // Local commands that change which stack orthanc runs on when none is named.
@@ -1134,6 +1146,10 @@ function shellClassification(
     }
     const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
     if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
+    if (manifest.some(entry => entry.path === call.path && isCredentialCommand(entry))) {
+      // Sending the agent to orthanc_cli here would only meet a second refusal.
+      return refuse(call.path, `'orthanc ${call.path}' needs a credential the operator types, so neither Bash nor orthanc_cli runs it. The operator runs it in a terminal; /auth prints the command.`)
+    }
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null

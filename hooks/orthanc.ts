@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag } from './policy'
+import { type ManifestCommand, type ManifestFlag, isCredentialCommand } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -254,23 +254,16 @@ export const normalizeCommand = (command: string) => command.trim().replace(/\s+
 const groupOf = (path: string) => path.split(' ')[0] ?? path
 
 function commandLine(command: ManifestCommand): string {
-  const traits = [command.kind, command.auth && `auth: ${command.auth}`, command.input && `input: ${command.input}`]
+  const traits = [
+    command.kind,
+    command.auth && `auth: ${command.auth}`,
+    command.input && `input: ${command.input}`,
+    isCredentialCommand(command) && 'operator-only',
+  ]
     .filter(Boolean)
     .join(', ')
   return `${command.path}${traits ? ` — ${traits}` : ''}`
 }
-
-// Orthanc names a typed secret two ways: `input`, and `credential_store` with a
-// flag that reads the secret from standard input (`configure configure`, which
-// is hidden from --help and names no `input`). A command that only names the
-// store it clears (`auth delete`, `configure delete`) takes no secret in, so the
-// ladder judges those as the deletes they are.
-const DOUBLE_DASH_STDIN = /^--[\w-]+-stdin$/
-const fillsCredentialStore = (command: ManifestCommand) =>
-  command.credentialStore !== undefined && (command.flags ?? []).some(flag => DOUBLE_DASH_STDIN.test(flag.flag))
-
-export const isCredentialCommand = (command: ManifestCommand) =>
-  DENIED_COMMANDS.has(command.path) || command.input !== undefined || fillsCredentialStore(command)
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
   const lines = [commandLine(command)]

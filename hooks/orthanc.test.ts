@@ -29,12 +29,15 @@
 //  T17 A credential marker in a shape the guard cannot read reads as no marker.
 //  T18 The command names stop being enough on their own, so a binary that
 //      ships `auth store` with no field runs.
+//  T19 A command that can never run is marked where the agent reads it, so it is
+//      not looked up, planned and then refused.
 
 import type { HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, isCredentialCommand, manifestFrom } from './orthanc'
-import { type ManifestCommand, resolveOrthancCommand } from './policy'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, manifestFrom, renderCommand } from './orthanc'
+
+import { type ManifestCommand, isCredentialCommand, resolveOrthancCommand } from './policy'
 import { PROCESS_RUN_MAX_MS, readToExit } from './process'
 
 const CHECKS_WAIT: ManifestCommand = {
@@ -248,4 +251,11 @@ test('T15 T16 T17 T18: which manifest entries name a secret the agent must not p
   // T18: the names still refuse a binary that ships the command with no field.
   expect(isCredentialCommand({ path: 'auth store', kind: 'local', flags: [] })).toBe(true)
   expect(isCredentialCommand({ path: 'onboarding', kind: 'local', flags: [] })).toBe(true)
+})
+
+test('T19: orthanc_help marks the commands that can never run, and leaves the rest alone', async () => {
+  expect(renderCommand({ path: 'configure configure', kind: 'local', credentialStore: 'secret-service-or-file', flags: [{ flag: '--token-stdin', takesValue: false }] }, null)).toContain('operator-only')
+  expect(renderCommand({ path: 'auth store', kind: 'local', input: 'token-on-stdin' }, null)).toContain('operator-only')
+  expect(renderCommand({ path: 'auth delete', kind: 'local', credentialStore: 'secret-service-or-file' }, null)).not.toContain('operator-only')
+  expect(renderCommand({ path: 'ontology list', kind: 'read-only' }, null)).not.toContain('operator-only')
 })

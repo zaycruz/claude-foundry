@@ -26,6 +26,8 @@
 //      names orthanc.
 //  S8  A local command that only lists or shows (`ai-fde tools list`,
 //      `smoke schedule`) is refused as a write.
+//  S9  A credential command in Bash is told to "run it with orthanc_cli", which
+//      refuses it too, so the agent works around a call nothing may run.
 //  K1  Interpreter code that names orthanc and starts a process runs:
 //      subprocess, os.system, os.exec*, child_process, Bun.spawn, system(),
 //      backticks and qx in Ruby and Perl, awk system() and getline, osascript
@@ -56,6 +58,11 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'ai-fde tools list', kind: 'local' },
   { path: 'smoke schedule', kind: 'local' },
   { path: 'alias add', kind: 'local' },
+  // Orthanc 0.7.10 marks: `input` for a typed secret, `credential_store` for the
+  // store a command writes (`configure configure`) or clears (`auth delete`).
+  { path: 'auth store', kind: 'local', input: 'token-on-stdin' },
+  { path: 'configure configure', kind: 'local', credentialStore: 'secret-service-or-file', flags: [{ flag: '--token-stdin', takesValue: false }] },
+  { path: 'auth delete', kind: 'local', credentialStore: 'secret-service-or-file' },
 ]
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 const approve = { action: 'approve', reason: 'ok' } as const
@@ -140,4 +147,18 @@ test('S1 E2E: a Python heredoc that edits text naming orthanc runs through the g
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   const ran = (await $.tool.call({ tool: 'Bash', command: PASSES[0]![1] } as never)) as { deny?: string }
   expect(ran.deny).toBe(undefined)
+})
+
+test('S9: a credential command in Bash is sent to the operator, not to orthanc_cli', () => {
+  for (const line of [
+    'orthanc auth store tester',
+    'orthanc configure configure --host https://x.example.palantirfoundry.com --auth-type token --token-stdin --force',
+  ]) {
+    const error = classifyCall('Bash', { command: line }, MANIFEST, null)?.error ?? ''
+    expect(error).toContain('needs a credential the operator types')
+    expect(error).toContain('/auth prints the command')
+    expect(error).not.toContain('with orthanc_cli')
+  }
+  // Clearing a stored credential types no secret: that call keeps the write routing.
+  expect(classifyCall('Bash', { command: 'orthanc auth delete tester' }, MANIFEST, null)?.error).toContain("Run 'auth delete' with orthanc_cli")
 })
