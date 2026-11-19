@@ -31,6 +31,15 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'cp', kind: 'mutation' },
   { path: 'repository tag create', kind: 'mutation' },
   { path: 'search', kind: 'read-only' },
+  // The six ontology schema writes orthanc 0.7.10 added (#181), and the branch
+  // index write of 0.7.7: the entries are copied from `orthanc agent-manifest`.
+  { path: 'ontology interface-upsert', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: { work_branch_flag: '--branch' } },
+  { path: 'ontology interface-delete', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: { work_branch_flag: '--branch' } },
+  { path: 'ontology shared-property-upsert', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: { work_branch_flag: '--branch' } },
+  { path: 'ontology shared-property-delete', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: { work_branch_flag: '--branch' } },
+  { path: 'ontology type-group-upsert', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: { work_branch_flag: '--branch' } },
+  { path: 'ontology type-group-delete', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] }, operatorApprovalScope: { work_branch_flag: '--branch' } },
+  { path: 'ontology branch-index', kind: 'mutation' },
 ]
 const CLI = 'mcp__foundry__orthanc_cli'
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
@@ -266,6 +275,44 @@ test('F18 F19 F20: one plain branch value; -b counts; cp is gated', async () => 
   expect(blockedEverywhere(cli('cp', ['ri.a', 'ri.f', '--apply']))).toBe(true)
   expect(asksEverywhere(cli('cp', ['ri.a', 'ri.f', '-bmaster']))).toBe(true)
   expect(cli('cp', ['ri.a', 'ri.f', '-b', 'agent-copy', '--apply'])?.error).toBe(undefined)
+})
+
+// orthanc 0.7.10 (#181) added the schema writes beyond object, link and action
+// types, and `ontology branch-index` (0.7.7) was never in the set. Ways this can
+// fail, written before the change:
+//  F26a One of them is not gated: with no --branch it reaches orthanc, which
+//       refuses it as a usage error, or — if orthanc ever defaults the branch —
+//       it changes the main ontology with no branch named.
+//  F26b The gate takes a value that is not provably not main: an ontology branch
+//       RID (`ri.ontology.main.branch.…`), which branch-index accepts.
+//  F26c A write naming main is blocked outright, so the operator cannot approve
+//       it; it must ask (yolo.test.ts Y13 covers the refusal with no one to ask).
+//  F26d The gate is so strict that ordinary work on a global branch does not
+//       run: in yolo it must run with no dialog, as it does for every other
+//       ontology write on one global branch RID.
+const SCHEMA_WRITES = [
+  'ontology interface-upsert',
+  'ontology interface-delete',
+  'ontology shared-property-upsert',
+  'ontology shared-property-delete',
+  'ontology type-group-upsert',
+  'ontology type-group-delete',
+  'ontology branch-index',
+]
+
+test('F26: an ontology schema write (interface, shared property, type group, branch index) is an ontology write', async () => {
+  const cli = (command: string, args: string[]) => classifyCall(CLI, { command, args }, MANIFEST, null)
+  for (const path of SCHEMA_WRITES) {
+    expect({ path, noBranch: blockedEverywhere(cli(path, ['T', '--apply'])) }).toEqual({ path, noBranch: true })
+    expect({ path, ontologyBranch: blockedEverywhere(cli(path, ['T', '--branch', 'ri.ontology.main.branch.x', '--apply'])) }).toEqual({
+      path,
+      ontologyBranch: true,
+    })
+    expect({ path, onMain: asksEverywhere(cli(path, ['T', '--branch', 'main', '--apply'])) }).toEqual({ path, onMain: true })
+    const onBranch = cli(path, ['T', '--branch', GLOBAL, '--apply'])
+    expect({ path, error: onBranch?.error }).toEqual({ path, error: undefined })
+    expect({ path, yolo: ladderDecision('yolo', onBranch!, approve).outcome }).toEqual({ path, yolo: 'run' })
+  }
 })
 
 // zay, 2026-10-22: yolo is "nohting refused but still siloed to a branch that is not main", so a tag runs there.
