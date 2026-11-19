@@ -62,6 +62,7 @@ import {
 import {
   CLI_TIMEOUT_FLOOR_MS,
   cliWait,
+  credentialFailure,
   type Envelope,
   failure,
   guideEnvelope,
@@ -321,13 +322,7 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
   if (command === undefined) {
     return failure('unknown-command', `Unknown Orthanc command '${input.command}'. Call orthanc_help first.`, input.command)
   }
-  if (isCredentialCommand(command)) {
-    return failure(
-      'credential-command-denied',
-      `Orthanc command '${command.path}' requires credential input and is not available through orthanc_cli. The operator runs it in a terminal.`,
-      command.path,
-    )
-  }
+  if (isCredentialCommand(command)) return credentialFailure(command)
   const wait = cliWait(command, resolved.args)
   if (wait.overCap) return overCapFailure(command, wait)
   const now = await binaryIdentity($)
@@ -1643,11 +1638,19 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     input = gated.input
     plan = gated.plan
   }
-  // A call over the cap is refused here, before the ladder can ask the operator
-  // to approve it and before an apply takes its dry run. executeCli checks again.
+  // A call over the cap, or one that fills the operator's credential store, is
+  // refused here, before the ladder can ask the operator to approve a call that
+  // cannot run and before an apply takes its dry run. executeCli checks again.
   if (tool === ORTHANC_CLI) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
     const command = manifest.find(entry => entry.path === resolved.path)
+    if (command && isCredentialCommand(command)) {
+      note.foundry = true
+      note.command = command.path
+      note.outcome = 'block'
+      note.reason = 'credential-command-denied'
+      return { result: serialize(credentialFailure(command)), context: ['orthanc_cli refused the call before it ran; the credential is the operator’s to type.'] }
+    }
     const wait = command ? cliWait(command, resolved.args) : null
     if (command && wait?.overCap) {
       note.foundry = true

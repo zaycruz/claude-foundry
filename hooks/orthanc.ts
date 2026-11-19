@@ -41,6 +41,14 @@ export const failure = (type: string, message: string, operation: string, extra:
   warnings: [],
 })
 
+// A manifest entry can name a secret the operator types (`input`) or the store
+// it writes (`credential_store`) in a shape this file cannot read. A marker the
+// guard cannot read is kept as 'unreadable', so the command is refused: an
+// unreadable credential field is not an absent one. Same convention as
+// `operator_approval` below, which policy.ts reads raw and fails closed on.
+const credentialMarker = (value: unknown): string | undefined =>
+  value === null || value === undefined ? undefined : typeof value === 'string' ? value : 'unreadable'
+
 export function manifestFrom(envelope: Envelope): ManifestCommand[] {
   const commands = isRecord(envelope.data) && Array.isArray(envelope.data.commands) ? envelope.data.commands : []
   return commands.filter(isRecord).flatMap(entry =>
@@ -49,8 +57,11 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           path: entry.path,
           kind: typeof entry.kind === 'string' ? entry.kind : undefined,
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
-          input: typeof entry.input === 'string' ? entry.input : undefined,
-          ...(typeof entry.credential_store === 'string' ? { credentialStore: entry.credential_store } : {}),
+          input: credentialMarker(entry.input),
+          ...(() => {
+            const store = credentialMarker(entry.credential_store)
+            return store === undefined ? {} : { credentialStore: store }
+          })(),
           flags: flagsFrom(entry.args),
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
@@ -201,6 +212,15 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
   )
 }
 
+/** The refusal of a call that fills the operator's own credential store. */
+export function credentialFailure(command: ManifestCommand): Envelope {
+  return failure(
+    'credential-command-denied',
+    `Orthanc command '${command.path}' needs a credential the operator types, so orthanc_cli will not run it. They run it in a terminal; /auth prints the command.`,
+    command.path,
+  )
+}
+
 // Refusals orthanc_cli makes itself, before orthanc starts.
 const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
 
@@ -240,23 +260,17 @@ function commandLine(command: ManifestCommand): string {
   return `${command.path}${traits ? ` — ${traits}` : ''}`
 }
 
-/**
- * A command that puts a secret the operator typed into their own credential
- * store. Orthanc names the how two ways: `input` (`token-on-stdin` for
- * `auth store`, `host-and-token` for `configure profile create` and
- * `onboarding`) and, for the hidden `configure configure`, `credential_store`
- * plus a `--…-stdin` flag. Both spellings are refused, and a spelling the
- * guard has never seen is refused with them: an agent must never be the one to
- * hand over a credential, and `--force` on these replaces the credentials of
- * the profile every later call runs on. `auth delete` and `configure delete`
- * name the store and take no secret, so the ladder judges those as the deletes
- * they are (yolo runs deletes).
- */
-const SECRET_STDIN_FLAG = /^--[\w-]+-stdin$/
+// Orthanc names a typed secret two ways: `input`, and `credential_store` with a
+// flag that reads the secret from standard input (`configure configure`, which
+// is hidden from --help and names no `input`). A command that only names the
+// store it clears (`auth delete`, `configure delete`) takes no secret in, so the
+// ladder judges those as the deletes they are.
+const DOUBLE_DASH_STDIN = /^--[\w-]+-stdin$/
+const fillsCredentialStore = (command: ManifestCommand) =>
+  command.credentialStore !== undefined && (command.flags ?? []).some(flag => DOUBLE_DASH_STDIN.test(flag.flag))
+
 export const isCredentialCommand = (command: ManifestCommand) =>
-  DENIED_COMMANDS.has(command.path) ||
-  command.input !== undefined ||
-  (command.credentialStore !== undefined && (command.flags ?? []).some(flag => SECRET_STDIN_FLAG.test(flag.flag)))
+  DENIED_COMMANDS.has(command.path) || command.input !== undefined || fillsCredentialStore(command)
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
   const lines = [commandLine(command)]

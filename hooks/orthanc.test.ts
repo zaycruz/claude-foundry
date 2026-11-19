@@ -21,11 +21,19 @@
 //      the timer keeps running after the child exits.
 //  T14 The streamed run loses output, reads a signal exit as success, or
 //      leaves the child running when it gives up.
+//  T15 The manifest's `credential_store` is dropped, so the hidden
+//      `configure configure` — which names no `input` — runs in every mode.
+//  T16 The store alone is treated as a secret going in, so `auth delete` and
+//      `configure delete`, which only clear it, are refused: yolo is meant to
+//      run those deletes.
+//  T17 A credential marker in a shape the guard cannot read reads as no marker.
+//  T18 The command names stop being enough on their own, so a binary that
+//      ships `auth store` with no field runs.
 
 import type { HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, manifestFrom } from './orthanc'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, isCredentialCommand, manifestFrom } from './orthanc'
 import { type ManifestCommand, resolveOrthancCommand } from './policy'
 import { PROCESS_RUN_MAX_MS, readToExit } from './process'
 
@@ -198,4 +206,46 @@ test('T13 T14: a silent child past its deadline is stopped and the run rejects',
   await running
   expect(outcome).toBe('still running after 1920 s; stopped')
   expect(seen.returned).toBe(true)
+})
+
+// The manifest entries of the commands that name a credential, as Orthanc 0.7.10
+// writes them: `credential_store` is "secret-service-or-file" on five commands,
+// `input` on three, and `configure configure` carries the store and no input.
+const ENVELOPE = (commands: unknown[]) => ({
+  schema_version: 'foundry-agent-v1',
+  data: { commands },
+  errors: [],
+  meta: {},
+  warnings: [],
+  artifacts: [],
+  pagination: null,
+})
+
+const SECRET_FLAGS = [
+  { kind: 'option', flag: '--token-stdin', takes_value: false },
+  { kind: 'option', flag: '--client-secret-stdin', takes_value: false },
+]
+
+const refused = (entry: Record<string, unknown>) => isCredentialCommand(manifestFrom(ENVELOPE([entry]))[0]!)
+
+test('T15 T16 T17 T18: which manifest entries name a secret the agent must not pass', async () => {
+  // A secret typed in: both of Orthanc's spellings, and one it has not shipped yet.
+  expect(refused({ path: 'auth store', kind: 'local', input: 'token-on-stdin' })).toBe(true)
+  expect(refused({ path: 'configure profile create', kind: 'local', input: 'host-and-token' })).toBe(true)
+  expect(refused({ path: 'onboarding', kind: 'local', input: 'host-and-token' })).toBe(true)
+  expect(refused({ path: 'some future secret command', kind: 'local', input: 'passphrase-on-tty' })).toBe(true)
+  // The hidden command: the store and a flag that reads the secret from stdin.
+  expect(refused({ path: 'configure configure', kind: 'local', credential_store: 'secret-service-or-file', args: SECRET_FLAGS })).toBe(true)
+  // A marker the guard cannot read is still a marker, not an absence.
+  expect(refused({ path: 'configure configure', kind: 'local', credential_store: ['keychain', 'file'], args: SECRET_FLAGS })).toBe(true)
+  expect(isCredentialCommand(manifestFrom(ENVELOPE([{ path: 'auth store', kind: 'local', input: 7 }]))[0]!)).toBe(true)
+  // Clears the store, types nothing: the deletes yolo runs (zay, 2026-11-17).
+  expect(refused({ path: 'auth delete', kind: 'local', credential_store: 'secret-service-or-file' })).toBe(false)
+  expect(refused({ path: 'configure delete', kind: 'local', credential_store: 'secret-service-or-file', args: [{ kind: 'option', flag: '--force', takes_value: false }] })).toBe(false)
+  // An ordinary call is untouched.
+  expect(refused({ path: 'ontology list', kind: 'read-only' })).toBe(false)
+  expect(refused({ path: 'dataset schema set', kind: 'mutation', args: [{ kind: 'option', flag: '--branch', takes_value: true }] })).toBe(false)
+  // T18: the names still refuse a binary that ships the command with no field.
+  expect(isCredentialCommand({ path: 'auth store', kind: 'local', flags: [] })).toBe(true)
+  expect(isCredentialCommand({ path: 'onboarding', kind: 'local', flags: [] })).toBe(true)
 })
