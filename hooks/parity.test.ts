@@ -20,9 +20,10 @@
 // L1  /link-type or /interface still says it waits on a bead, runs a command
 //     other than `ontology link-type-list` / `ontology interface-list`, or runs
 //     it on an ontology other than the one in scope, or opens another picker.
-// L2  The session works on a branch (FDE mode, or the branch of its last write)
-//     and the read omits --branch, so it lists main's types; with no branch in
-//     scope the read passes one, or the listing does not say which branch it is.
+// L2  FDE mode is bound and the read omits --branch, so it lists main's types; or
+//     a branch that is not FDE's reaches the wire (the name a branch creation
+//     left as the working branch, or a binding whose ontology is not the one in
+//     scope), or the listing does not say which branch it read.
 // L3  A row is keyed by something but its RID (the same type lands twice, or a
 //     row with no RID does), or the pick shows no clue what the link joins or
 //     which object types implement the interface.
@@ -56,6 +57,7 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
+import type { FdeSession } from '../types'
 import {
   applyClear,
   COMMAND_TABLE,
@@ -70,6 +72,7 @@ import {
   resourceArgs,
   resourceRows,
 } from './catalog'
+import { readBranch } from './fde'
 import { serialize } from './orthanc'
 
 const run = (command: string, args: string) =>
@@ -84,7 +87,7 @@ const COMMANDS = [
 
 const scope = normalizeScope(
   {
-    profile: 'zap',
+    profile: 'tester',
     host: 'h',
     ontology: { rid: 'ri.ont.1', name: 'Acme' },
     projects: [{ rid: 'ri.p.1', name: 'Shared' }],
@@ -188,6 +191,30 @@ test('a different namespace drops the automations walked outside it', async () =
   expect(moved.resources.functions?.length).toBe(1)
 })
 
+test('L2: a listing names a branch only while the FDE binding matches the scope', async () => {
+  const bound: FdeSession = {
+    goal: 'tidy the webhook',
+    profile: 'tester',
+    ontologyRid: 'ri.ont.1',
+    branchRid: 'ri.branch..branch.b0000000-0000-4000-8000-0000000000b1',
+    branchName: 'agent/webhook',
+    startedAt: '2026-11-19T00:00:00.000Z',
+    plans: [],
+    applied: [],
+    namespace: null,
+    spaces: [],
+  }
+  expect(readBranch(bound, 'tester', 'ri.ont.1')).toEqual({ rid: bound.branchRid, name: bound.branchName })
+  // Another stack, or the operator pointing at another ontology: the binding does
+  // not describe what is in scope, so the read stays on main rather than naming a
+  // branch of somewhere else.
+  expect(readBranch(bound, 'other', 'ri.ont.1')).toBe(null)
+  expect(readBranch(bound, 'tester', 'ri.ont.2')).toBe(null)
+  // No FDE mode: the session's working branch (which a branch creation can leave
+  // as a name, paired with no ontology) is never what a listing reads.
+  expect(readBranch(null, 'tester', 'ri.ont.1')).toBe(null)
+})
+
 test('link-type and interface rows key on the RID and say what they join', async () => {
   const rows = entityRows(
     [
@@ -273,6 +300,7 @@ const OTHER_ONT = { rid: 'ri.ontology.main.ontology.d0000000-0000-4000-8000-0000
 const BRANCH = { rid: 'ri.branch..branch.b0000000-0000-4000-8000-0000000000b1', name: 'agent/fde-wire-check' }
 const SPACE = { rid: 'ri.compass.main.space.d0000000-0000-4000-8000-0000000000c0', name: 'Acme Space', path: '/Acme' }
 const PROJECT = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-0000000000c1', name: 'Acme Platform', path: '/Acme/Platform' }
+const PROJECT_TWO = { rid: 'ri.compass.main.folder.d0000000-0000-4000-8000-0000000000c2', name: 'Acme Ops', path: '/Acme/Ops' }
 const LINK_ONE = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d1', name: 'Orders' }
 const LINK_TWO = { rid: 'ri.ontology.main.relation.d0000000-0000-4000-8000-0000000000d2', name: 'Contact' }
 const IFACE = { rid: 'ri.ontology.main.interface.d0000000-0000-4000-8000-0000000000e1', name: 'Auditable' }
@@ -291,7 +319,7 @@ const INTERFACES = [
 ]
 const AUTOMATIONS = [
   { rid: MONITOR.rid, name: MONITOR.name, path: `${PROJECT.path}/${MONITOR.name}`, folder_rid: PROJECT.rid },
-  { rid: MONITOR_TWO.rid, name: MONITOR_TWO.name, path: `${PROJECT.path}/${MONITOR_TWO.name}`, folder_rid: PROJECT.rid },
+  { rid: MONITOR_TWO.rid, name: MONITOR_TWO.name, path: `${PROJECT_TWO.path}/${MONITOR_TWO.name}`, folder_rid: PROJECT_TWO.rid },
 ]
 
 const envelope = (data: unknown, errors: unknown[] = []) =>
@@ -304,12 +332,14 @@ type Harness = {
   store: Map<string, unknown>
   /** Command prefixes whose read fails. */
   fail: string[]
+  /** Whole calls that fail, for a listing that fails at one root only. */
+  failExact: string[]
   /** What `project list` returns. */
   projects: Record<string, unknown>[]
 }
 
 function harness(on: On): Harness {
-  const h: Harness = { calls: [], store: new Map<string, unknown>([['approvalMode', 'yolo']]), fail: [], projects: [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }] }
+  const h: Harness = { calls: [], fail: [], failExact: [], store: new Map<string, unknown>([['approvalMode', 'yolo']]), projects: [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }] }
   on('process.run', (_$, e) => {
     let words = e.argv.slice(1).filter(word => word !== '--agent' && word !== '--non-interactive')
     if (words[0] === '--profile') words = words.slice(2)
@@ -320,7 +350,7 @@ function harness(on: On): Harness {
       const index = words.indexOf(name)
       return index === -1 ? '' : (words[index + 1] ?? '')
     }
-    if (h.fail.some(command => line.startsWith(command))) return reply(envelope(null, [{ type: 'network-error', message: 'orthanc could not reach the stack' }]))
+    if (h.failExact.includes(line) || h.fail.some(command => line.startsWith(command))) return reply(envelope(null, [{ type: 'network-error', message: 'orthanc could not reach the stack' }]))
     if (line === 'agent-manifest') return reply(MANIFEST)
     if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
     if (line === 'ontology list')
@@ -333,7 +363,9 @@ function harness(on: On): Harness {
     if (line.startsWith('ontology interface-list ')) return reply(envelope({ interfaces: INTERFACES, total: INTERFACES.length }))
     if (line.startsWith('automate list')) {
       const name = flag('--name')
-      return reply(envelope({ automations: name === '' ? AUTOMATIONS : AUTOMATIONS.filter(entry => entry.path.includes(name)) }))
+      const folder = flag('--folder-rid')
+      const rows = AUTOMATIONS.filter(entry => folder === '' || entry.folder_rid === folder)
+      return reply(envelope({ automations: name === '' ? rows : rows.filter(entry => entry.path.includes(name)) }))
     }
     return reply(envelope({ ran: line }))
   })
@@ -398,6 +430,13 @@ test('L1 L3 L5 L6: /link-type and /interface pick from the selected ontology, an
   // listing shows it as chosen.
   expect(await say($, 'link-type', LINK_TWO.name)).toContain(`Link types: ${LINK_ONE.name}, ${LINK_TWO.name}`)
   expect(saved(h).resources.linkTypes?.length).toBe(2)
+  // L8: `clear` on one of them clears that kind and no other.
+  expect(await say($, 'link-type', 'clear')).toContain('Cleared link types selection')
+  expect(saved(h).resources.linkTypes).toBeUndefined()
+  expect(saved(h).resources.interfaces?.length).toBe(1)
+  expect(await say($, 'interface', 'clear')).toContain('Cleared interfaces selection')
+  expect(saved(h).resources.interfaces).toBeUndefined()
+  expect(await say($, 'link-type', LINK_ONE.name)).toContain(LINK_ONE.name)
   // A different ontology drops them: they belong to the old one.
   expect(await say($, 'ontology', OTHER_ONT.rid)).toContain(OTHER_ONT.name)
   expect(saved(h).resources.linkTypes).toBeUndefined()
@@ -405,17 +444,37 @@ test('L1 L3 L5 L6: /link-type and /interface pick from the selected ontology, an
   expect((await prompt($)).includes('Link types:')).toBe(false)
 })
 
-test('L2: with FDE mode bound, the reads name the branch, and say so', async ($, on) => {
+test('L2: only FDE mode reads a branch, only while it is the scope\'s, and its picks go with it', async ($, on) => {
   const h = harness(on)
   await open($)
+  // A plain session reads main: no --branch on any call.
+  expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+  // FDE mode binds (stack, ontology, branch), so its reads name the branch and say so.
   expect(await say($, 'fde', `--branch ${BRANCH.rid} tidy the webhook`)).toContain('FDE mode on')
-  const listed = await say($, 'link-type', '')
+  expect(await say($, 'link-type', '')).toContain(BRANCH.name)
   expect(h.calls).toContain(`ontology link-type-list ${ONT.rid} --branch ${BRANCH.rid}`)
-  expect(listed).toContain(BRANCH.name)
   expect(await say($, 'interface', '')).toContain(BRANCH.name)
   expect(h.calls).toContain(`ontology interface-list ${ONT.rid} --branch ${BRANCH.rid}`)
   expect(await say($, 'link-type', LINK_ONE.name)).toContain(`Link types: ${LINK_ONE.name}`)
   expect(saved(h).resources.linkTypes?.length).toBe(1)
+  // The operator points at another ontology: the binding no longer describes it,
+  // so nothing is named, and the branch's picks went with the old ontology.
+  h.calls.length = 0
+  expect(await say($, 'ontology', OTHER_ONT.rid)).toContain(OTHER_ONT.name)
+  expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
+  expect(saved(h).resources.linkTypes).toBeUndefined()
+  // Back on its own ontology the branch is named again, and /fde end takes it away
+  // along with what was picked on it.
+  expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
+  expect(await say($, 'interface', IFACE.name)).toContain(`Interfaces: ${IFACE.name}`)
+  h.calls.length = 0
+  expect(await say($, 'fde', 'end')).toContain('# FDE handoff')
+  expect(saved(h).resources.interfaces).toBeUndefined()
+  expect(await say($, 'interface', '')).toContain(IFACE.name)
+  expect(h.calls).toContain(`ontology interface-list ${ONT.rid}`)
+  expect(h.calls.filter(call => call.includes('--branch'))).toEqual([])
 })
 
 test('L4 L5 L8: /automation walks the projects or the namespace, filters with --name, and clears alone', async ($, on) => {
@@ -436,11 +495,17 @@ test('L4 L5 L8: /automation walks the projects or the namespace, filters with --
   h.projects = []
   expect(await say($, 'namespace', SPACE.rid)).toContain(SPACE.name)
   expect(await say($, 'automation', '')).toContain('No projects are visible in Acme Space')
-  h.projects = [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }]
+  h.projects = [{ rid: PROJECT.rid, display_name: PROJECT.name, path: PROJECT.path }, { rid: PROJECT_TWO.rid, display_name: PROJECT_TWO.name, path: PROJECT_TWO.path }]
   expect(await say($, 'automation', '')).toContain(MONITOR.name)
   expect(h.calls).toContain(`project list --space-rid ${SPACE.rid}`)
   expect(h.calls).toContain(`automate list --folder-rid ${PROJECT.rid}`)
+  // One root failing shrinks the walk instead of failing it, and says so.
+  h.failExact = [`automate list --folder-rid ${PROJECT_TWO.rid}`]
+  const partial = await say($, 'automation', '')
+  expect(partial).toContain(MONITOR.name)
+  expect(partial).toContain('1 of 2 listings failed')
   // A selected project roots the walk there.
+  h.failExact = []
   expect(await say($, 'project', PROJECT.rid)).toContain(PROJECT.name)
   expect(await say($, 'automation', '')).toContain(MONITOR.name)
   expect(h.calls.filter(call => call === 'automate list').length).toBe(1)

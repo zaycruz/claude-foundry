@@ -41,6 +41,18 @@ export const RESOURCE_LABELS: Record<FoundryResourceKind, string> = {
 } as Record<FoundryResourceKind, string>
 
 /**
+ * Ontology entities with a listing command of their own. `rows` is the envelope
+ * field the rows come under, and `hintKeys` the fields that say what the row is
+ * about: what a link joins, or which object types implement an interface.
+ */
+export const ENTITY_KINDS = {
+  'link-type': { label: 'Link types', list: 'link-type-list', rows: 'link_types', hintKeys: ['object_type_a', 'object_type_b'], separator: ' → ' },
+  interface: { label: 'Interfaces', list: 'interface-list', rows: 'interfaces', hintKeys: ['implemented_by'], separator: ', ' },
+} as const
+
+export type EntityKind = keyof typeof ENTITY_KINDS
+
+/**
  * Resource kinds that belong to the ontology and go when it changes. Link types,
  * interfaces and automations are in it too: the first two are entities of the
  * ontology, and an automation watches an ontology's object sets.
@@ -68,9 +80,10 @@ export type CommandAction =
 export type CommandEntry = { name: string; description: string; argumentHint?: string; action: CommandAction }
 
 const CLEARABLE = '[filter | clear]'
-// Orthanc 0.7.10 lists link types, interfaces and automations (they are pickers
-// now) but still has no egress-policy or certificate list, only `connectivity
-// egress ensure`, so those two keep waiting on this bead.
+// Orthanc 0.7.7 and 0.7.10 list link types, interfaces and automations (they are
+// pickers now, and both versions were checked against a live stack) but still
+// have no egress-policy or certificate list, only `connectivity egress ensure`,
+// so those two keep waiting on this bead.
 const LISTING_BEAD = 'orthanc-qm5'
 export const OBJECT_QUERY_BEAD = 'orthanc-4f7'
 
@@ -270,20 +283,20 @@ export function resourceRows(rows: readonly Record<string, unknown>[], hintKeys:
   })
 }
 
-/** A row field as names: one string, or a list of strings or objects with a name. */
+/** One row field as names: a string, or a list of strings or objects with a name. */
 const namesOf = (value: unknown): string[] =>
   Array.isArray(value)
-    ? value.flatMap(entry => (isRecord(entry) ? [asString(entry.display_name) || asString(entry.api_name) || asString(entry.name) || asString(entry.rid)] : [asString(entry)]))
+    ? value.flatMap(entry => (isRecord(entry) ? [asString(entry.display_name) || asString(entry.api_name)] : [asString(entry)]))
         .filter(Boolean)
     : typeof value === 'string' && value !== ''
       ? [value]
       : []
 
 /**
- * Link-type and interface rows as resources: the RID is the key, and the hint is
- * what the row says the link joins (`object_type_a`, `object_type_b`) or who
- * implements the interface (`implemented_by`), so a pick is recognisable without
- * a second read.
+ * Link-type and interface rows as resources. Agent rows carry `rid`, `display_name`
+ * and `api_name` (read off a live stack), so the rid keys the pick and the display
+ * name labels it: on that ontology 16 of 59 link types share a display name across
+ * different joins, and the `hintKeys` fields say which is which.
  */
 export function entityRows(rows: readonly Record<string, unknown>[], hintKeys: readonly string[], separator: string): FoundryResource[] {
   const seen = new Set<string>()
@@ -291,7 +304,7 @@ export function entityRows(rows: readonly Record<string, unknown>[], hintKeys: r
     const rid = asString(row.rid)
     if (rid === '' || seen.has(rid)) return []
     seen.add(rid)
-    const name = asString(row.display_name) || asString(row.displayName) || asString(row.api_name) || asString(row.name) || rid
+    const name = asString(row.display_name) || asString(row.api_name) || rid
     return [{ rid, name, hint: hintKeys.flatMap(key => namesOf(row[key])).join(separator) }]
   })
 }

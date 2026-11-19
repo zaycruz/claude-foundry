@@ -56,7 +56,7 @@ export type FoundryPickerKind =
 
 export type FoundryPicker = {
   kind: FoundryPickerKind
-  /** The scope key a 'resource' picker writes. */
+  /** The scope key this picker writes: the 'resource', link-type, interface and automation pickers set it. */
   resourceKind?: FoundryResourceKind
   title: string
   isMulti: boolean

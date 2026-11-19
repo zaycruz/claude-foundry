@@ -18,6 +18,8 @@ import {
   contextLines,
   emptyScope,
   entityRows,
+  ENTITY_KINDS,
+  type EntityKind,
   foundryTree,
   hasFocus,
   mergeSelections,
@@ -57,6 +59,7 @@ import {
   planGate,
   planSignature,
   plainSpace,
+  readBranch,
   recordApply,
   recordPlan,
   spacesOf,
@@ -795,6 +798,12 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 // A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
   spaceCache.clear()
+  // Link types and interfaces are read off the bound branch, so they belong to it:
+  // binding another branch, or ending the mode, drops them out of context.
+  if ((await $.state.get(BRANCH)).value !== (fde?.branchRid ?? null)) {
+    const scope = await currentScope($)
+    await saveScope($, { ...scope, resources: { ...scope.resources, linkTypes: [], interfaces: [] } })
+  }
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
@@ -1166,7 +1175,9 @@ async function automateSource($: EngineInterface, scope: FoundryScope, query: st
   if (failed.length === envelopes.length && failed[0]) return `automate list failed: ${errorsOf(failed[0])}`
   const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['automations'])), ['path'])
   return {
-    title: `Automations${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}`,
+    // A root whose listing failed shrinks this list instead of failing it, so the
+    // title says when that happened.
+    title: `Automations${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}${failed.length === 0 ? '' : ` (${failed.length} of ${envelopes.length} listings failed)`}`,
     isMulti: true,
     items: toItems(rows),
     resourceKind: 'automations',
@@ -1174,25 +1185,22 @@ async function automateSource($: EngineInterface, scope: FoundryScope, query: st
 }
 
 /**
- * `ontology link-type-list` / `ontology interface-list`, on main or on the
- * branch this session works on, the way `ontology definition --branch` reads it,
- * so an FDE session picks the types of its own branch.
+ * `ontology link-type-list` / `ontology interface-list` on the ontology in scope,
+ * on FDE mode's branch when the session has one (readBranch), the way
+ * `ontology definition --branch` reads one, so an FDE session picks the types of
+ * its own branch.
  */
-async function entitySource(
-  $: EngineInterface,
-  kind: 'link-type' | 'interface',
-  ontology: FoundryNamed,
-  branch: { rid: string; name: string } | null,
-  profile: string,
-): Promise<Source | string> {
-  const link = kind === 'link-type'
-  const list = link ? 'link-type-list' : 'interface-list'
-  const envelope = await runOrthanc($, ['ontology', list, ontology.rid, ...(branch === null ? [] : ['--branch', branch.rid])], profile, 120_000)
-  if (isErrorEnvelope(envelope)) return `${list} failed: ${errorsOf(envelope)}`
-  // The hint is what the link joins, or which object types implement the interface.
-  const items = entityRows(rowsOf(envelope, [link ? 'link_types' : 'interfaces']), link ? ['object_type_a', 'object_type_b'] : ['implemented_by'], link ? ' → ' : ', ')
-  const label = link ? 'Link types' : 'Interfaces'
-  return { title: branch === null ? label : `${label} on ${branch.name}`, isMulti: true, items, resourceKind: PICKER_RESOURCES[kind] }
+async function entitySource($: EngineInterface, kind: EntityKind, ontology: FoundryNamed, branch: { rid: string; name: string } | null, profile: string): Promise<Source | string> {
+  const def = ENTITY_KINDS[kind]
+  const envelope = await runOrthanc($, ['ontology', def.list, ontology.rid, ...(branch === null ? [] : ['--branch', branch.rid])], profile, 120_000)
+  const where = branch === null ? '' : ` on ${branch.name}`
+  if (isErrorEnvelope(envelope)) return `${def.list}${where} failed: ${errorsOf(envelope)}`
+  return {
+    title: `${def.label}${where}`,
+    isMulti: true,
+    items: toItems(entityRows(rowsOf(envelope, [def.rows]), def.hintKeys, def.separator)),
+    resourceKind: PICKER_RESOURCES[kind],
+  }
 }
 
 async function pickerSource(
@@ -1257,16 +1265,14 @@ async function pickerSource(
     }
   }
   if (kind === 'automation') return automateSource($, scope, query)
-  if (scope.ontology === null) return 'No ontology is selected. Run /ontology first.'
-  if (kind === 'link-type' || kind === 'interface') {
-    const rid = (await $.state.get(BRANCH)).value ?? null
-    const fde = rid === null ? null : await fdeState($)
-    return entitySource($, kind, scope.ontology, rid === null ? null : { rid, name: fde !== null && fde.branchRid === rid ? fde.branchName : rid }, scope.profile)
-  }
+  const ontology = scope.ontology
+  if (ontology === null) return 'No ontology is selected. Run /ontology first.'
+  if (kind === 'link-type' || kind === 'interface') return entitySource($, kind, ontology, readBranch(await fdeState($), scope.profile, ontology.rid), scope.profile)
+  if (kind !== 'object-type' && kind !== 'action-type') return `The ${kind} picker lists nothing yet.`
   const isAction = kind === 'action-type'
   const envelope = await runOrthanc(
     $,
-    ['ontology', isAction ? 'action-type-list' : 'object-type-list', scope.ontology.rid],
+    ['ontology', isAction ? 'action-type-list' : 'object-type-list', ontology.rid],
     scope.profile,
     120_000,
   )
@@ -1295,7 +1301,7 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const pick = chosen[0]
     if (pick === undefined) return 'No ontology selected.'
     await saveScope($, ontologyChanged(scope, { rid: pick.key, name: pick.label }))
-    return `Ontology: ${pick.label}. Projects, types, functions and object instances were cleared.`
+    return `Ontology: ${pick.label}. Projects, types, link types, interfaces, automations, functions and object instances were cleared.`
   }
   if (picker.kind === 'namespace') {
     const bound = await fdeState($)
@@ -1309,7 +1315,7 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const next = namespaceChanged(scope, { rid: pick.key, name: pick.label, path: pick.hint })
     await saveScope($, next)
     const dropped = next.projects.length !== scope.projects.length || JSON.stringify(next.resources) !== JSON.stringify(scope.resources)
-    return `Namespace: ${pick.label}.${dropped ? ' Projects and Compass resources picked before were cleared.' : ''}`
+    return `Namespace: ${pick.label}.${dropped ? ' Projects, Compass resources and automations picked before were cleared.' : ''}`
   }
   if (picker.kind === 'project') {
     await saveScope($, { ...scope, projects: chosen.map(item => ({ rid: item.key, name: item.label })) })
@@ -1320,7 +1326,10 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const asResource = (item: FoundryPickItem): FoundryResource => ({ rid: item.key, name: item.label, hint: item.hint })
     const merged = mergeSelections(scope.resources[kind] ?? [], chosen.map(asResource), picker.items.map(asResource))
     await saveScope($, { ...scope, resources: { ...scope.resources, [kind]: merged } })
-    return `${RESOURCE_LABELS[kind]}: ${merged.map(entry => entry.name).join(', ') || 'none'}.`
+    // Listings hold repeated names (16 of 59 link types on a real ontology share a
+    // display name across different joins), so a repeated name names its rid.
+    const repeated = new Set(merged.map(entry => entry.name).filter((name, index, all) => all.indexOf(name) !== index))
+    return `${RESOURCE_LABELS[kind]}: ${merged.map(entry => `${entry.name}${repeated.has(entry.name) ? ` (${entry.rid})` : ''}`).join(', ') || 'none'}.`
   }
   const key = picker.kind === 'action-type' ? 'actionTypes' : 'objectTypes'
   await saveScope($, { ...scope, [key]: chosen.map(item => ({ apiName: item.key, displayName: item.label })) })
