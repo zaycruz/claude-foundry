@@ -9,6 +9,8 @@ export type ManifestCommand = {
   kind?: string
   auth?: string
   input?: string
+  /** Set when the command writes the operator's own credential store (orthanc names it `credential_store`). */
+  credentialStore?: string
   flags?: ManifestFlag[]
   /** The entry's raw `operator_approval`, unread: operatorApprovalQuestion reads it, failing closed. */
   operatorApproval?: unknown

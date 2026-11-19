@@ -50,6 +50,7 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           kind: typeof entry.kind === 'string' ? entry.kind : undefined,
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
           input: typeof entry.input === 'string' ? entry.input : undefined,
+          ...(typeof entry.credential_store === 'string' ? { credentialStore: entry.credential_store } : {}),
           flags: flagsFrom(entry.args),
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
@@ -240,15 +241,22 @@ function commandLine(command: ManifestCommand): string {
 }
 
 /**
- * A command that takes a secret the operator types. Orthanc names how in the
- * manifest's `input`: `token-on-stdin` (`auth store`) and `host-and-token`
- * (`configure profile create`, `onboarding`). Every spelling of it is refused,
- * not the two known names: an `input` the guard has never seen is still a
- * secret the agent must not be asked to pass, and `configure profile create
- * --force` replaces the credentials of the profile every later call runs on.
+ * A command that puts a secret the operator typed into their own credential
+ * store. Orthanc names the how two ways: `input` (`token-on-stdin` for
+ * `auth store`, `host-and-token` for `configure profile create` and
+ * `onboarding`) and, for the hidden `configure configure`, `credential_store`
+ * plus a `--…-stdin` flag. Both spellings are refused, and a spelling the
+ * guard has never seen is refused with them: an agent must never be the one to
+ * hand over a credential, and `--force` on these replaces the credentials of
+ * the profile every later call runs on. `auth delete` and `configure delete`
+ * name the store and take no secret, so the ladder judges those as the deletes
+ * they are (yolo runs deletes).
  */
+const SECRET_STDIN_FLAG = /^--[\w-]+-stdin$/
 export const isCredentialCommand = (command: ManifestCommand) =>
-  DENIED_COMMANDS.has(command.path) || command.input !== undefined
+  DENIED_COMMANDS.has(command.path) ||
+  command.input !== undefined ||
+  (command.credentialStore !== undefined && (command.flags ?? []).some(flag => SECRET_STDIN_FLAG.test(flag.flag)))
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
   const lines = [commandLine(command)]

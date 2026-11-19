@@ -44,14 +44,18 @@
 //      refused; the prompt in other modes stops saying tags ask.
 //  Y10 FDE mode loosens in yolo: an apply with no dry run runs. After its dry
 //      run, a bound delete runs without a dialog.
-//  Y11 A credential command runs in yolo. Orthanc names the commands that take
-//      a secret the operator types with a manifest `input`: `token-on-stdin`
-//      (`auth store`) and `host-and-token` (`configure profile create`,
-//      `onboarding`). 0.6.2 refused the `token-on-stdin` spelling and two names,
-//      so `configure profile create <name> --host … --token-stdin --force`,
-//      which replaces the credentials the profile every later call runs on,
-//      reached orthanc in every mode. Now any entry that names an `input` is
-//      refused by name, in every mode, with no orthanc call.
+//  Y11 A credential command runs in yolo. Orthanc names the commands that put
+//      a secret of the operator's into their credential store two ways:
+//      `input` (`token-on-stdin` for `auth store`, `host-and-token` for
+//      `configure profile create` and `onboarding`) and, for the hidden
+//      `configure configure`, `credential_store` with `--token-stdin` /
+//      `--client-secret-stdin`. 0.6.2 refused the `token-on-stdin` spelling and
+//      two names, so `configure profile create <name> --host … --token-stdin
+//      --force` — which replaces the credentials the profile every later call
+//      runs on — reached orthanc in every mode, and so did the hidden command.
+//      Now both spellings are refused by name, in every mode, with no orthanc
+//      call; `auth delete` and `configure delete` name no secret going in, so
+//      the ladder still judges those as the deletes yolo runs.
 //  Y12 An Orthanc write in Bash runs in yolo instead of going to orthanc_cli.
 //
 // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are

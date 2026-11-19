@@ -37,10 +37,10 @@ says so instead of falling back to REST.
   only, run only when the operator approves
   them, in every mode; with no one to ask they are refused.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
-  denied. A command whose manifest entry names an `input` — a secret the
-  operator types (`auth store`, `configure profile create`, `onboarding`) —
-  never runs through `orthanc_cli`, in any mode; `/auth` prints it for the
-  operator's own terminal.
+  denied. A command that puts a typed secret into the operator's credential
+  store (`auth store`, `configure profile create`, `configure configure`,
+  `onboarding`) never runs through `orthanc_cli`, in any mode; `/auth` prints
+  it for the operator's own terminal.
 - **A branch rule** that no approval mode can turn off: agent work happens on
   branches, never on a production main. Ontology writes must pass
   `--branch <global branch RID>`; dataset, stream and build writes must name a
