@@ -30,6 +30,9 @@
 //  T6  min_orthanc newer than orthanc_checked: check fails.
 //  T7  The output is not stable (key order, command order): refresh sorts, so
 //      the same manifest gives the same bytes and a rerun shows no diff.
+//  T8  hooks/orthanc-snapshot.json (written by the orthanc release job) and
+//      the guard's snapshot disagree on the orthanc or on any marker: check
+//      fails and names the command.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -40,6 +43,7 @@ const FILES = {
   marketplace: '.claude-plugin/marketplace.json',
   tie: 'hooks/orthanc-tie.ts',
   snapshot: 'hooks/orthanc-manifest.snapshot.ts',
+  releaseJob: 'hooks/orthanc-snapshot.json',
 }
 const read = file => readFileSync(join(ROOT, file), 'utf8')
 const write = (file, text) => writeFileSync(join(ROOT, file), text)
@@ -143,6 +147,22 @@ export function check() {
     }
     const text = read(FILES.snapshot)
     for (const [pattern, what] of STACK_DATA) if (pattern.test(text)) problems.push(`${FILES.snapshot} holds ${what}: ${pattern.exec(text)[0].slice(0, 12)}…`)
+  }
+  // T8: the orthanc release job's own snapshot (orthanc-source
+  // scripts/release/plugin_release.py) must be of the same orthanc and carry
+  // the same markers, so the two can never tell different stories.
+  let job = null
+  try {
+    job = JSON.parse(read(FILES.releaseJob))
+  } catch (error) {
+    if (error.code !== 'ENOENT') problems.push(`${FILES.releaseJob}: ${error.message}`)
+  }
+  if (job && snap) {
+    same(`${FILES.releaseJob} orthanc_tag vs v + ${FILES.tie} ORTHANC_CHECKED`, job.orthanc_tag, `v${tie.checked}`)
+    const jobMarkers = markers(job)
+    const ours = markers(snap)
+    for (const [path, shape] of jobMarkers) if (ours.get(path) !== shape) problems.push(`'${path}': ${FILES.releaseJob} has ${shape}, ${FILES.snapshot} has ${ours.get(path) ?? 'no marker'}`)
+    for (const path of ours.keys()) if (!jobMarkers.has(path)) problems.push(`'${path}': marked in ${FILES.snapshot}, not in ${FILES.releaseJob}`)
   }
   return problems
 }

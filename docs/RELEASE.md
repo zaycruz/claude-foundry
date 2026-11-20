@@ -14,7 +14,8 @@ Orthanc never merges or tags here.
 | `.claude-plugin/marketplace.json` | `plugins[foundry].version` | the same as `version` |
 | `hooks/orthanc-tie.ts` | `PLUGIN_VERSION`, `MIN_ORTHANC`, `ORTHANC_CHECKED` | the same three values, for the hooks (a hooks module cannot read JSON) |
 | `hooks/orthanc-tie.ts` | `KNOWN_ENTRY_KEYS`, `KNOWN_ARG_KEYS`, `KNOWN_KINDS` | every manifest field the guard was checked against |
-| `hooks/orthanc-manifest.snapshot.ts` | `orthanc_version`, `commands` | the trimmed `orthanc agent-manifest` of `orthanc_checked` |
+| `hooks/orthanc-manifest.snapshot.ts` | `orthanc_version`, `commands` | the trimmed `orthanc agent-manifest` of `orthanc_checked`, the one the hooks tests read |
+| `hooks/orthanc-snapshot.json` | `orthanc_tag`, `commands` | the snapshot that the orthanc release job writes (orthanc-source `scripts/release/plugin_release.py`). Tests cannot import JSON, so the hooks do not read it. `check` fails unless `orthanc_tag` is `v<orthanc_checked>` and its markers match the `.ts` snapshot entry for entry (T8). |
 
 `node scripts/orthanc-tie.mjs refresh` writes all of them. Do not edit them by
 hand. `node scripts/orthanc-tie.mjs check` fails when they disagree.
@@ -132,14 +133,17 @@ orthanc warns that orthanc is newer than the plugin.
 0.7.0 releases `main` as it was after v0.6.0: yolo asks only on main (#10), and
 the guard reads `operator_approval` by branch (#12). It sets `min_orthanc` to
 0.7.8, the first orthanc whose manifest carries `operator_approval_scope`. It
-sets `orthanc_checked` to 0.7.9, built from the v0.7.9 tag. The snapshot holds
-516 commands and 20 approval markers.
+sets `orthanc_checked` to 0.7.11, built from the v0.7.11 tag. The snapshot
+holds 541 commands and 56 approval markers. They match, marker for marker,
+`hooks/orthanc-snapshot.json`, which main took from the orthanc release job.
+That file's `min_orthanc` (0.7.11) is the job's own value. The plugin's
+`min_orthanc` is the one in `plugin.json`.
 
 To make the snapshot again from a binary:
 
 ```
 orthanc --agent --non-interactive agent-manifest > manifest.json
-node scripts/orthanc-tie.mjs refresh --manifest manifest.json --orthanc-version 0.7.9
+node scripts/orthanc-tie.mjs refresh --manifest manifest.json --orthanc-version 0.7.11
 ```
 
 A run on the same manifest makes the same bytes, so `git diff` shows nothing.

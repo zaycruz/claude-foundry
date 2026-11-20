@@ -20,7 +20,7 @@ export const PLUGIN_VERSION = '0.7.0'
 /** The oldest orthanc this plugin supports (plugin.json `min_orthanc`). */
 export const MIN_ORTHANC = '0.7.8'
 /** The orthanc the guard was last checked against (plugin.json `orthanc_checked`); hooks/orthanc-manifest.snapshot.ts is its manifest. */
-export const ORTHANC_CHECKED = '0.7.9'
+export const ORTHANC_CHECKED = '0.7.11'
 
 /** Every key of a manifest command entry this guard was checked against. A new
  * key (a new approval field, say) fails the snapshot test and

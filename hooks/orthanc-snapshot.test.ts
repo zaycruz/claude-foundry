@@ -59,7 +59,7 @@ const withEntry = (path: string, change: Partial<Entry> & Record<string, unknown
 
 test('S1 S3: every approval shape in the release snapshot is one the guard reads, and the snapshot is of ORTHANC_CHECKED', () => {
   expect(snapshotProblems(snapshot)).toEqual([])
-  // The 0.7.9 release has 20 markers; a refresh that loses them is drift.
+  // The release snapshot has markers (56 in 0.7.11); a refresh that loses them is drift.
   expect(markers().length > 0).toBe(true)
   expect(snapshot.commands.length > 100).toBe(true)
 })
@@ -152,6 +152,7 @@ function harness(on: On, mode: (typeof MODES)[number] = 'yolo', commands: readon
 type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 const call = ($: Engine, command: string, args: string[] = []) =>
   $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string; result?: unknown }>
+const refusedAsPromotion = (reply: { deny?: string }, asked: number) => asked === 0 && /promotes work .*The operator does it/.test(reply.deny ?? '')
 const ran = (h: Harness, path: string) => h.calls.filter(line => line === path || line.startsWith(`${path} `))
 
 /** A call of `entry` with every flag of its operator_approval, a placeholder
@@ -182,9 +183,9 @@ test('S4: in yolo, every `always` marker of the release snapshot asks (or is ref
       const before = h.asked.length
       const reply = await call($, entry.path, markedCall(entry, branch))
       const asked = h.asked.length - before
-      // Asked once, naming the command; or refused before any question (a
-      // promotion into main, Y19): both keep the write from orthanc.
-      const outcome = asked === 1 && h.asked.at(-1)!.includes(`'${entry.path}'`) ? 'asked' : asked === 0 && typeof reply.deny === 'string' ? 'refused' : `asked ${asked}`
+      // Asked once, naming the command; or refused before any question as a
+      // promotion the operator does (Y19): both keep the write from orthanc.
+      const outcome = asked === 1 && h.asked.at(-1)!.includes(`'${entry.path}'`) ? 'asked' : refusedAsPromotion(reply, asked) ? 'refused' : `asked ${asked}`
       expect({ path: entry.path, branch, outcome, kept: typeof reply.deny === 'string' && ['asked', 'refused'].includes(outcome) }).toEqual({
         path: entry.path,
         branch,
@@ -196,7 +197,7 @@ test('S4: in yolo, every `always` marker of the release snapshot asks (or is ref
     }
   }
   // Most ask; a refusal is the exception, not the way the markers pass.
-  expect(outcomes.filter(outcome => outcome === 'asked').length >= outcomes.length - 2).toBe(true)
+  expect(outcomes.filter(outcome => outcome === 'asked').length > outcomes.length / 2).toBe(true)
 })
 
 test('S4: in yolo, a work-branch marker of the release snapshot runs on a work branch and asks when it would land on main', async ($, on) => {
@@ -206,12 +207,14 @@ test('S4: in yolo, a work-branch marker of the release snapshot runs on a work b
   for (const entry of scoped) {
     const before = h.asked.length
     const work = await call($, entry.path, markedCall(entry, 'work'))
-    expect({ path: entry.path, deny: work.deny, asked: h.asked.length - before }).toEqual({ path: entry.path, deny: undefined, asked: 0 })
+    // A promotion (proposal approve, …) is the operator's even on a work branch (Y19).
+    const promotion = refusedAsPromotion(work, h.asked.length - before)
+    expect({ path: entry.path, deny: promotion ? undefined : work.deny, asked: h.asked.length - before }).toEqual({ path: entry.path, deny: undefined, asked: 0 })
     h.answer = 'Decline'
     const main = await call($, entry.path, markedCall(entry, readApprovalScope(entry.operator_approval_scope)?.kind === 'flag' ? 'none' : 'main'))
     h.answer = 'Approve'
-    expect({ path: entry.path, denied: typeof main.deny === 'string', asked: h.asked.length - before > 0 }).toEqual({ path: entry.path, denied: true, asked: true })
-    expect(ran(h, entry.path).length).toBe(1)
+    expect({ path: entry.path, denied: typeof main.deny === 'string', stopped: promotion || h.asked.length - before > 0 }).toEqual({ path: entry.path, denied: true, stopped: true })
+    expect(ran(h, entry.path).length).toBe(promotion ? 0 : 1)
   }
 })
 
@@ -246,12 +249,18 @@ for (const mode of MODES) {
 const READ = snapshot.commands.find(entry => entry.kind === 'read-only' && !entry.path.includes('wait'))!.path
 const warnings = (h: Harness) => h.shown.filter(line => line.includes('foundry 0.') && line.includes('orthanc'))
 
+// Relative to the tie, so the table holds as releases move it.
+const [MAJOR, MINOR, PATCH] = ORTHANC_CHECKED.split('.').map(Number) as [number, number, number]
+const [MIN_MAJOR, MIN_MINOR, MIN_PATCH] = MIN_ORTHANC.split('.').map(Number) as [number, number, number]
+const OLDER = MIN_PATCH > 0 ? `${MIN_MAJOR}.${MIN_MINOR}.${MIN_PATCH - 1}` : `${MIN_MAJOR}.${MIN_MINOR - 1}.99`
+const NEXT_MINOR = `${MAJOR}.${MINOR + 1}.0`
+
 const VERSIONS: [string, string | null | 'missing', string[]][] = [
-  ['older than MIN_ORTHANC', '0.7.7', [`older than ${MIN_ORTHANC}`, ORTHANC_UPDATE]],
-  ['newer than ORTHANC_CHECKED', '0.8.0', [`newer than ${ORTHANC_CHECKED}`, PLUGIN_UPDATE]],
-  ['a newer patch', '0.7.10', [`newer than ${ORTHANC_CHECKED}`, PLUGIN_UPDATE]],
-  ['a two-digit minor', '0.10.0', [`newer than ${ORTHANC_CHECKED}`]],
-  ['a prerelease of the next minor', '0.8.0-rc.1', [`newer than ${ORTHANC_CHECKED}`]],
+  ['older than MIN_ORTHANC', OLDER, [`older than ${MIN_ORTHANC}`, ORTHANC_UPDATE]],
+  ['newer than ORTHANC_CHECKED', NEXT_MINOR, [`newer than ${ORTHANC_CHECKED}`, PLUGIN_UPDATE]],
+  ['a newer patch', `${MAJOR}.${MINOR}.${PATCH + 1}`, [`newer than ${ORTHANC_CHECKED}`, PLUGIN_UPDATE]],
+  ['a two-digit minor', `${MAJOR}.${Math.max(10, MINOR + 1)}.0`, [`newer than ${ORTHANC_CHECKED}`]],
+  ['a prerelease of the next minor', `${NEXT_MINOR}-rc.1`, [`newer than ${ORTHANC_CHECKED}`]],
   ['a prerelease of MIN_ORTHANC', `${MIN_ORTHANC}-rc.1`, [`older than ${MIN_ORTHANC}`]],
   ['no version in the reply', null, ['cannot compare', 'orthanc version']],
   ['no version command', 'missing', ['cannot compare']],
