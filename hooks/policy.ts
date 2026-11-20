@@ -299,7 +299,9 @@ function baseBranchOnWorkBranch(args: readonly string[], entry: ManifestCommand 
     // `--flag=value` binds its own value, so nothing follows it that could be swallowed.
     if (!previous.startsWith('-') || previous.includes('=')) continue
     if (priced.get(previous.split('=')[0] ?? '') === false) continue
-    if (BASE_BRANCH_FLAGS.includes(unquote(args[index] ?? '').toLowerCase())) return false
+    // The value it took may be the `=` spelling of the base flag.
+    const current = (unquote(args[index] ?? '').toLowerCase().split('=')[0] ?? '').replace(/^-+/, '')
+    if (BASE_BRANCH_FLAGS.some(flag => flag.replace(/^-+/, '') === current)) return false
   }
   return true
 }
@@ -1268,10 +1270,18 @@ export function classifyCall(
 
 /** The fix the agent can actually apply, in the flag this command takes: a
  * scenario has no --branch, and telling it to pass one sends it back to the
- * same ask (the loop guard is off in yolo). */
+ * same ask (the loop guard is off in yolo). A write that takes no branch at all
+ * gets no branch advice. */
 function workBranchFix(command: string | null): string {
   if (command !== null && BASE_BRANCH_WRITES.has(command)) return 'otherwise pass --base-branch <global branch RID>, or create one with \'global-branch create agent/<name>\''
+  if (command !== null && (MAIN_WRITES.has(command) || MAIN_ONLY_WRITES.has(command))) return ''
   return 'otherwise pass a work branch'
+}
+
+/** The yolo ask for a scenario: the fork writes neither main nor its base, so
+ * what the operator is approving is the choice of main as that base. */
+function scenarioBaseReason(command: string): string {
+  return `'${command}' is a scenario based on main: its --base-branch is missing, or is not one global branch RID. The scenario writes neither main nor that base, so the call to approve is which branch the work forks from; ${workBranchFix(command)}.`
 }
 
 export function ladderDecision(
@@ -1307,7 +1317,10 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or is a scenario based on main, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`,
+      reason:
+        classification.command !== null && BASE_BRANCH_WRITES.has(classification.command)
+          ? `yolo mode: ${scenarioBaseReason(command)}`
+          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`,
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
@@ -1317,7 +1330,7 @@ export function ladderDecision(
   if (classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology). ${workBranchFix(classification.command)}${note}`,
+      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology).${workBranchFix(classification.command) === '' ? '' : ` ${workBranchFix(classification.command)}.`}${note}`,
     }
   }
   if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval` }

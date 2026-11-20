@@ -255,7 +255,16 @@ for (const mode of SLOW_MODES) {
 // SC7: the shapes a reviewer found where a proof from the flag word alone is not a proof.
 const HARD: [string, string[][]][] = [
   ['a `--` separator', [['--apply', '--', '--base-branch', RID], ['--base-branch', RID, '--', '--apply']]],
-  ['a flag that swallows it', [['--description', '--base-branch', RID, '--apply'], ['--notes', '--base-branch', RID, '--apply']]],
+  [
+    'a flag that swallows it',
+    [
+      // --expire-after is a flag of this command and takes a value (0.7.11), so
+      // pflag gives it the word that follows, `--base-branch…` included.
+      ['--expire-after', '--base-branch', RID, '--apply'],
+      ['--expire-after', `--base-branch=${RID}`, '--apply'],
+      ['--expire-after=6h', '--notes', '--base-branch', RID, '--apply'],
+    ],
+  ],
   ['another case or a value on --apply', [['--base-branch', 'main', '--APPLY'], ['--base-branch', 'main', '--apply=true']]],
 ]
 for (const [what, spellings] of HARD) {
@@ -346,3 +355,58 @@ for (const mode of MODES) {
     expect(h.asked).toEqual([])
   })
 }
+
+// SC9: what the review round changed, pinned.
+const NO_APPLY = [
+  { path: 'configure list', kind: 'local' },
+  // An entry that lists flags and none of them is --apply: the command writes
+  // on every call, so there is no plan to let through (0.7.11's
+  // `ontology scenario create` does declare --apply; this is the shape a later
+  // orthanc could ship).
+  {
+    path: 'ontology scenario create',
+    kind: 'mutation',
+    auth: 'bearer-token',
+    args: [
+      { kind: 'positional', name: 'ontology', takes_value: true },
+      { kind: 'option', flag: '--base-branch', name: 'base_branch', takes_value: true },
+      { kind: 'option', flag: '--dry-run', name: 'dry_run', takes_value: false },
+    ],
+  },
+]
+for (const mode of ['allow-edits', 'yolo'] as Mode[]) {
+  test(`SC9: in ${mode} a scenario write whose entry declares no --apply asks even without --apply`, async ($, on) => {
+    const h = harness(on, mode, NO_APPLY)
+    h.answer = 'throw'
+    for (const args of [[ONTOLOGY], [ONTOLOGY, '--dry-run']]) {
+      const wrote = await write($, 'ontology scenario create', args)
+      expect(typeof wrote.deny).toBe('string')
+      expect(ran(h, 'ontology scenario create')).toEqual([])
+    }
+    expect(h.asked.length).toBe(2)
+    // The proof still works: one global branch RID is a base, plan or no plan.
+    const branch = await write($, 'ontology scenario create', [ONTOLOGY, '--base-branch', RID])
+    expect(branch.deny).toBeUndefined()
+    expect(h.asked.length).toBe(2)
+  })
+}
+
+// SC9: a write that provably takes no branch gets no branch advice.
+test(`SC9: 'workshop module publish' asks, and does not tell the agent to pass a branch it cannot pass`, async ($, on) => {
+  const h = harness(on, 'auto')
+  await write($, 'workshop module publish', ['ri.workshop.main.module.00000000-0000-4000-8000-0000000000b1'])
+  expect(h.asked.length).toBe(1)
+  expect(h.asked[0]).toContain('protected baseline')
+  expect(h.asked[0]).not.toContain('pass a work branch')
+})
+
+// SC9: the ask is exact about what a scenario does: its base is main, and the
+// fork itself writes neither main nor that base (orthanc 0.7.11 'effect').
+test(`SC9: the yolo ask says the scenario is based on main, not that it writes main`, async ($, on) => {
+  const h = harness(on, 'yolo')
+  h.answer = 'throw'
+  const wrote = await write($, 'ontology scenario create', [ONTOLOGY, '--apply'])
+  expect(typeof wrote.deny).toBe('string')
+  expect(h.asked[0]).toContain('based on main')
+  expect(h.asked[0]).not.toContain(`'ontology scenario create' writes main`)
+})
