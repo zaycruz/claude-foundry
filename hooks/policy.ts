@@ -86,6 +86,17 @@ const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-ups
 // Writes that change main and take no branch: each is a write on main, so it
 // asks the operator in every mode, yolo too.
 const MAIN_WRITES = new Set(['workshop module publish'])
+// An ontology scenario (orthanc 0.7.9, SRC-85) is a what-if fork whose base is
+// main unless the call names one global branch: `ontology scenario create` says
+// "Make a scenario on main (or on --base-branch)", and orthanc CONTRACTS.md
+// keeps that base for the scenario's life. Its branch spelling is --base-branch,
+// not --branch, so no other rule here sees it: without this, yolo ran a
+// scenario based on main, `--base-branch main` included. Without --apply the
+// command prints a plan and writes nothing, so it asks no one (as a release tag
+// plan does). `ontology scenario rebase` is left alone: it edits the scenario it
+// names, never its base.
+const BASE_BRANCH_WRITES = new Set(['ontology scenario create'])
+const BASE_BRANCH_FLAGS = ['--base-branch']
 // Writes that name their branch as a positional. Any positional naming main
 // counts (a flag the guard does not know can shift the positions), so these
 // ask for main in every mode; over-reading only asks more.
@@ -562,6 +573,10 @@ function orthancClassification(
     // `-b` is --branch in every command, so every spelling of it names the branch.
     targetsProtected:
       MAIN_WRITES.has(command) ||
+      // A scenario whose base is not provably one global branch is a scenario on main.
+      (BASE_BRANCH_WRITES.has(command) &&
+        argsNameFlag(args, ['--apply']) &&
+        !oneWorkBranchFlag(args, BASE_BRANCH_FLAGS)) ||
       (action !== null && 'branches' in action && action.branches.some(isProtectedValue)) ||
       // A stored branch that could not be read, or none (Foundry reads none as master), may be main.
       (STORED_BRANCH_RUNS.has(command) &&
@@ -1247,7 +1262,7 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
+      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or is a scenario based on main, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
@@ -1273,12 +1288,13 @@ export function modeGuidance(mode: ApprovalMode): string {
     'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
-    'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
+    'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +
     (mode === 'yolo'
       ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes and --force writes run at once, ' +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
-        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
+        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
+        'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
