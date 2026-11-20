@@ -13,6 +13,9 @@
 //  9. A turn that never touched Foundry is exported (checked live: /trace).
 // 10. The env file runs as shell, or takes keys it should not (round 3, R1).
 // 11. Redaction misses encoded or prefixed secrets, RIDs, envelope keys, flag values (R4, R5).
+// 12. A guard refusal reaches `status.message` raw, while the same sentence leaves
+//     in `foundry.gate.reason` redacted (QA review, 2026-11-21): a refusal quotes
+//     the operator's reason, the command and its arguments back at the agent.
 import { expect, test } from 'claude-code/testing'
 
 import {
@@ -128,6 +131,26 @@ test('OTLP body: hex ids, string nanos, parent links, error status, resource', a
   expect(child.parentSpanId).toBe('a'.repeat(16))
   expect(child.endTimeUnixNano).toBe(child.startTimeUnixNano)
   expect(child.status).toEqual({ code: 2, message: 'denied: x' })
+  // Failure mode 12: the refusal is the one field a guard writes about a call it
+  // stopped, and it repeats what the agent typed. Redaction happens at the export
+  // boundary, so no caller has to remember it.
+  const leaky = JSON.parse(
+    otlpBody(traceId, resource, [
+      {
+        spanId: 'c'.repeat(16),
+        name: 'tool',
+        startMs: 1000,
+        endMs: 1100,
+        attributes: {},
+        error:
+          "denied: 'admin user create' needs the operator: richard@example.com, token sk-ant-api03-abcdefghijklmnopqrstuvwx, ri.foundry.main.dataset.11112222-3333-4444-5555-666677778888",
+      },
+    ]),
+  ).resourceSpans[0].scopeSpans[0].spans[0]
+  expect(leaky.status.message.includes('richard@example.com')).toBe(false)
+  expect(leaky.status.message.includes('sk-ant-api03-abcdefghijklmnopqrstuvwx')).toBe(false)
+  expect(leaky.status.message.includes('denied:')).toBe(true)
+  expect(leaky.status.message.includes('admin user create')).toBe(true)
   expect(body.resourceSpans[0].resource.attributes).toContainEqual({ key: 'raava.source', value: { stringValue: 'herdr-space' } })
 })
 

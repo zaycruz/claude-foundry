@@ -644,7 +644,9 @@ function recordTool(key: string, tool: string, input: unknown, ran: unknown, not
     startMs,
     endMs,
     attributes,
-    ...(denied ? { error: `denied: ${denied}` } : result.isError === true ? { error: 'tool error' } : {}),
+    // Redacted like every other field of this span: a refusal often quotes the
+    // operator's reason back, and that reason can carry an email, a RID or a token.
+    ...(denied ? { error: `denied: ${redactString(denied, tracing.redact)}` } : result.isError === true ? { error: 'tool error' } : {}),
   })
 }
 
