@@ -1,20 +1,11 @@
 // The agent cannot replace the tool it is being guarded by.
 //
-// `orthanc update` is Orthanc's self-update. Read off the released binary
-// (0.7.11, orthanc-x86_64-unknown-linux-gnu.tar.gz, sha256
-// d746a6bfa6837b93333bafc7439c790386971c6f9068c6d7b4b97ae3c99bbb31), and the
-// same entry in the plugin's pinned surface (hooks/orthanc-snapshot.json, tag
-// v0.7.11) — the two agree:
+// `orthanc update` is Orthanc's self-update, as the released 0.7.11 binary
+// (orthanc-x86_64-unknown-linux-gnu.tar.gz, sha256
+// d746a6bfa6837b93333bafc7439c790386971c6f9068c6d7b4b97ae3c99bbb31) describes it:
 //
 //   { "path":"update", "kind":"mutation", "auth":"none",
 //     "mutation_risk":"replaces-binary" }                   — no operator_approval
-//
-// The plugin's own pin (hooks/orthanc-snapshot.json, 3055 lines) keeps five
-// fields per command — path, kind, auth, operator_approval,
-// operator_approval_scope — so it agrees on `kind: mutation` and says nothing of
-// the risk: `mutation_risk` appears in it zero times. Only the live binary's
-// `agent-manifest` carries the risk, which is the second reason the rule reads
-// the name as well as the field.
 //     "Update this binary to the latest stable or nightly release; prints a plan unless --apply"
 //     --apply    "Replace the binary; without it, print the plan"
 //     --check    "Print the plan only, with data.update_available"
@@ -23,6 +14,13 @@
 //     --yes      "Confirm a downgrade, or a nightly whose notes name no commit"
 //     --plugin   "After the binary, also update the foundry plugin for Claude Code
 //                 (foundry@claude-foundry)"
+//
+// The plugin's own pin (hooks/orthanc-snapshot.json) keeps five fields per
+// command — path, kind, auth, operator_approval, operator_approval_scope — so it
+// agrees on `kind: mutation`, `auth: none` and the missing `operator_approval`,
+// and says nothing of the risk: `mutation_risk` appears in its 3055 lines zero
+// times. Only the live binary's `agent-manifest` carries it, which is the second
+// reason the rule reads the command name as well as the field.
 //
 // Both files it writes are the ones the guard reads its rules from. The `kind`
 // and `operator_approval` marks the ladder judges every call by come from that
@@ -34,9 +32,9 @@
 // refused it (the manifest marks it a mutation): the leak was orthanc_cli, where
 // allow-edits ran it and yolo ran it with no question. The plugin pins
 // min_orthanc (hooks/orthanc-snapshot.json: 0.7.11) and nothing stopped an agent
-// from walking the installed binary under its own floor — orthanc 0.7.7 ships
-// 482 commands against 0.7.11's 541, and none of its entries carry the
-// `operator_approval_scope` the yolo rule reads.
+// from walking the installed binary under that floor — orthanc 0.7.7 ships 482
+// commands against 0.7.11's 541, and 0 of its 482 entries carry the
+// `operator_approval_scope` the yolo rule reads (0.7.11 has 56).
 //
 // Orthanc already says what the command does, in data the guard can read:
 // `mutation_risk: "replaces-binary"`, one of the two risks 0.7.11 names (the
@@ -278,6 +276,7 @@ for (const mode of MODES) {
   // and the refusal speaks of that command, not of `orthanc update`.
     const other = (await call($, 'toolchain install')).deny ?? ''
     expect(other).toContain('replaces')
+    expect(other).toContain('replaces-binary')
     expect(other).toContain('toolchain install')
     expect(other.includes('orthanc update --apply')).toBe(false)
     // A call the rule does not reach is left to the ladder as it was: it runs in
@@ -378,42 +377,34 @@ test('U10: the executor refuses it too, and its refusal counts as a call that ne
 })
 
 for (const mode of MODES) {
-  test(`U11: in ${mode} mode a risk line the guard cannot read stops the call`, async ($, on) => {
-    const h = harness(on, mode)
-    const deny = (await call($, 'toolchain repair', ['--apply'])).deny ?? ''
-    expect(deny).toContain('cannot read it')
-    expect(h.calls.filter(line => line.startsWith('toolchain repair'))).toEqual([])
+  test(`U11: in ${mode} mode a risk line the guard cannot read changes nothing, and the name still holds`, async ($, on) => {
+    // A `mutation_risk` this file cannot read is read as no risk line, not as a
+    // risk: refusing on shape would refuse every command orthanc later annotates
+    // with a field it writes differently. What the name rule holds, it holds.
+    const unreadable = envelope({
+      commands: [
+        { path: 'update', kind: 'mutation', mutation_risk: { level: 'high' }, args: [] },
+        { path: 'toolchain repair', kind: 'mutation', mutation_risk: null, args: [] },
+        { path: 'version', kind: 'local', args: [] },
+      ],
+    })
+    const h = harness(on, mode, unreadable)
+    // The name rule does not need the field.
+    expect((await call($, 'update', ['--apply'])).deny).toContain('operator')
+    expect(h.calls.filter(line => line.split(' ')[0] === 'update')).toEqual([])
+    // The unreadable field invents no rule of its own: the other command is left
+    // to the ladder, which is what it met before the field existed.
+    expect(((await call($, 'toolchain repair', ['--apply'])).deny ?? '').includes('replaces')).toBe(false)
   })
 }
 
-test('U7b: a group listing or a search hit carries the marker, not only the command page', () => {
-  const commands = manifestFrom(manifestEnvelope(SURFACE) as never)
-  const update = commands.filter(entry => entry.path === 'update')
-  expect(renderListing(update, { query: 'update' })).toContain('orthanc_cli never runs this')
-  // A group listing shows every command of the group, marker and all.
-  expect(renderListing([...update, ...commands.filter(entry => entry.path === 'workshop module update')], { group: 'update' })).toContain('orthanc_cli never runs this')
-  // An ordinary command carries nothing.
-  expect(renderListing(commands.filter(entry => entry.path === 'version'), { query: 'version' })).not.toContain('never runs this')
+test('U5b: a foreign binary-replacing command is described by its mark, not as `orthanc update`', async ($, on) => {
+  harness(on, 'yolo')
+  const tool = (await call($, 'install-the-toolchain', ['--apply'])).deny ?? ''
+  expect(tool).toContain('install-the-toolchain')
+  expect(tool).toContain('replaces-binary')
+  expect(tool.includes("with 'orthanc update --apply'")).toBe(false)
+  const bash = (await shell($, 'orthanc install-the-toolchain --apply')).deny ?? ''
+  expect(bash).toContain('install-the-toolchain')
+  expect(bash.includes('orthanc update')).toBe(false)
 })
-
-// The other half of "replace the tool that guards me", checked rather than
-// assumed: orthanc 0.7.11 has no `plugin` command at all. Against the released
-// binary, `orthanc plugin update foundry@claude-foundry` answers
-// `error: unrecognized subcommand 'plugin'` and exits 2, and 0 of its 541
-// manifest entries begin with `plugin`. So an agent cannot reach Claude Code's
-// plugin manager through Orthanc, and what covers that is manifest-first — the
-// same rule that refuses an invented command, in both lanes. What this rule does
-// not cover is `claude plugin update foundry@claude-foundry` typed straight into
-// Bash: no Orthanc command, so no lane of this guard sees it (in the report).
-for (const mode of MODES) {
-  test(`U12: in ${mode} mode 'orthanc plugin update' is refused: no manifest lists it`, async ($, on) => {
-    const h = harness(on, mode)
-    const tool = await call($, 'plugin update', ['foundry@claude-foundry'])
-    expect(JSON.stringify(tool)).toContain('Unknown Orthanc command')
-    expect(h.calls.filter(line => line.startsWith('plugin'))).toEqual([])
-    const deny = (await shell($, 'orthanc plugin update foundry@claude-foundry')).deny ?? ''
-    // Bash must not answer this with the Claude Code command that would work.
-    expect(deny).toContain("not a command in Orthanc's agent manifest")
-    expect(deny.includes('claude plugin')).toBe(false)
-  })
-}

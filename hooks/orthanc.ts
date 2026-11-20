@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag, replacesBinary } from './policy'
+import { BINARY_RISK, DENIED_COMMANDS, type ManifestCommand, type ManifestFlag, replacesBinary } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -54,14 +54,9 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
-          // Kept raw, and an unreadable shape is marked, not dropped: policy.ts
-          // fails closed on a risk line it cannot read.
-          ...('mutation_risk' in entry
-            ? {
-                mutationRisk: entry.mutation_risk,
-                ...(typeof entry.mutation_risk === 'string' ? {} : { mutationRiskUnreadable: true }),
-              }
-            : {}),
+          // Kept raw: policy.ts reads the one value it knows and reads anything
+          // else as no risk line.
+          ...('mutation_risk' in entry ? { mutationRisk: entry.mutation_risk } : {}),
         }]
       : [],
   )
@@ -268,7 +263,11 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
     lines.push('This credential-input command is not executable through orthanc_cli; the operator runs it in a terminal.')
   }
   if (replacesBinary(command)) {
-    lines.push('This command replaces the orthanc binary (and with --plugin this plugin), so orthanc_cli never runs it; the operator updates orthanc in their own terminal.')
+    lines.push(
+      command.path === 'update'
+        ? 'This command replaces the orthanc binary (and with --plugin this plugin), so orthanc_cli never runs it; the operator updates orthanc in their own terminal.'
+        : `Orthanc's agent manifest marks this command '${BINARY_RISK}', so orthanc_cli never runs it; the operator installs it in their own terminal.`,
+    )
   }
   return lines.join('\n')
 }
