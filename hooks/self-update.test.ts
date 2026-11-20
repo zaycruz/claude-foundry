@@ -396,12 +396,15 @@ test('U7b: a group listing or a search hit carries the marker, not only the comm
   expect(renderListing(commands.filter(entry => entry.path === 'version'), { query: 'version' })).not.toContain('never runs this')
 })
 
-// The other half of "replace the tool that guards me": orthanc 0.7.11 passes
-// `orthanc plugin …` through to `claude plugin …` — `orthanc plugin update
-// foundry@claude-foundry` runs, exit 0, against the real binary — and no
-// `plugin` command is in the agent manifest (0 of 541 entries start with it).
-// So what stops it is manifest-first, the same rule that stops an invented
-// command, in both lanes.
+// The other half of "replace the tool that guards me", checked rather than
+// assumed: orthanc 0.7.11 has no `plugin` command at all. Against the released
+// binary, `orthanc plugin update foundry@claude-foundry` answers
+// `error: unrecognized subcommand 'plugin'` and exits 2, and 0 of its 541
+// manifest entries begin with `plugin`. So an agent cannot reach Claude Code's
+// plugin manager through Orthanc, and what covers that is manifest-first — the
+// same rule that refuses an invented command, in both lanes. What this rule does
+// not cover is `claude plugin update foundry@claude-foundry` typed straight into
+// Bash: no Orthanc command, so no lane of this guard sees it (in the report).
 for (const mode of MODES) {
   test(`U12: in ${mode} mode 'orthanc plugin update' is refused: no manifest lists it`, async ($, on) => {
     const h = harness(on, mode)
@@ -409,6 +412,7 @@ for (const mode of MODES) {
     expect(JSON.stringify(tool)).toContain('Unknown Orthanc command')
     expect(h.calls.filter(line => line.startsWith('plugin'))).toEqual([])
     const deny = (await shell($, 'orthanc plugin update foundry@claude-foundry')).deny ?? ''
+    // Bash must not answer this with the Claude Code command that would work.
     expect(deny).toContain("not a command in Orthanc's agent manifest")
     expect(deny.includes('claude plugin')).toBe(false)
   })
