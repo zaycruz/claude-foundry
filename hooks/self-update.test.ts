@@ -356,7 +356,7 @@ test('U8b: what a stale read name costs, and what covers it today', async ($, on
   expect(classifyOrthancCommand('ai-fde tools list', broughtBack)).toBe('mutation')
 })
 
-test('U10: the executor refuses it too, and its refusal counts as a call that never ran', () => {
+test('U10: the executor refusal\'s envelope type counts as a call that never ran (the refusal itself is above the test lane)', () => {
   // The guard blocks the call above the executor; executeCli refuses it again, as
   // it refuses a credential command, so no future caller reaches the binary.
   // This pins the second refusal's envelope type: a call that never started must
