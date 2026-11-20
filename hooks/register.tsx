@@ -97,6 +97,7 @@ import {
   gitPushDirectories,
   gitPushNamesFoundry,
   ladderDecision,
+  replacesBinary,
   loopStep,
   modeGuidance,
   ORTHANC_CLI,
@@ -325,6 +326,15 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
     return failure(
       'credential-command-denied',
       `Orthanc command '${command.path}' requires credential input and is not available through orthanc_cli. The operator runs it in a terminal.`,
+      command.path,
+    )
+  }
+  if (replacesBinary(command)) {
+    return failure(
+      'self-update-denied',
+      `Orthanc command '${command.path}' replaces the orthanc binary this session reads its command list from${
+        command.path === 'update' ? ' (with --plugin, the foundry plugin too)' : ''
+      }, so orthanc_cli did not run it. The operator installs it in their own terminal.`,
       command.path,
     )
   }
@@ -634,7 +644,9 @@ function recordTool(key: string, tool: string, input: unknown, ran: unknown, not
     startMs,
     endMs,
     attributes,
-    ...(denied ? { error: `denied: ${denied}` } : result.isError === true ? { error: 'tool error' } : {}),
+    // Redacted like every other field of this span: a refusal often quotes the
+    // operator's reason back, and that reason can carry an email, a RID or a token.
+    ...(denied ? { error: `denied: ${redactString(denied, tracing.redact)}` } : result.isError === true ? { error: 'tool error' } : {}),
   })
 }
 

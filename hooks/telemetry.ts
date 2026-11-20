@@ -295,7 +295,10 @@ export function otlpBody(traceId: string, resource: Record<string, string>, span
               startTimeUnixNano: nanos(span.startMs),
               endTimeUnixNano: nanos(Math.max(span.endMs, span.startMs)),
               attributes: attributes(span.attributes),
-              status: span.error ? { code: 2, message: span.error.slice(0, 500) } : { code: 1 },
+              // The error is a guard sentence about a real call, and the same
+              // sentence leaves in `foundry.gate.reason` redacted: this is the
+              // export boundary, so nothing leaves raw even if a caller forgot.
+              status: span.error ? { code: 2, message: redactString(span.error).slice(0, 500) } : { code: 1 },
             })),
           },
         ],

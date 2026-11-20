@@ -24,7 +24,7 @@
 //  S7  An interpreter asked only for its version or help (`node --version`,
 //      `python3 -V`) is read as one taking code from stdin, on a line that
 //      names orthanc.
-//  S8  A local command that only lists or shows (`ai-fde tools list`,
+//  S8  A local command that only lists or shows (`alias list`,
 //      `smoke schedule`) is refused as a write.
 //  K1  Interpreter code that names orthanc and starts a process runs:
 //      subprocess, os.system, os.exec*, child_process, Bun.spawn, system(),
@@ -53,7 +53,7 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'dataset create', kind: 'mutation' },
   { path: 'proposal merge', kind: 'mutation' },
   { path: 'sql export', kind: 'read-only' },
-  { path: 'ai-fde tools list', kind: 'local' },
+  { path: 'alias list', kind: 'local' },
   { path: 'smoke schedule', kind: 'local' },
   { path: 'alias add', kind: 'local' },
 ]
@@ -88,7 +88,7 @@ const PASSES: [string, string][] = [
   ['S6', 'cmp /opt/bin/orthanc ${X}/orthanc-old'],
   ['S7', 'command -v orthanc; head -c 300 "$(command -v orthanc 2>/dev/null)" | strings | head -5; node --version'],
   ['S7', 'which orthanc && python3 -V && perl -v | head -2'],
-  ['S8', "orthanc --agent ai-fde tools list 2>/dev/null | grep -i -E 'log|build_history' | head"],
+  ['S8', "orthanc --agent alias list 2>/dev/null | grep -i -E 'log|build_history' | head"],
   ['S8', 'orthanc smoke schedule'],
 ]
 

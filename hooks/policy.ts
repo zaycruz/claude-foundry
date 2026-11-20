@@ -14,6 +14,10 @@ export type ManifestCommand = {
   operatorApproval?: unknown
   /** The entry's raw `operator_approval_scope` (orthanc #118), unread: approvalOnWorkBranch reads it, failing closed. */
   operatorApprovalScope?: unknown
+  /** The entry's `mutation_risk`, kept raw: what a write does that its `kind`
+   * cannot say. A value this file cannot read is read as no risk line — see
+   * `replacesBinary`, which says why that is the safe direction here. */
+  mutationRisk?: unknown
 }
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
@@ -121,12 +125,40 @@ export const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
 const PROFILE_FLAG = /^--profile(=|$)/
 // Local commands that change which stack orthanc runs on when none is named.
 const STACK_COMMANDS = new Set(['configure use', 'configure set-default'])
-// Orthanc `local` commands that only read local state.
-const LOCAL_READS = new Set([
+// Orthanc `local` commands that only read local state. Every name here is a
+// `local` command in the orthanc this plugin is tied to
+// (hooks/orthanc-snapshot.json): a name orthanc drops comes out, since a write
+// that later returns under it would be read as a read.
+export const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
   'configure list', 'alias list', 'alias show', 'alias resolve', 'alias export',
-  'ai-fde tools list', 'smoke schedule',
+  'smoke schedule',
 ])
+// Orthanc's self-update. `--apply` replaces the binary the agent-manifest and
+// its operator_approval marks were read from, `--channel nightly` replaces it
+// with a build of main, `--version <older> --yes` moves it back under the
+// plugin's own min_orthanc, and `--plugin` updates this plugin: the guard's own
+// code. Not Foundry work on a branch, so no approval mode runs it.
+//
+// The manifest already says this in data: orthanc 0.7.11 marks `update`
+// `mutation_risk: "replaces-binary"` (the only other risk it names is
+// `solution-design delete`: "moves-a-resource-to-the-trash"). A guard that read
+// only the field would miss a binary that ships `update` with no risk line, and
+// a guard that read only the name would miss the next binary-replacing command,
+// so the rule reads both, as the credential refusals read `input` and the name.
+const SELF_UPDATE_COMMANDS = new Set(['update'])
+export const BINARY_RISK = 'replaces-binary'
+// A `mutation_risk` in a shape this file cannot read (an object, a number, null)
+// is read as no risk line at all, not as a risk: refusing on shape would refuse
+// every command orthanc later annotates with a field it writes differently, and
+// the case that matters — `update` itself — is held by the name. An unreadable
+// condition on `operator_approval` fails the other way, to a human decision,
+// because there the alternative is letting a mutation through unasked.
+
+/** True when this command replaces the orthanc binary the guard reads its rules
+ * from, by its manifest name or by its `mutation_risk`. */
+export const replacesBinary = (command: ManifestCommand | undefined): boolean =>
+  command !== undefined && (SELF_UPDATE_COMMANDS.has(command.path) || command.mutationRisk === BINARY_RISK)
 
 export type GateClassification = {
   command: string | null
@@ -990,6 +1022,44 @@ function printsAndExits(runner: string, flags: readonly string[]): boolean {
   )
 }
 
+/** The other route to the same self-modification, with no Orthanc in the call:
+ * `claude plugin update|uninstall|disable` replaces or removes
+ * `foundry@claude-foundry`, which is the code these rules are written in. Reads
+ * (`list`, `details`, `search`) and any other plugin are left alone; so is a bare
+ * `-h`, which prints help. An update naming no plugin is refused, because it
+ * updates every plugin, this one included. */
+const PLUGIN_SELF_ACTIONS = new Set(['disable', 'remove', 'uninstall', 'update'])
+const CLAUDE_BINARIES = new Set(['claude'])
+
+function mutatesThisPlugin(words: readonly string[]): boolean {
+  const head = commandHead(words)
+  if (!CLAUDE_BINARIES.has(basename(words[head]))) return false
+  const rest = words.slice(head + 1).map(word => unquote(word).toLowerCase())
+  // Only a usage print escapes: `-V`/`--version` names a release to install here,
+  // the same trap the shell lane learned about `orthanc update --version` (U13).
+  if (rest.some(word => ['-h', '--help', 'help'].includes(word))) return false
+  if (rest[0] !== 'plugin' && rest[0] !== 'plugins') return false
+  if (!rest.some(word => PLUGIN_SELF_ACTIONS.has(word))) return false
+  const named = rest.filter(word => word.includes('@') || word === 'foundry' || word === 'claude-foundry')
+  return named.length === 0 || named.some(word => word === 'foundry' || word === 'claude-foundry' || word.startsWith('foundry@'))
+}
+
+/** True when the segment runs Orthanc but the words that say what to run never
+ * reach the line: `xargs orthanc` takes them from stdin or a file, so the parse
+ * sees the binary and nothing else, and no rule of the ladder has anything to
+ * judge. A process substitution is a different case and is not refused: measured
+ * against the released 0.7.11, `orthanc <(echo 'update --apply')` hands the binary
+ * the path `/dev/fd/63`, and it answers `unrecognized subcommand` and changes
+ * nothing. */
+function runsOrthancOnUnreadableWords(words: readonly string[]): boolean {
+  const head = commandHead(words)
+  // A head that names Orthanc without running it (`ls | xargs grep orthanc README`)
+  // is a mention, not a call, exactly as everywhere else in this file.
+  if (NON_EXECUTING.has(basename(words[head]))) return false
+  if (!words.slice(head, head + 2).some(word => isOrthancWord(word))) return false
+  return words.slice(0, head + 1).some(word => basename(word) === 'xargs')
+}
+
 /** Where Orthanc starts in a segment: the command word, or the first orthanc
  * word after a head that can run another program (env, sudo, xargs, find
  * -exec, npx, ssh, a wrapper script, …) when a call follows it. -1 when the
@@ -1069,7 +1139,7 @@ function orthancShellCall(
   words: readonly string[],
   start: number,
   manifest: readonly ManifestCommand[],
-): { path: string; known: boolean; help: boolean } {
+): { path: string; known: boolean; help: boolean; helpVerb: boolean } {
   const rest = words.slice(start + 1)
   let index = 0
   while (index < rest.length && rest[index]!.startsWith('-')) index += rest[index] === '--profile' ? 2 : 1
@@ -1077,6 +1147,10 @@ function orthancShellCall(
   const ended = rest.indexOf('--')
   const flags = ended < 0 ? rest : rest.slice(0, ended)
   const help = flags.some(word => ['-h', '--help', '-V', '--version'].includes(word)) || tail[0] === 'help'
+  // `-V`/`--version` prints the version on most commands, and on `update` it names
+  // the release to install. Only `-h`, `--help` and `orthanc help …` are a read of
+  // documentation, so only those let a call the guard refuses through the shell lane.
+  const helpVerb = flags.some(word => ['-h', '--help'].includes(word)) || tail[0] === 'help'
   const leading: string[] = []
   for (const word of tail) {
     if (word.startsWith('-')) break
@@ -1085,9 +1159,9 @@ function orthancShellCall(
   const paths = new Set(manifest.map(entry => entry.path))
   for (let width = leading.length; width >= 1; width -= 1) {
     const path = leading.slice(0, width).join(' ').toLowerCase()
-    if (paths.has(path)) return { path, known: true, help }
+    if (paths.has(path)) return { path, known: true, help, helpVerb }
   }
-  return { path: leading.join(' ').toLowerCase(), known: false, help }
+  return { path: leading.join(' ').toLowerCase(), known: false, help, helpVerb }
 }
 
 // Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
@@ -1117,6 +1191,14 @@ function shellClassification(
   }
   for (const segment of segments) {
     const { words } = segment
+    // Read or write is unknowable here, and the answer is the one this file gives
+    // every other unreadable Orthanc call: refuse, and name the two ways that run.
+    if (runsOrthancOnUnreadableWords(words)) {
+      return refuse(null, 'This shell command runs Orthanc with words the Foundry guard cannot read (xargs takes them from stdin or a file, and `<(...)` takes them from a substitution). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
+    }
+    if (mutatesThisPlugin(words)) {
+      return refuse(null, `'claude plugin' updates, removes or disables foundry@claude-foundry: the code the Foundry guard is written in, including the branch rule and the approval ladder. That is the operator's call, in their own terminal; this session does not run it. Ask them to run 'claude plugin update foundry@claude-foundry'.`)
+    }
     if (hidesOrthanc(segment, command, assignments, groups)) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
@@ -1125,6 +1207,22 @@ function shellClassification(
     const call = orthancShellCall(words, start, manifest)
     if (call.path === '' && !call.help && segment.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
+    }
+    // Before the help carve-out, and not by it: `--version` prints the version on
+    // most commands and names the release to install on `update`, so an update
+    // spelled `--version <older> --yes --apply` would otherwise read as a question
+    // about versions. `-h`, `--help` and `orthanc help …` still print usage —
+    // measured, not assumed: against the released 0.7.11,
+    // `orthanc update --apply --help` prints the usage page, exits 0, and leaves the
+    // binary's mtime unchanged, so the marker that survives this carve-out is an
+    // exit rather than an install with a banner on it.
+    if (call.known && replacesBinary(manifest.find(entry => entry.path === call.path)) && !call.helpVerb) {
+      return refuse(
+        call.path,
+        call.path === 'update'
+          ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`
+          : `'orthanc ${call.path}' is marked '${BINARY_RISK}' in Orthanc's agent manifest: it replaces the orthanc binary this session reads its command list from. Installing a binary is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`,
+      )
     }
     if (call.help || call.path === '' || call.path === 'repository clone') continue
     if (!call.known) {
@@ -1185,8 +1283,15 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
-    // A read whose entry also asks for the operator is not let through as a read.
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
+    // A read whose entry also asks for the operator, or names a risk the guard
+    // refuses outright, is not let through as a read.
+    const entry = manifest.find(found => found.path === resolved.path)
+    if (
+      classifyOrthancCommand(resolved.path, manifest) === 'read' &&
+      operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null &&
+      !replacesBinary(entry)
+    )
+      return null
     // orthanc reads the last --profile it is given, so one in the args would move
     // the write off the stack the operator picked. Reads may look at another stack.
     if (resolved.args.some(arg => PROFILE_FLAG.test(unquote(arg)))) {
@@ -1194,6 +1299,13 @@ export function classifyCall(
     }
     if (STACK_COMMANDS.has(resolved.path)) {
       return unreadableCall(input, workingBranch, `'${resolved.path}' changes orthanc's default stack, which a later session starts on. The stack is the operator's: they switch it with /profile.`)
+    }
+    if (replacesBinary(entry)) {
+      // Refused, not asked: a dialog cannot show which build the binary becomes.
+      const why = resolved.path === 'update'
+        ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`
+        : `'${resolved.path}' is marked '${BINARY_RISK}' in Orthanc's agent manifest: it replaces the orthanc binary this session reads its command list and operator_approval marks from. Installing a binary is the operator's call, not a write on a branch: they run it in their own terminal. orthanc_cli runs no binary-replacing command, in any mode.`
+      return unreadableCall(input, workingBranch, why)
     }
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
