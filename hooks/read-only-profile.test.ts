@@ -67,7 +67,7 @@ const ENTRIES = [
   { path: 'configure profile create', kind: 'local' },
   { path: 'alias list', kind: 'local' },
   // Shapes copied from `orthanc agent-manifest`: every mutation declares --apply
-  // (checked on the shipped 0.7.7 manifest: 205 mutations, 0 without it), so a call
+  // (checked on the 0.7.7 and 0.7.11 manifests: 205 and 231 mutations, 0 without it), so a call
   // with the flag left off is a plan, exactly as orthanc's own gate reads it.
   { path: 'dataset create', kind: 'mutation', auth: 'bearer-token', args: [APPLY] },
   { path: 'dataset schema set', kind: 'mutation', auth: 'bearer-token', args: [APPLY] },
@@ -608,7 +608,7 @@ test('Q15: the stack name in the question cannot put a line in front of the oper
   expect(deny.split('\n')).toHaveLength(1)
   expect(deny).toContain('APPROVED BY OPERATOR')
   expect(h.asked.length).toBe(1)
-  expect(h.asked[0].split('\n').length).toBe(1)
+  expect(h.asked[0]?.split('\n').length).toBe(1)
   expect(ran(h, 'configure profile set')).toEqual([])
 })
 

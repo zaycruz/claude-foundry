@@ -378,7 +378,7 @@ function appliesValue(entry: ManifestCommand | undefined, args: readonly string[
  *     be written by it — the shipped manifest carries exactly one such command,
  *     `update` (kind `mutation`, auth `none`: it replaces the local binary);
  *  4. otherwise: a write unless `--apply` reads false.
- * Checked on the installed binary (0.7.7): all 205 mutation entries declare a
+ * Checked on the 0.7.7 and 0.7.11 manifests: every mutation entry declares a
  * plain `--apply` flag, none with a default or a value, so no command that exists
  * today loses its refusal, and no plan that exists today loses its run.
  */
