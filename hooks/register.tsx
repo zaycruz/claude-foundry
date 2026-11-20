@@ -82,6 +82,7 @@ import {
   withStoppedHint,
 } from './orthanc'
 import { type BinaryIdentity, binaryIdentity, type LoadedManifest, ManifestCache, named } from './manifest'
+import { MIN_ORTHANC, ORTHANC_CHECKED, orthancVersionWarning, PLUGIN_VERSION } from './orthanc-tie'
 import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
 import {
   APPROVAL_MODES,
@@ -237,12 +238,34 @@ async function readManifest($: EngineInterface, identity: BinaryIdentity): Promi
     runOrthanc($, ['agent-manifest'], undefined, 30_000, bin),
     runOrthanc($, ['version'], undefined, 15_000, bin),
   ])
+  const data = version.data as { version?: unknown } | null | undefined
+  const read = typeof data?.version === 'string' && data.version.trim() !== '' ? data.version.trim() : null
+  tieWarning($, orthancVersionWarning(read))
   const commands = manifestFrom(manifest)
   if (commands.length === 0) {
     throw new Error(isErrorEnvelope(manifest) ? `orthanc agent-manifest failed: ${errorsOf(manifest)}` : 'orthanc agent-manifest returned no commands')
   }
-  const data = version.data as { version?: unknown } | null | undefined
-  return { commands, version: typeof data?.version === 'string' && data.version.trim() !== '' ? data.version.trim() : null }
+  return { commands, version: read }
+}
+
+// The version warning of the last manifest read (orthanc-tie.ts V1-V5). Each
+// new text is shown once; the read at session start shows it in the session's
+// first lines. It never blocks a call.
+let orthancTieWarning: string | null = null
+const STARTUP_MANIFEST_WAIT_MS = 3_000
+const shownTieWarnings = new Set<string>()
+function tieWarning($: EngineInterface, warning: string | null) {
+  orthancTieWarning = warning
+  if (warning === null || shownTieWarnings.has(warning)) return
+  shownTieWarnings.add(warning)
+  // A warning never changes what a call does: a failed toast or log is dropped.
+  for (const show of [() => $.ui.log(warning), () => $.ui.toast(warning)]) {
+    try {
+      void Promise.resolve(show()).catch(() => undefined)
+    } catch {
+      // dropped
+    }
+  }
 }
 
 /** The manifest the cache holds, and the identity of the binary a call would start now. */
@@ -1531,6 +1554,7 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
       return [
         renderChecks(checks),
         `orthanc commands: ${manifest.length} in the agent manifest${manifestCache.version ? ` of orthanc ${manifestCache.version}` : ''}`,
+        orthancTieWarning ?? `plugin ${PLUGIN_VERSION}: orthanc ${MIN_ORTHANC} to ${ORTHANC_CHECKED} (guard last checked against ${ORTHANC_CHECKED})`,
         `tools: mcp__foundry__orthanc_help, mcp__foundry__orthanc_cli`,
         refusedCommands.length > 0 ? `commands Claude Code refused: ${refusedCommands.join(', ')}` : 'all foundry slash commands registered',
       ].join('\n')
@@ -1787,7 +1811,20 @@ export const register: Register = on => {
       tracing = null
       tracingNote = 'off: tracing setup failed'
     })
-    void loadManifest($).catch(() => undefined)
+    // Wait a little for the manifest and version read, so the orthanc version
+    // warning (orthanc-tie.ts) is among the session's first lines. A slow
+    // orthanc does not hold the session: the read goes on in the background.
+    const read = loadManifest($).then(
+      () => undefined,
+      () => undefined,
+    )
+    let waited = () => {}
+    const timer = $.clock.after(STARTUP_MANIFEST_WAIT_MS, () => waited())
+    try {
+      await Promise.race([read, new Promise<void>(resolve => (waited = resolve))])
+    } finally {
+      timer.cancel()
+    }
     const earlier = (await fdeState($)) === null ? await fdeFromEarlier($).catch(() => null) : null
     if (earlier) $.ui.toast(`FDE branch ${earlier.branchName} (${goalLabel(earlier.goal)}) is still open from an earlier session: /fde resume or /fde end`)
     return started
