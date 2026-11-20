@@ -3,8 +3,9 @@
 // operator. Node 18+ and nothing else (no TypeScript, no network).
 //
 //   node scripts/orthanc-tie.mjs check
-//       Fails (exit 1) when plugin.json, marketplace.json, hooks/orthanc-tie.ts
-//       and hooks/orthanc-manifest.snapshot.ts disagree, or when the snapshot
+//       Fails (exit 1) when plugin.json, marketplace.json, hooks/orthanc-tie.ts,
+//       hooks/orthanc-manifest.snapshot.ts and hooks/orthanc-snapshot.json
+//       disagree, or when the snapshot
 //       holds a field or an approval shape the guard does not know.
 //   node scripts/orthanc-tie.mjs refresh --manifest <file> --orthanc-version <v>
 //                                [--plugin-version <v>] [--min-orthanc <v>]
@@ -32,7 +33,16 @@
 //      the same manifest gives the same bytes and a rerun shows no diff.
 //  T8  hooks/orthanc-snapshot.json (written by the orthanc release job) and
 //      the guard's snapshot disagree on the orthanc or on any marker: check
-//      fails and names the command.
+//      fails and names the command. The release job's own pull request is in
+//      this state until refresh finishes it (docs/RELEASE.md); check says so.
+//  T9  refresh and the release job write hooks/orthanc-snapshot.json
+//      differently: refresh writes the job's format byte for byte, and on the
+//      job's branch (same orthanc_tag) it never rewrites the job's file; a
+//      manifest that does not match it is refused (exit 2), nothing written.
+//  T10 the two min_orthanc fields are confused: the job's file names the tag
+//      it follows (min_orthanc = orthanc_tag), plugin.json names the oldest
+//      orthanc the hooks support; check fails unless the job's equals its tag
+//      and is not older than plugin.json's.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -157,8 +167,18 @@ export function check() {
   } catch (error) {
     if (error.code !== 'ENOENT') problems.push(`${FILES.releaseJob}: ${error.message}`)
   }
+  if (job) {
+    same(`${FILES.releaseJob} min_orthanc vs its orthanc_tag (T10)`, `v${job.min_orthanc}`, job.orthanc_tag)
+    const [j, p] = [num(job.min_orthanc), num(plugin.min_orthanc)]
+    if (j[0] * 1e6 + j[1] * 1e3 + j[2] < p[0] * 1e6 + p[1] * 1e3 + p[2]) problems.push(`${FILES.releaseJob} min_orthanc ${job.min_orthanc} is older than ${FILES.plugin} min_orthanc ${plugin.min_orthanc} (T10)`)
+  }
   if (job && snap) {
-    same(`${FILES.releaseJob} orthanc_tag vs v + ${FILES.tie} ORTHANC_CHECKED`, job.orthanc_tag, `v${tie.checked}`)
+    if (job.orthanc_tag !== `v${tie.checked}`) {
+      problems.push(
+        `${FILES.releaseJob} is for orthanc ${job.orthanc_tag}, the guard was checked against v${tie.checked}. ` +
+          `If this is the orthanc release job's pull request, finish it: node scripts/orthanc-tie.mjs refresh --manifest <agent-manifest of ${job.orthanc_tag}> --orthanc-version ${String(job.orthanc_tag).replace(/^v/, '')} (docs/RELEASE.md)`,
+      )
+    }
     const jobMarkers = markers(job)
     const ours = markers(snap)
     for (const [path, shape] of jobMarkers) if (ours.get(path) !== shape) problems.push(`'${path}': ${FILES.releaseJob} has ${shape}, ${FILES.snapshot} has ${ours.get(path) ?? 'no marker'}`)
@@ -224,6 +244,21 @@ export function render(snap) {
   ].join('\n')
 }
 
+/** hooks/orthanc-snapshot.json as orthanc-source scripts/release/plugin_release.py
+ * writes it (projection + snapshot_text): Python json.dumps(indent=2,
+ * sort_keys=True) plus a newline (T9). */
+const JOB_FIELDS = ['kind', 'auth', 'operator_approval', 'operator_approval_scope']
+export function jobSnapshotText(envelope, orthancVersion) {
+  const commands = (envelope?.data?.commands ?? []).map(entry => {
+    const kept = { path: entry.path }
+    for (const field of JOB_FIELDS) if (field in entry) kept[field] = entry[field]
+    return kept
+  })
+  commands.sort((a, b) => (String(a.path) < String(b.path) ? -1 : String(a.path) > String(b.path) ? 1 : 0))
+  const document = { min_orthanc: orthancVersion, orthanc_tag: `v${orthancVersion}`, snapshot_version: 1, commands }
+  return `${JSON.stringify(sortKeys(document), null, 2)}\n`
+}
+
 const markers = snap => new Map((snap?.commands ?? []).filter(entry => 'operator_approval' in entry || 'operator_approval_scope' in entry).map(entry => [entry.path, JSON.stringify([entry.operator_approval, entry.operator_approval_scope])]))
 
 function refresh(options) {
@@ -232,7 +267,20 @@ function refresh(options) {
   for (const [name, value] of [['--orthanc-version', version], ['--plugin-version', options['plugin-version']], ['--min-orthanc', options['min-orthanc']]]) {
     if (value !== undefined && !VERSION.test(value)) throw new Error(`${name} is not x.y.z: ${value}`)
   }
-  const fresh = trim(JSON.parse(readFileSync(options.manifest, 'utf8')), version)
+  const envelope = JSON.parse(readFileSync(options.manifest, 'utf8'))
+  const fresh = trim(envelope, version)
+  // T9: on the release job's branch its file is the job's; check it, never rewrite it.
+  const jobText = jobSnapshotText(envelope, version)
+  let jobOld = null
+  try {
+    jobOld = JSON.parse(read(FILES.releaseJob))
+  } catch {
+    jobOld = null
+  }
+  const jobOwned = jobOld?.orthanc_tag === `v${version}`
+  if (jobOwned && JSON.stringify(sortKeys(jobOld.commands)) !== JSON.stringify(JSON.parse(jobText).commands)) {
+    throw new Error(`${FILES.releaseJob} is the release job's snapshot of v${version}, and --manifest is not that manifest; nothing written`)
+  }
   let old = null
   try {
     old = snapshotData()
@@ -268,6 +316,7 @@ function refresh(options) {
     tie = tie.replace(pattern, `$1'${value}'`)
   }
   write(FILES.snapshot, snapshotText)
+  if (!jobOwned) write(FILES.releaseJob, jobText)
   write(FILES.plugin, pluginText)
   write(FILES.marketplace, marketplaceText)
   write(FILES.tie, tie)
@@ -276,12 +325,13 @@ function refresh(options) {
   const after = markers(fresh)
   const report = [`orthanc ${old?.orthanc_version ?? '(none)'} -> ${version}; plugin ${plugin.version} -> ${pluginVersion}; min_orthanc ${plugin.min_orthanc ?? '(none)'} -> ${min}`]
   report.push(`commands: ${old?.commands.length ?? 0} -> ${fresh.commands.length}; approval markers: ${before.size} -> ${after.size}`)
+  report.push(jobOwned ? `${FILES.releaseJob}: the release job's, for v${version}; matches the manifest, left as it is` : `${FILES.releaseJob}: written for v${version}`)
   for (const [path, shape] of after) if (!before.has(path)) report.push(`  + ${path} ${shape}`)
   for (const [path, shape] of before) if (!after.has(path)) report.push(`  - ${path} ${shape}`)
   for (const [path, shape] of after) if (before.has(path) && before.get(path) !== shape) report.push(`  ~ ${path} ${before.get(path)} -> ${shape}`)
   const newKeys = fresh.entry_keys.filter(key => !(old?.entry_keys ?? []).includes(key))
   if (newKeys.length > 0) report.push(`new entry keys: ${newKeys.join(', ')}`)
-  if (old && before.size === after.size && report.length === 2 && JSON.stringify(old.commands) === JSON.stringify(fresh.commands)) report.push('manifest unchanged apart from the version')
+  if (old && before.size === after.size && report.length === 3 && JSON.stringify(old.commands) === JSON.stringify(fresh.commands)) report.push('manifest unchanged apart from the version')
   return report
 }
 
