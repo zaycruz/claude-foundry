@@ -1101,7 +1101,7 @@ function orthancShellCall(
   words: readonly string[],
   start: number,
   manifest: readonly ManifestCommand[],
-): { path: string; known: boolean; help: boolean } {
+): { path: string; known: boolean; help: boolean; helpVerb: boolean } {
   const rest = words.slice(start + 1)
   let index = 0
   while (index < rest.length && rest[index]!.startsWith('-')) index += rest[index] === '--profile' ? 2 : 1
@@ -1109,6 +1109,10 @@ function orthancShellCall(
   const ended = rest.indexOf('--')
   const flags = ended < 0 ? rest : rest.slice(0, ended)
   const help = flags.some(word => ['-h', '--help', '-V', '--version'].includes(word)) || tail[0] === 'help'
+  // `-V`/`--version` prints the version on most commands, and on `update` it names
+  // the release to install. Only `-h`, `--help` and `orthanc help …` are a read of
+  // documentation, so only those let a call the guard refuses through the shell lane.
+  const helpVerb = flags.some(word => ['-h', '--help'].includes(word)) || tail[0] === 'help'
   const leading: string[] = []
   for (const word of tail) {
     if (word.startsWith('-')) break
@@ -1117,9 +1121,9 @@ function orthancShellCall(
   const paths = new Set(manifest.map(entry => entry.path))
   for (let width = leading.length; width >= 1; width -= 1) {
     const path = leading.slice(0, width).join(' ').toLowerCase()
-    if (paths.has(path)) return { path, known: true, help }
+    if (paths.has(path)) return { path, known: true, help, helpVerb }
   }
-  return { path: leading.join(' ').toLowerCase(), known: false, help }
+  return { path: leading.join(' ').toLowerCase(), known: false, help, helpVerb }
 }
 
 // Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
@@ -1158,19 +1162,21 @@ function shellClassification(
     if (call.path === '' && !call.help && segment.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    if (call.help || call.path === '' || call.path === 'repository clone') continue
-    if (!call.known) {
-      return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
-    }
-    // Not the generic write refusal: orthanc_cli refuses these too, so pointing
-    // the agent there would send it on a call that cannot run.
-    if (replacesBinary(manifest.find(entry => entry.path === call.path))) {
+    // Before the help carve-out, and not by it: `--version` prints the version on
+    // most commands and names the release to install on `update`, so an update
+    // spelled `--version <older> --yes --apply` would otherwise read as a question
+    // about versions. `-h`, `--help` and `orthanc help …` still print usage.
+    if (call.known && replacesBinary(manifest.find(entry => entry.path === call.path)) && !call.helpVerb) {
       return refuse(
         call.path,
         call.path === 'update'
           ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`
           : `'orthanc ${call.path}' is marked '${BINARY_RISK}' in Orthanc's agent manifest: it replaces the orthanc binary this session reads its command list from. Installing a binary is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`,
       )
+    }
+    if (call.help || call.path === '' || call.path === 'repository clone') continue
+    if (!call.known) {
+      return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
     const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
     if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue

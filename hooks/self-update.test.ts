@@ -446,3 +446,28 @@ for (const mode of MODES) {
     expect(deny.includes('claude plugin')).toBe(false)
   })
 }
+
+// `-V`/`--version` is a version print on most commands and the release to install
+// on `update`, and the Bash lane has always let a help call through unread. Read
+// in that order, the downgrade this file documents — `--version <older> --yes
+// --apply` — looked like a question about versions.
+for (const mode of MODES) {
+  test(`U13: in ${mode} mode a Bash update spelled with --version is refused, and --help still prints usage`, async ($, on) => {
+    harness(on, mode)
+    for (const line of [
+      'orthanc update --version v0.7.1 --yes --apply',
+      'orthanc update -V v0.7.1 --apply',
+      'orthanc update --apply --version v0.7.1',
+    ]) {
+      const deny = (await shell($, line)).deny ?? ''
+      expect(deny.length).toBeGreaterThan(0)
+      expect(deny.includes('orthanc update')).toBe(true)
+    }
+    for (const line of ['orthanc update --help', 'orthanc update -h', 'orthanc help update']) {
+      expect((await shell($, line)).deny).toBe(undefined)
+    }
+    // A version print on another command is still a read.
+    expect((await shell($, 'orthanc --version')).deny).toBe(undefined)
+    expect((await shell($, 'orthanc dataset list --version')).deny).toBe(undefined)
+  })
+}
