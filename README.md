@@ -36,6 +36,10 @@ says so instead of falling back to REST.
   unprotect <repo> main`), and `workshop module publish`, which works on main
   only, run only when the operator approves
   them, in every mode; with no one to ask they are refused.
+  `orthanc update` never runs through `orthanc_cli`, in any mode: it replaces
+  the Orthanc binary the command list and its `operator_approval` marks were
+  read from, and `--plugin` updates this plugin. The operator updates Orthanc in
+  their own terminal.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied.
 - **A branch rule** that no approval mode can turn off: agent work happens on

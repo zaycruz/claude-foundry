@@ -121,12 +121,21 @@ export const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
 const PROFILE_FLAG = /^--profile(=|$)/
 // Local commands that change which stack orthanc runs on when none is named.
 const STACK_COMMANDS = new Set(['configure use', 'configure set-default'])
-// Orthanc `local` commands that only read local state.
-const LOCAL_READS = new Set([
+// Orthanc `local` commands that only read local state. Every name here is a
+// `local` command in the orthanc this plugin is tied to
+// (hooks/orthanc-snapshot.json): a name orthanc drops comes out, since a write
+// that later returns under it would be read as a read.
+export const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
   'configure list', 'alias list', 'alias show', 'alias resolve', 'alias export',
-  'ai-fde tools list', 'smoke schedule',
+  'smoke schedule',
 ])
+// Orthanc's self-update. `--apply` replaces the binary the agent-manifest and
+// its operator_approval marks were read from, `--channel nightly` replaces it
+// with a build of main, `--version <older> --yes` moves it back under the
+// plugin's own min_orthanc, and `--plugin` updates this plugin: the guard's own
+// code. Not Foundry work on a branch, so no approval mode runs it.
+const SELF_UPDATE_COMMANDS = new Set(['update'])
 
 export type GateClassification = {
   command: string | null
@@ -1194,6 +1203,10 @@ export function classifyCall(
     }
     if (STACK_COMMANDS.has(resolved.path)) {
       return unreadableCall(input, workingBranch, `'${resolved.path}' changes orthanc's default stack, which a later session starts on. The stack is the operator's: they switch it with /profile.`)
+    }
+    if (SELF_UPDATE_COMMANDS.has(resolved.path)) {
+      // Refused, not asked: a dialog cannot show which build the binary becomes.
+      return unreadableCall(input, workingBranch, `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`)
     }
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
