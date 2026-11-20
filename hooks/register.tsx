@@ -332,7 +332,9 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
   if (replacesBinary(command)) {
     return failure(
       'self-update-denied',
-      `Orthanc command '${command.path}' replaces the orthanc binary this session reads its command list from (with --plugin, the foundry plugin too), so orthanc_cli did not run it. The operator updates orthanc in their own terminal.`,
+      `Orthanc command '${command.path}' replaces the orthanc binary this session reads its command list from${
+        command.path === 'update' ? ' (with --plugin, the foundry plugin too)' : ''
+      }, so orthanc_cli did not run it. The operator installs it in their own terminal.`,
       command.path,
     )
   }

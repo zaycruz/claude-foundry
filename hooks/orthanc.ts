@@ -241,10 +241,13 @@ function commandLine(command: ManifestCommand): string {
   const traits = [command.kind, command.auth && `auth: ${command.auth}`, command.input && `input: ${command.input}`]
     .filter(Boolean)
     .join(', ')
-  // Same marker as renderCommand: a group listing or a search hit is where an
-  // agent picks a command, not the page it lands on afterwards.
-  const never = replacesBinary(command) ? ' — orthanc_cli never runs this; the operator installs it in their own terminal' : ''
-  return `${command.path}${traits ? ` — ${traits}` : ''}${never}`
+  // Both hard refusals show here, not only on the command page: a group listing
+  // or a search hit is where an agent picks the command.
+  const marks = [
+    replacesBinary(command) ? 'orthanc_cli never runs this; the operator installs it in their own terminal' : '',
+    isCredentialCommand(command) ? 'orthanc_cli never runs this; the operator enters the credential in a terminal' : '',
+  ].filter(Boolean)
+  return `${command.path}${traits ? ` — ${traits}` : ''}${marks.length ? ` — ${marks.join('; ')}` : ''}`
 }
 
 export const isCredentialCommand = (command: ManifestCommand) =>

@@ -55,11 +55,11 @@ export const LOCAL_COMMANDS: readonly string[] = [
  * why the guard's rule reads the command name as well as the field. */
 export const UPDATE_MUTATION_RISK = 'replaces-binary'
 
-/** The pinned entry of Orthanc's self-update: five fields per command
- * (`path`, `kind`, `auth`, `operator_approval`, `operator_approval_scope`), with
- * `update` a `mutation` and `auth: none`. That is why Bash already refused it,
- * and why the read fast path never saw it. */
-export const UPDATE_ENTRY = {
+/** The pinned entry of Orthanc's self-update. The pin records at most five fields
+ * per command (`path`, `kind`, `auth`, `operator_approval`,
+ * `operator_approval_scope`; `update` carries three of them), and here they say
+ * `kind: mutation`, `auth: none`, no `operator_approval`. That is why Bash already
+ * refused the command, and why the read fast path never saw it. */export const UPDATE_ENTRY = {
   path: 'update',
   kind: 'mutation',
   auth: 'none',

@@ -120,8 +120,8 @@ const OTHER_SURFACE: ManifestCommand[] = [
   { path: 'renamed-self-update', kind: 'mutation' },
   // Marked a read by a manifest that still says what it does: the risk wins.
   { path: 'toolchain install', kind: 'read-only', mutationRisk: UPDATE_MUTATION_RISK },
-  // A risk line this plugin cannot read: stopped, not waved through.
-  // A risk line in a shape this plugin cannot read, as a future orthanc might write it.
+  // A risk line in a shape this plugin cannot read, as a future orthanc might write
+  // it: read as no risk line at all, so the name rule is what holds `update`.
   { path: 'toolchain repair', kind: 'mutation', mutationRisk: { level: 'high' } },
 ]
 
@@ -273,7 +273,7 @@ for (const mode of MODES) {
     expect((await call($, 'install-the-toolchain', ['--apply'])).deny).toContain('replaces')
     expect(h.calls.filter(line => line.startsWith('install-the-toolchain'))).toEqual([])
     // A `kind: read-only` entry that names the risk is not let through as a read,
-  // and the refusal speaks of that command, not of `orthanc update`.
+    // and the refusal speaks of that command, not of `orthanc update`.
     const other = (await call($, 'toolchain install')).deny ?? ''
     expect(other).toContain('replaces')
     expect(other).toContain('replaces-binary')
@@ -301,18 +301,6 @@ for (const mode of MODES) {
     expect((await call($, 'version')).deny).toBe(undefined)
   })
 }
-
-test('U7: orthanc_help marks the command where the agent reads it, as it marks the credential commands', async () => {
-  const commands = manifestFrom(manifestEnvelope(SURFACE) as never)
-  const update = commands.find(entry => entry.path === 'update')
-  expect(update?.mutationRisk).toBe(UPDATE_MUTATION_RISK)
-  const shown = renderCommand(update!, null)
-  expect(shown).toContain('never runs it')
-  expect(shown).toContain('terminal')
-  // An ordinary command, and one that merely shares the last word, say nothing of the kind.
-  expect(renderCommand(commands.find(entry => entry.path === 'version')!, null)).not.toContain('never runs it')
-  expect(renderCommand(commands.find(entry => entry.path === 'automate update')!, null)).not.toContain('never runs it')
-})
 
 // The 11 local commands that only read, as orthanc's own help describes them
 // (`version`/`hello`/`agent-manifest`/`capabilities` print, `completion show`
@@ -408,3 +396,53 @@ test('U5b: a foreign binary-replacing command is described by its mark, not as `
   expect(bash).toContain('install-the-toolchain')
   expect(bash.includes('orthanc update')).toBe(false)
 })
+
+test('U7: orthanc_help marks the command where the agent reads it, as it marks the credential commands', () => {
+  const commands = manifestFrom(manifestEnvelope(SURFACE) as never)
+  const update = commands.find(entry => entry.path === 'update')
+  expect(update?.mutationRisk).toBe(UPDATE_MUTATION_RISK)
+  const shown = renderCommand(update!, null)
+  expect(shown.includes('never runs it')).toBe(true)
+  expect(shown.includes('terminal')).toBe(true)
+  // An ordinary command, and one that merely shares the last word, say nothing.
+  for (const path of ['version', 'automate update']) {
+    expect(renderCommand(commands.find(entry => entry.path === path)!, null).includes('never runs it')).toBe(false)
+  }
+})
+
+test('U7b: a group listing or a search hit carries the marker, not only the command page', () => {
+  const commands = manifestFrom(manifestEnvelope(SURFACE) as never)
+  const update = commands.filter(entry => entry.path === 'update')
+  expect(renderListing(update, { query: 'update' }).includes('orthanc_cli never runs this')).toBe(true)
+  expect(renderListing(update, { group: 'update' }).includes('orthanc_cli never runs this')).toBe(true)
+  expect(renderListing(commands.filter(entry => entry.path === 'version'), { query: 'version' }).includes('never runs this')).toBe(false)
+})
+
+test('U7c: the listing marks the credential commands too, where an agent picks them', () => {
+  const commands = manifestFrom(manifestEnvelope([...SURFACE, { path: 'auth store', kind: 'local' }]) as never)
+  const shown = renderListing(commands.filter(entry => entry.path === 'auth store'), { query: 'auth store' })
+  expect(shown.includes('orthanc_cli never runs this')).toBe(true)
+  expect(shown.includes('credential')).toBe(true)
+})
+
+// The other half of "replace the tool that guards me", checked rather than
+// assumed: orthanc 0.7.11 has no `plugin` command at all. Against the released
+// binary, `orthanc plugin update foundry@claude-foundry` answers
+// `error: unrecognized subcommand 'plugin'` and exits 2, and 0 of its 541
+// manifest entries begin with `plugin`. So an agent cannot reach Claude Code's
+// plugin manager through Orthanc, and what covers that is manifest-first — the
+// same rule that refuses an invented command, in both lanes. What this rule does
+// not cover is `claude plugin update foundry@claude-foundry` typed straight into
+// Bash: no Orthanc command, so no lane of this guard sees it (in the report).
+for (const mode of MODES) {
+  test(`U12: in ${mode} mode 'orthanc plugin update' is refused: no manifest lists it`, async ($, on) => {
+    const h = harness(on, mode)
+    const tool = await call($, 'plugin update', ['foundry@claude-foundry'])
+    expect(JSON.stringify(tool).includes('Unknown Orthanc command')).toBe(true)
+    expect(h.calls.filter(line => line.startsWith('plugin'))).toEqual([])
+    const deny = (await shell($, 'orthanc plugin update foundry@claude-foundry')).deny ?? ''
+    expect(deny.length).toBeGreaterThan(0)
+    expect(deny.includes("not a command in Orthanc's agent manifest")).toBe(true)
+    expect(deny.includes('claude plugin')).toBe(false)
+  })
+}
