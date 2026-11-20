@@ -97,6 +97,7 @@ import {
   gitPushDirectories,
   gitPushNamesFoundry,
   ladderDecision,
+  replacesBinary,
   loopStep,
   modeGuidance,
   ORTHANC_CLI,
@@ -325,6 +326,13 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
     return failure(
       'credential-command-denied',
       `Orthanc command '${command.path}' requires credential input and is not available through orthanc_cli. The operator runs it in a terminal.`,
+      command.path,
+    )
+  }
+  if (replacesBinary(command)) {
+    return failure(
+      'self-update-denied',
+      `Orthanc command '${command.path}' replaces the orthanc binary this session reads its command list from (with --plugin, the foundry plugin too), so orthanc_cli did not run it. The operator updates orthanc in their own terminal.`,
       command.path,
     )
   }

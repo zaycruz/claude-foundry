@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag } from './policy'
+import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag, replacesBinary } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -54,6 +54,7 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
+          ...(typeof entry.mutation_risk === 'string' ? { mutationRisk: entry.mutation_risk } : {}),
         }]
       : [],
   )
@@ -201,7 +202,7 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
 }
 
 // Refusals orthanc_cli makes itself, before orthanc starts.
-const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'self-update-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
 
 /** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
 export function notRunFailure(envelope: Envelope): boolean {
@@ -253,6 +254,9 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
   }
   if (isCredentialCommand(command)) {
     lines.push('This credential-input command is not executable through orthanc_cli; the operator runs it in a terminal.')
+  }
+  if (replacesBinary(command)) {
+    lines.push('This command replaces the orthanc binary (and with --plugin this plugin), so orthanc_cli never runs it; the operator updates orthanc in their own terminal.')
   }
   return lines.join('\n')
 }

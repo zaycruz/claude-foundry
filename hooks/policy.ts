@@ -14,6 +14,8 @@ export type ManifestCommand = {
   operatorApproval?: unknown
   /** The entry's raw `operator_approval_scope` (orthanc #118), unread: approvalOnWorkBranch reads it, failing closed. */
   operatorApprovalScope?: unknown
+  /** The entry's `mutation_risk`: what a write does that its `kind` cannot say. */
+  mutationRisk?: string
 }
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
@@ -135,7 +137,20 @@ export const LOCAL_READS = new Set([
 // with a build of main, `--version <older> --yes` moves it back under the
 // plugin's own min_orthanc, and `--plugin` updates this plugin: the guard's own
 // code. Not Foundry work on a branch, so no approval mode runs it.
+//
+// The manifest already says this in data: orthanc 0.7.11 marks `update`
+// `mutation_risk: "replaces-binary"` (the only other risk it names is
+// `solution-design delete`: "moves-a-resource-to-the-trash"). A guard that read
+// only the field would miss a binary that ships `update` with no risk line, and
+// a guard that read only the name would miss the next binary-replacing command,
+// so the rule reads both, as the credential refusals read `input` and the name.
 const SELF_UPDATE_COMMANDS = new Set(['update'])
+const BINARY_RISK = 'replaces-binary'
+
+/** True when this command replaces the orthanc binary the guard reads its rules
+ * from, by its manifest name or by its `mutation_risk`. */
+export const replacesBinary = (command: ManifestCommand | undefined): boolean =>
+  command !== undefined && (SELF_UPDATE_COMMANDS.has(command.path) || command.mutationRisk === BINARY_RISK)
 
 export type GateClassification = {
   command: string | null
@@ -1139,6 +1154,11 @@ function shellClassification(
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
+    // Not the generic write refusal: orthanc_cli refuses these too, so pointing
+    // the agent there would send it on a call that cannot run.
+    if (replacesBinary(manifest.find(entry => entry.path === call.path))) {
+      return refuse(call.path, `'orthanc ${call.path}' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`)
+    }
     const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
     if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
@@ -1194,8 +1214,15 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
-    // A read whose entry also asks for the operator is not let through as a read.
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
+    // A read whose entry also asks for the operator, or names a risk the guard
+    // refuses outright, is not let through as a read.
+    const entry = manifest.find(found => found.path === resolved.path)
+    if (
+      classifyOrthancCommand(resolved.path, manifest) === 'read' &&
+      operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null &&
+      !replacesBinary(entry)
+    )
+      return null
     // orthanc reads the last --profile it is given, so one in the args would move
     // the write off the stack the operator picked. Reads may look at another stack.
     if (resolved.args.some(arg => PROFILE_FLAG.test(unquote(arg)))) {
@@ -1204,9 +1231,9 @@ export function classifyCall(
     if (STACK_COMMANDS.has(resolved.path)) {
       return unreadableCall(input, workingBranch, `'${resolved.path}' changes orthanc's default stack, which a later session starts on. The stack is the operator's: they switch it with /profile.`)
     }
-    if (SELF_UPDATE_COMMANDS.has(resolved.path)) {
+    if (replacesBinary(entry)) {
       // Refused, not asked: a dialog cannot show which build the binary becomes.
-      return unreadableCall(input, workingBranch, `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`)
+      return unreadableCall(input, workingBranch, `'${resolved.path}' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`)
     }
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
