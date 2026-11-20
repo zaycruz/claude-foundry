@@ -6,8 +6,15 @@
 // same entry in the plugin's pinned surface (hooks/orthanc-snapshot.json, tag
 // v0.7.11) — the two agree:
 //
-//   {"path":"update","kind":"mutation","auth":"none","mutation_risk":"replaces-binary"}
-//                                                          — no operator_approval
+//   { "path":"update", "kind":"mutation", "auth":"none",
+//     "mutation_risk":"replaces-binary" }                   — no operator_approval
+//
+// The plugin's own pin (hooks/orthanc-snapshot.json, 3055 lines) keeps five
+// fields per command — path, kind, auth, operator_approval,
+// operator_approval_scope — so it agrees on `kind: mutation` and says nothing of
+// the risk: `mutation_risk` appears in it zero times. Only the live binary's
+// `agent-manifest` carries the risk, which is the second reason the rule reads
+// the name as well as the field.
 //     "Update this binary to the latest stable or nightly release; prints a plan unless --apply"
 //     --apply    "Replace the binary; without it, print the plan"
 //     --check    "Print the plan only, with data.update_available"
@@ -36,8 +43,11 @@
 // other is `solution-design delete`: "moves-a-resource-to-the-trash"). So the
 // rule is the field plus the name, the way the credential refusals are
 // `input`/`credential_store` plus the names: the field catches the next
-// binary-replacing command, the name covers a binary that ships `update` with
-// its risk line missing.
+// binary-replacing command, and the name covers what the field cannot — the
+// pinned record of 0.7.11 in hooks/orthanc-snapshot.json keeps five fields per
+// command and `mutation_risk` is not one of them, and an older binary left
+// installed under the plugin's own floor (min_orthanc is a note, not a check:
+// hooks/manifest.ts only re-reads what the binary says) has no risk line at all.
 //
 // Ways this can fail, written before the code:
 //  U1 orthanc_cli runs an update in some mode: a bare `update`, `--apply`,
@@ -80,9 +90,9 @@
 // Synthetic stack only.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { LOCAL_COMMANDS, UPDATE_ENTRY } from './orthanc-local-surface'
+import { LOCAL_COMMANDS, UPDATE_ENTRY, UPDATE_MUTATION_RISK } from './orthanc-local-surface'
 import { classifyOrthancCommand, LOCAL_READS, type ManifestCommand, requiresBranch, resolveOrthancCommand } from './policy'
-import { failure, manifestFrom, notRunFailure, renderCommand } from './orthanc'
+import { failure, manifestFrom, notRunFailure, renderCommand, renderListing } from './orthanc'
 
 const CLI = 'mcp__foundry__orthanc_cli'
 const FOLDER = 'ri.compass.main.folder.00000000-0000-0000-0000-0000000000aa'
@@ -102,14 +112,19 @@ const LOCAL_SURFACE: ManifestCommand[] = LOCAL_COMMANDS.map(path => ({ path, kin
 // The rest of the surface these tests touch, as 0.7.11 and the pin write them,
 // plus one binary-replacing command under a name the guard has never seen.
 const OTHER_SURFACE: ManifestCommand[] = [
-  { path: UPDATE_ENTRY.path, kind: UPDATE_ENTRY.kind, auth: UPDATE_ENTRY.auth, mutationRisk: 'replaces-binary' },
+  { path: UPDATE_ENTRY.path, kind: UPDATE_ENTRY.kind, auth: UPDATE_ENTRY.auth, mutationRisk: UPDATE_MUTATION_RISK },
   { path: 'workshop module update', kind: 'mutation' },
   { path: 'automate update', kind: 'mutation' },
   { path: 'dataset create', kind: 'mutation' },
   { path: 'ontology list', kind: 'read-only' },
-  { path: 'install-the-toolchain', kind: 'mutation', mutationRisk: 'replaces-binary' },
+  { path: 'install-the-toolchain', kind: 'mutation', mutationRisk: UPDATE_MUTATION_RISK },
+  // A plain mutation the rule must not reach: the ladder judges it as before.
+  { path: 'renamed-self-update', kind: 'mutation' },
   // Marked a read by a manifest that still says what it does: the risk wins.
-  { path: 'toolchain install', kind: 'read-only', mutationRisk: 'replaces-binary' },
+  { path: 'toolchain install', kind: 'read-only', mutationRisk: UPDATE_MUTATION_RISK },
+  // A risk line this plugin cannot read: stopped, not waved through.
+  // A risk line in a shape this plugin cannot read, as a future orthanc might write it.
+  { path: 'toolchain repair', kind: 'mutation', mutationRisk: { level: 'high' } },
 ]
 
 /** A surface as `orthanc agent-manifest` writes it: `mutation_risk`, not mutationRisk. */
@@ -124,8 +139,6 @@ const manifestEnvelope = (surface: readonly ManifestCommand[]) => ({
         ...(entry.mutationRisk === undefined ? {} : { mutation_risk: entry.mutationRisk }),
         args: [],
       })),
-      // A command with its risk line missing: the name alone must hold (U6).
-      ...(surface.some(entry => entry.path === 'update') ? [{ path: 'renamed-self-update', kind: 'mutation', args: [] }] : []),
     ],
   },
   errors: [],
@@ -261,15 +274,19 @@ for (const mode of MODES) {
     // The field, under a name the guard has never seen: refused, unasked.
     expect((await call($, 'install-the-toolchain', ['--apply'])).deny).toContain('replaces')
     expect(h.calls.filter(line => line.startsWith('install-the-toolchain'))).toEqual([])
-    // A `kind: read-only` entry that names the risk is not let through as a read.
-    expect((await call($, 'toolchain install')).deny).toContain('replaces')
+    // A `kind: read-only` entry that names the risk is not let through as a read,
+  // and the refusal speaks of that command, not of `orthanc update`.
+    const other = (await call($, 'toolchain install')).deny ?? ''
+    expect(other).toContain('replaces')
+    expect(other).toContain('toolchain install')
+    expect(other.includes('orthanc update --apply')).toBe(false)
     // A call the rule does not reach is left to the ladder as it was: it runs in
     // the modes that run mutations, and asks in the modes that ask.
-    const other = await call($, 'renamed-self-update', ['--apply'])
+    const plain = await call($, 'renamed-self-update', ['--apply'])
     if (mode === 'ask-always' || mode === 'auto') {
       expect(h.asked.length).toBe(1)
     } else {
-      expect(other.deny).toBe(undefined)
+      expect(plain.deny).toBe(undefined)
       expect(h.asked).toEqual([])
       expect(ran(h, 'renamed-self-update').length).toBe(1)
     }
@@ -289,7 +306,7 @@ for (const mode of MODES) {
 test('U7: orthanc_help marks the command where the agent reads it, as it marks the credential commands', async () => {
   const commands = manifestFrom(manifestEnvelope(SURFACE) as never)
   const update = commands.find(entry => entry.path === 'update')
-  expect(update?.mutationRisk).toBe('replaces-binary')
+  expect(update?.mutationRisk).toBe(UPDATE_MUTATION_RISK)
   const shown = renderCommand(update!, null)
   expect(shown).toContain('never runs it')
   expect(shown).toContain('terminal')
@@ -302,8 +319,10 @@ test('U7: orthanc_help marks the command where the agent reads it, as it marks t
 // (`version`/`hello`/`agent-manifest`/`capabilities` print, `completion show`
 // prints, `configure list`/`alias list|show|resolve|export` read stored
 // configuration, `smoke schedule` reports a job's state). The other 18 local
-// commands the pinned surface ships write: profiles, credentials, aliases,
-// shell completions, the interactive shell, onboarding — and `update`.
+// commands write: alias add/clear/edit/import/remove, auth store/auth delete,
+// completion install, configure configure/delete/use/set-default/profile
+// create/profile set, shell/shell start/shell interactive, and onboarding.
+// (`update` is not one of the 29: the manifest marks it a `mutation`.)
 const LOCAL_READ_OF_THE_PIN = [
   'agent-manifest', 'alias export', 'alias list', 'alias resolve', 'alias show', 'capabilities',
   'completion show', 'configure list', 'hello', 'smoke schedule', 'version',
@@ -357,3 +376,40 @@ test('U10: the executor refuses it too, and its refusal counts as a call that ne
   // not be reported as a mutation that may have landed.
   expect(notRunFailure(failure('self-update-denied', 'not run', 'update'))).toBe(true)
 })
+
+for (const mode of MODES) {
+  test(`U11: in ${mode} mode a risk line the guard cannot read stops the call`, async ($, on) => {
+    const h = harness(on, mode)
+    const deny = (await call($, 'toolchain repair', ['--apply'])).deny ?? ''
+    expect(deny).toContain('cannot read it')
+    expect(h.calls.filter(line => line.startsWith('toolchain repair'))).toEqual([])
+  })
+}
+
+test('U7b: a group listing or a search hit carries the marker, not only the command page', () => {
+  const commands = manifestFrom(manifestEnvelope(SURFACE) as never)
+  const update = commands.filter(entry => entry.path === 'update')
+  expect(renderListing(update, { query: 'update' })).toContain('orthanc_cli never runs this')
+  // A group listing shows every command of the group, marker and all.
+  expect(renderListing([...update, ...commands.filter(entry => entry.path === 'workshop module update')], { group: 'update' })).toContain('orthanc_cli never runs this')
+  // An ordinary command carries nothing.
+  expect(renderListing(commands.filter(entry => entry.path === 'version'), { query: 'version' })).not.toContain('never runs this')
+})
+
+// The other half of "replace the tool that guards me": orthanc 0.7.11 passes
+// `orthanc plugin …` through to `claude plugin …` — `orthanc plugin update
+// foundry@claude-foundry` runs, exit 0, against the real binary — and no
+// `plugin` command is in the agent manifest (0 of 541 entries start with it).
+// So what stops it is manifest-first, the same rule that stops an invented
+// command, in both lanes.
+for (const mode of MODES) {
+  test(`U12: in ${mode} mode 'orthanc plugin update' is refused: no manifest lists it`, async ($, on) => {
+    const h = harness(on, mode)
+    const tool = await call($, 'plugin update', ['foundry@claude-foundry'])
+    expect(JSON.stringify(tool)).toContain('Unknown Orthanc command')
+    expect(h.calls.filter(line => line.startsWith('plugin'))).toEqual([])
+    const deny = (await shell($, 'orthanc plugin update foundry@claude-foundry')).deny ?? ''
+    expect(deny).toContain("not a command in Orthanc's agent manifest")
+    expect(deny.includes('claude plugin')).toBe(false)
+  })
+}

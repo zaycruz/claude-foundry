@@ -14,8 +14,11 @@ export type ManifestCommand = {
   operatorApproval?: unknown
   /** The entry's raw `operator_approval_scope` (orthanc #118), unread: approvalOnWorkBranch reads it, failing closed. */
   operatorApprovalScope?: unknown
-  /** The entry's `mutation_risk`: what a write does that its `kind` cannot say. */
-  mutationRisk?: string
+  /** The entry's `mutation_risk`, kept raw: what a write does that its `kind`
+   * cannot say. `mutationRiskUnreadable` marks an entry that carries the field
+   * in a shape this file cannot read. */
+  mutationRisk?: unknown
+  mutationRiskUnreadable?: boolean
 }
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
@@ -150,7 +153,12 @@ const BINARY_RISK = 'replaces-binary'
 /** True when this command replaces the orthanc binary the guard reads its rules
  * from, by its manifest name or by its `mutation_risk`. */
 export const replacesBinary = (command: ManifestCommand | undefined): boolean =>
-  command !== undefined && (SELF_UPDATE_COMMANDS.has(command.path) || command.mutationRisk === BINARY_RISK)
+  command !== undefined &&
+  (SELF_UPDATE_COMMANDS.has(command.path) ||
+    command.mutationRisk === BINARY_RISK ||
+    // A risk line this file cannot read is not a clean bill of health: as with an
+    // operator_approval condition it cannot read, the call is stopped.
+    command.mutationRiskUnreadable === true)
 
 export type GateClassification = {
   command: string | null
@@ -1157,7 +1165,12 @@ function shellClassification(
     // Not the generic write refusal: orthanc_cli refuses these too, so pointing
     // the agent there would send it on a call that cannot run.
     if (replacesBinary(manifest.find(entry => entry.path === call.path))) {
-      return refuse(call.path, `'orthanc ${call.path}' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`)
+      return refuse(
+        call.path,
+        call.path === 'update'
+          ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`
+          : `'orthanc ${call.path}' replaces the orthanc binary this session reads its command list from (its manifest risk is '${BINARY_RISK}'). Installing a binary is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`,
+      )
     }
     const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
     if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
@@ -1233,7 +1246,12 @@ export function classifyCall(
     }
     if (replacesBinary(entry)) {
       // Refused, not asked: a dialog cannot show which build the binary becomes.
-      return unreadableCall(input, workingBranch, `'${resolved.path}' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`)
+      const why = resolved.path === 'update'
+        ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`
+        : `'${resolved.path}' replaces the orthanc binary this session reads its command list and operator_approval marks from${
+            typeof entry?.mutationRisk === 'string' ? ` (its manifest risk is '${entry.mutationRisk}')` : ' (its manifest risk is there but this plugin cannot read it)'
+          }. Installing a binary is the operator's call, not a write on a branch: they run it in their own terminal. orthanc_cli runs no binary-replacing command, in any mode.`
+      return unreadableCall(input, workingBranch, why)
     }
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }

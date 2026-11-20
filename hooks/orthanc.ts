@@ -54,7 +54,14 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
-          ...(typeof entry.mutation_risk === 'string' ? { mutationRisk: entry.mutation_risk } : {}),
+          // Kept raw, and an unreadable shape is marked, not dropped: policy.ts
+          // fails closed on a risk line it cannot read.
+          ...('mutation_risk' in entry
+            ? {
+                mutationRisk: entry.mutation_risk,
+                ...(typeof entry.mutation_risk === 'string' ? {} : { mutationRiskUnreadable: true }),
+              }
+            : {}),
         }]
       : [],
   )
@@ -233,11 +240,16 @@ export const normalizeCommand = (command: string) => command.trim().replace(/\s+
 
 const groupOf = (path: string) => path.split(' ')[0] ?? path
 
+/** One listing line for a command, with the marker an agent cannot miss whether
+ * it picked the command from a group, a search, or the command itself. */
 function commandLine(command: ManifestCommand): string {
   const traits = [command.kind, command.auth && `auth: ${command.auth}`, command.input && `input: ${command.input}`]
     .filter(Boolean)
     .join(', ')
-  return `${command.path}${traits ? ` — ${traits}` : ''}`
+  // Same marker as renderCommand: a group listing or a search hit is where an
+  // agent picks a command, not the page it lands on afterwards.
+  const never = replacesBinary(command) ? ' — orthanc_cli never runs this; the operator installs it in their own terminal' : ''
+  return `${command.path}${traits ? ` — ${traits}` : ''}${never}`
 }
 
 export const isCredentialCommand = (command: ManifestCommand) =>
