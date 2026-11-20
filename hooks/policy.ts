@@ -287,6 +287,168 @@ export function approvalOnWorkBranch(path: string, args: readonly string[], mani
   return oneWorkBranchFlag(args, [flag, ...(aliases as string[])])
 }
 
+/** What `configure list` says about the stack a call would run on (v0.7.8). */
+export type StackMark = { name: string; readOnly: boolean | null }
+
+/** How orthanc matches a profile name (profiles.rs canonical_name): lowercase
+ * alphanumerics, every other character `_`, so `RO-Test` finds the mark of `ro_test`. */
+export const canonicalProfileName = (name: string): string =>
+  name
+    .toLowerCase()
+    .split('')
+    .map(character => (/[a-z0-9]/.test(character) ? character : '_'))
+    .join('')
+
+/** Orthanc's per-profile read-only mark, read: true, false, or null when the
+ * entry carries something unreadable where the mark belongs. No mark at all is
+ * false: a binary older than 0.7.8 has none, and it judged no write before. */
+export function profileReadOnlyMark(entry: Record<string, unknown>): boolean | null {
+  if (!('read_only' in entry)) return false
+  const mark = entry.read_only
+  return typeof mark === 'boolean' ? mark : null
+}
+
+/** True for `configure profile set <name> --no-read-only`: the clear of the mark. */
+export const clearsReadOnlyMark = (path: string, args: readonly string[]) =>
+  path === 'configure profile set' && argsNameFlag(args, ['--no-read-only'])
+
+/** The stack a `configure profile set <name> …` aims at: orthanc reads the first
+ * positional as the profile name (configure_profile_set.rs ProfileSetArgs). ''
+ * when the call names none, so a caller falls back to the active stack. */
+const readOnlyMarkTarget = (args: readonly string[]): string => {
+  for (const arg of args) {
+    const word = unquote(arg).trim()
+    if (word !== '' && !word.startsWith('-')) return word
+  }
+  return ''
+}
+
+// The call as an operator sees it, in an approval question or a refusal.
+const CALL_MAX = 600
+
+/** `path arg arg`, safe to put in front of a human: control characters are
+ * escaped, so an argument cannot forge lines in an approval question (the shape
+ * the operator_approval question already uses), and a long inline schema is cut
+ * instead of echoed on every attempt. */
+export function shownCall(path: string, args: readonly string[]): string {
+  const text = [path, ...args.map(arg => unquote(arg))].join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const cut = text.length <= CALL_MAX ? text : `${text.slice(0, CALL_MAX)}… (+${text.length - CALL_MAX} more chars)`
+  return JSON.stringify(cut).slice(1, -1)
+}
+
+/** A stack name in the same shape: an argument picks the name the operator reads, so
+ * it goes through the same escape and cap as the call beside it. */
+const shownName = (name: string): string => shownCall('', [name])
+
+/**
+ * The call's `--apply` as orthanc's own gate reads it (read_only_gate.rs:
+ * `apply != Some(false)`).
+ *  - false: the command declares the plain `--apply` flag and it is absent, or
+ *    set false (`--apply=false`, `--apply=0|no|off`): a plan, which changes
+ *    nothing and prints the request instead.
+ *  - true: `--apply` or `--apply=true|1|yes`: the change goes to Foundry.
+ *  - null, which reads as "will write": the entry declares no `--apply` flag, or
+ *    one that takes a value (orthanc RO14 reads that as no flag), so the command
+ *    writes the moment it starts. An empty `--apply=` reads as a write too.
+ */
+function appliesValue(entry: ManifestCommand | undefined, args: readonly string[]): boolean | null {
+  const declared = entry?.flags?.find(flag => unquote(flag.flag).trim().toLowerCase() === '--apply')
+  if (declared === undefined || declared.takesValue) return null
+  let applied = false
+  for (const arg of args) {
+    const word = unquote(arg).trim().toLowerCase()
+    if (word === '--apply') applied = true
+    else if (word.startsWith('--apply=')) {
+      const value = word.slice('--apply='.length)
+      applied = !['false', '0', 'no', 'off'].includes(value)
+    }
+  }
+  return applied
+}
+
+/**
+ * Whether the call would write, on orthanc's own rule (`would_write`,
+ * read_only_gate.rs, CONTRACTS.md "Read-only profiles"). Four rules, in
+ * orthanc's order, and nothing else:
+ *  1. no manifest entry for the path: a write (RO15);
+ *  2. kind `read-only` or `local`: never a write to the stack;
+ *  3. auth `none`: the command makes no Foundry call at all, so the stack cannot
+ *     be written by it — the shipped manifest carries exactly one such command,
+ *     `update` (kind `mutation`, auth `none`: it replaces the local binary);
+ *  4. otherwise: a write unless `--apply` reads false.
+ * Checked on the 0.7.7 and 0.7.11 manifests: every mutation entry declares a
+ * plain `--apply` flag, none with a default or a value, so no command that exists
+ * today loses its refusal, and no plan that exists today loses its run.
+ */
+export function wouldWriteOnStack(path: string, args: readonly string[], manifest: readonly ManifestCommand[]): boolean {
+  const entry = manifest.find(found => found.path === path)
+  if (entry === undefined) return true
+  if (entry.kind === 'read-only' || entry.kind === 'local') return false
+  if (entry.auth === 'none') return false
+  return appliesValue(entry, args) !== false
+}
+
+/**
+ * The read-only stack gate, which runs before the ladder and before orthanc
+ * starts: zay's rule, a stack the operator marked read-only (`orthanc configure
+ * profile set <name> --read-only`) takes no write. Null lets the call on to the
+ * ladder. What runs on a marked stack is what orthanc's own gate runs: reads,
+ * plans (the same mutation with `--apply` unset) and local commands.
+ *  - marked: the applied write is refused, naming the exact call and the
+ *    profile's mark, and saying what does run.
+ *  - the clear of the mark (`--no-read-only`): the operator's to make, whoever
+ *    the call aims at. Orthanc marks it operator_approval (scope "always"), so
+ *    the ladder asks for it; with a manifest that does not, this gate asks
+ *    instead, so a mark is never cleared blind. The question names the stack the
+ *    call names, not the active one, so the operator is never asked to approve
+ *    one thing while another runs.
+ *  - the mark unreadable or `configure list` dead: a write asks, so it never
+ *    runs blind; a read or a plan is not held up (orthanc RO8).
+ */
+export function readOnlyStackGate(
+  mark: StackMark,
+  path: string,
+  args: readonly string[],
+  manifest: readonly ManifestCommand[],
+): { outcome: 'ask' | 'block'; reason: string } | null {
+  const call = shownCall(path, args)
+  if (!wouldWriteOnStack(path, args, manifest)) {
+    // Orthanc runs the clear as a local command: with a manifest that does not mark it
+    // operator_approval, nothing else would ask, so this gate does, for any target stack.
+    if (clearsReadOnlyMark(path, args) && operatorApprovalQuestion(path, args, manifest) === null) {
+      const target = shownName(readOnlyMarkTarget(args) || mark.name)
+      return {
+        outcome: 'ask',
+        reason: `'${call}' clears the read-only mark on stack '${target}'. Only the operator sets or clears that mark: 'orthanc configure profile set ${target} --read-only' puts it back. The call runs only if the operator approves it.`,
+      }
+    }
+    return null
+  }
+  if (mark.readOnly === null) {
+    return {
+      outcome: 'ask',
+      reason: `orthanc configure list gives no readable read_only mark for the stack '${shownName(mark.name)}', so orthanc_cli cannot tell whether it is marked read-only. '${call}' runs only if the operator approves it; check the stack with /profile.`,
+    }
+  }
+  if (mark.readOnly !== true) return null
+  // A command with no --apply flag has no plan to leave off, so do not tell the
+  // agent to make one, and in yolo nothing else bounds the retry. One with no
+  // manifest entry at all is not a known command either, so say that instead.
+  const entry = manifest.find(found => found.path === path)
+  const how =
+    entry === undefined
+      ? `'${shownCall(path, [])}' is not in the command list orthanc gave, so it counts as a write and nothing of it runs.`
+      : appliesValue(entry, args) !== null
+        ? 'Reads and plans run: the same call with --apply left off shows what it would do.'
+        : `'${shownCall(path, [])}' has no plan mode: it writes as soon as orthanc starts it, so nothing of it runs on such a stack.`
+  return {
+    outcome: 'block',
+    reason: `Stack '${shownName(mark.name)}' is marked read-only (orthanc configure list: read_only true), so '${call}' was not run: no write runs on a read-only stack, in any approval mode. ${how} Only the operator clears the mark, with 'orthanc configure profile set ${shownName(mark.name)} --no-read-only'.`,
+  }
+}
+
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
 const branchCore = (value: string) =>
   value
@@ -1430,5 +1592,144 @@ export function rulesWriteReason(tool: string, input: Record<string, unknown>, c
     if (SHELL_MENTION.test(command) && SHELL_WRITES.test(command)) return RULES_WRITE_REASON
     if (PROTECTED_FILE.test(normalizedPath(cwd, '/', home))) return RULES_WRITE_REASON
   }
+  return null
+}
+
+// Orthanc keeps each stack's read_only mark in profile-settings.json in its config
+// dir: `$XDG_CONFIG_HOME/foundry`, else `~/.config/foundry` (src/profile_settings.rs,
+// profiles.rs config_dir), deliberately outside the credential store. The directory
+// is the unit that matters, because the obvious ways to erase a mark name no file at
+// all: `rm -rf <dir>`, `mv <dir> /tmp/x`, `find ~ -name 'profile-*.json' -delete`, a
+// tar or rsync unpacked over it. Both answers below are anchored on the resolved
+// config directory, and the same file name under any other directory is left alone.
+// A write to the filesystem. Matched per command segment, so a verb counts where
+// its target is: `git` alone is not one (it writes the repository it runs in, not the
+// path named beside it), `git clean` and `git checkout` are.
+const SHELL_WRITES_STORE =
+  /(\b(?:rm|rmdir|mv|unlink|shred|truncate|dd|tee|install|touch|chmod|chown|chattr|ln|rsync|scp|sftp|tar|cp|unzip|cpio|ditto|gzip|bzip2|xz|zstd|zip|7z|rar|sed|patch|perl|python[0-9.]*|ruby|node|bun|deno|php|awk|lua|swift|osascript|xargs|find)\b|-delete\b|-exec(?:dir)?\b|\bgit\s+(?:clean|checkout|restore|apply|reset)\b)/i
+// `>` writes only where its target is: `cat <store>/profiles.json > /tmp/copy.json`
+// is a read out, `echo x > <store>/profile-settings.json` is a write in.
+const REDIRECTS_TO = />{1,2}\s*("[^"]*"|'[^']*'|[^\s;|&]+)/g
+const MARK_FILE_NAMES = ['profile-settings.json', 'profile-settings.lock']
+// A mark file named by a pattern from any root: `find ~ -name 'profile-*.json' -delete`.
+const SHELL_MARK_NAMED = /(?:profile-settings\.(?:json|lock)|profile-[^\s]*)/i
+const SHELL_SEARCES = /\b(?:find|xargs|rm|rmdir|unlink|shred|truncate|mv)\b/i
+
+/** `foundr*` and `found?y` name `foundry` once the shell expands them. */
+function globMatches(pattern: string, name: string): boolean {
+  if (!/[*?[]/.test(pattern)) return pattern.toLowerCase() === name.toLowerCase()
+  const body = pattern
+    .split('')
+    .map(character =>
+      character === '*' ? '.*' : character === '?' ? '.' : /[.+^${}()|[\]\\]/.test(character) ? `\\${character}` : character,
+    )
+    .join('')
+  return new RegExp(`^${body}$`, 'i').test(name)
+}
+
+/** `~`, `$HOME`, `$XDG_CONFIG_HOME` and the variables the command itself assigns, so
+ * `D=$HOME/.config/foundry; rm -rf "$D"` names the store to the guard as it does to
+ * the shell. An unknown variable is left as written: nothing can be said about it. */
+function expandedCommand(command: string, home: string, configHome: string): string {
+  const config = configHome.trim() === '' ? `${home}/.config` : configHome.trim()
+  const withHome = command
+    .replace(/(^|[\s'"=<>|;&(`])~(?=\/|[\s'";|&)]|$)/g, (_match, before: string) => `${before}${home}`)
+    .replace(/\$\{?(?:HOME|XDG_CONFIG_HOME)\}?/g, name => (name.includes('XDG') ? config : home))
+  const assigned = new Map<string, string>()
+  for (const match of withHome.matchAll(/(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|]+)/g))
+    assigned.set(match[1]!, match[2]!.replace(/^["']|["']$/g, ''))
+  return withHome.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (whole, first, second) => {
+    const name = (first ?? second) as string
+    return assigned.get(name) ?? whole
+  })
+}
+
+/** The directories a command works in: the session's, and each path token and its parent. */
+function mentionedDirs(tokens: readonly string[], cwd: string, home: string): Set<string> {
+  const dirs = new Set<string>([cwd.replace(/\/+$/, '') || '/'])
+  for (const token of tokens) {
+    if (!token.includes('/')) continue
+    const found = normalizedPath(token.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
+    dirs.add(found)
+    const cut = found.lastIndexOf('/')
+    if (cut > 0) dirs.add(found.slice(0, cut))
+  }
+  return dirs
+}
+
+/** Whether a token names the mark store, something under it, or a name inside it. A
+ * bare `foundry` or `profile-settings.json` counts only where the command (or the
+ * session) is standing in the directory that holds it. */
+function namesStore(token: string, cwd: string, home: string, dir: string, mentioned: Set<string>): boolean {
+  const path = token.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (path === '') return false
+  const found = normalizedPath(path, cwd, home)
+  if (found === dir || found.startsWith(`${dir}/`)) return true
+  const cut = found.lastIndexOf('/')
+  const base = found.slice(cut + 1)
+  if (base === '') return false
+  const parent = found.slice(0, cut + 1) || '/'
+  const dirParent = dir.slice(0, dir.lastIndexOf('/'))
+  const storeBase = dir.slice(dir.lastIndexOf('/') + 1)
+  const bare = !path.includes('/')
+  const contextOk = bare
+    ? mentioned.has(dir) || mentioned.has(dirParent)
+    : parent === `${dir}/` || parent === `${dirParent}/` || parent.startsWith(`${dir}/`)
+  if (!contextOk) return false
+  return globMatches(base, storeBase) || MARK_FILE_NAMES.some(file => globMatches(base, file))
+}
+
+export const PROFILE_STORE_WRITE_REASON =
+  'orthanc keeps each stack read_only mark in its own config dir (~/.config/foundry/profile-settings.json), so the plugin writes nothing there and only the operator edits it. Ask the operator to run orthanc configure profile set <name> --read-only or --no-read-only: an agent that rewrites or removes that file gets past both the plugin gate and orthanc own read-only gate.'
+
+/** Where orthanc keeps its profiles: `configHome` if set, else `<home>/.config`, plus `foundry`. */
+const profileStoreDir = (home: string, configHome = ''): string =>
+  normalizedPath(`${configHome.trim() === '' ? (home === '' ? '~/.config' : `${home}/.config`) : configHome.trim()}/foundry`, '/', home)
+
+/**
+ * Why a call must not write into orthanc's config dir, or null. The read-only mark
+ * lives only in `profile-settings.json` there, so anything that rewrites or removes
+ * that file (or the directory holding it) clears a mark and skips both gates. A verb
+ * has to meet the store in the same command segment, so reads that merely name it
+ * (`cat`, `ls`, `jq`, `git log --grep`) and a redirect out to another directory are
+ * left alone. A copy of the directory is refused: `cp a b` and `cp b a` are one shape.
+ */
+export function profileStoreWriteReason(
+  tool: string,
+  input: Record<string, unknown>,
+  cwd = '/',
+  home = '',
+  configHome = '',
+): string | null {
+  const dir = profileStoreDir(home, configHome)
+  const inside = (path: string) => {
+    const found = normalizedPath(path.replace(/\\/g, '/'), cwd, home).replace(/\/+$/, '')
+    return found === dir || found.startsWith(`${dir}/`)
+  }
+  const paths = [input.file_path, input.notebook_path, input.path].filter((value): value is string => typeof value === 'string')
+  if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
+  if (tool !== 'Bash' || typeof input.command !== 'string') return null
+  const command = expandedCommand(input.command, home, configHome)
+  const tokens = command.split(/[\s'"`;|&()<>=,]+/).filter(Boolean)
+  const mentioned = mentionedDirs(tokens, cwd, home)
+  const names = (segment: string) => segment.split(/[\s'"`;|&()<>=,]+/).some(token => namesStore(token, cwd, home, dir, mentioned))
+  const writes = (segment: string) =>
+    SHELL_WRITES_STORE.test(segment) ||
+    [...segment.matchAll(REDIRECTS_TO)].some(([, target]) => namesStore((target ?? '').replace(/^["']|["']$/g, ''), cwd, home, dir, mentioned))
+  if (command.split(/&&|\|\||;|\n|\|/).some(segment => names(segment) && writes(segment))) return PROFILE_STORE_WRITE_REASON
+  // The store reached by a search pattern rooted above it: `find ~ -name 'profile-*.json' -delete`.
+  if (
+    SHELL_MARK_NAMED.test(command) &&
+    SHELL_SEARCES.test(command) &&
+    tokens.some(token => {
+      const found = normalizedPath(token.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
+      return found !== '/' && (found === dir || found.startsWith(`${dir}/`) || dir.startsWith(found))
+    })
+  )
+    return PROFILE_STORE_WRITE_REASON
+  // `cd <dir> && rm profile-settings.json`, and the same with the session in that dir:
+  // the working directory says which file, and a bare name elsewhere stays free.
+  if (SHELL_MARK_NAMED.test(command) && SHELL_WRITES_STORE.test(command) && (mentioned.has(dir) || inside(cwd)))
+    return PROFILE_STORE_WRITE_REASON
   return null
 }

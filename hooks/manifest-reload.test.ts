@@ -269,12 +269,15 @@ test('R2: a link pointed at another release is read again', async ($, on) => {
 test('R3: an unchanged binary is not started again, and each call checks it once', async ($, on) => {
   const { h } = harness(on)
   await help($)
-  const loads = h.runs.length
+  // `configure list` is the plugin's own read of the stacks' read-only marks; what
+  // must not start again here is the manifest read beside the binary.
+  const otherRuns = () => h.runs.filter(run => !run.endsWith(' configure list'))
+  const loads = otherRuns().length
   expect(manifestRuns(h)).toEqual([`${SYSTEM} agent-manifest`])
   h.stats.length = 0
   await help($)
   await help($, { group: 'ontology' })
-  expect(h.runs.length).toBe(loads)
+  expect(otherRuns().length).toBe(loads)
   // A PATH walk is one stat per directory up to the binary: shim, then /usr/local/bin.
   expect(h.stats.filter(path => path.endsWith('/orthanc'))).toEqual([
     '/home/tester/.local/shim/orthanc', SYSTEM,
