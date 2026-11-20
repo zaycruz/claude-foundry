@@ -1203,10 +1203,14 @@ function shellClassification(
     if (call.path === '' && !call.help && segment.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    // (see below) Before the help carve-out, and not by it: `--version` prints the version on
+    // Before the help carve-out, and not by it: `--version` prints the version on
     // most commands and names the release to install on `update`, so an update
     // spelled `--version <older> --yes --apply` would otherwise read as a question
-    // about versions. `-h`, `--help` and `orthanc help …` still print usage.
+    // about versions. `-h`, `--help` and `orthanc help …` still print usage —
+    // measured, not assumed: against the released 0.7.11,
+    // `orthanc update --apply --help` prints the usage page, exits 0, and leaves the
+    // binary's mtime unchanged, so the marker that survives this carve-out is an
+    // exit rather than an install with a banner on it.
     if (call.known && replacesBinary(manifest.find(entry => entry.path === call.path)) && !call.helpVerb) {
       return refuse(
         call.path,
