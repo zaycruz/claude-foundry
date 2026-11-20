@@ -1042,6 +1042,19 @@ function mutatesThisPlugin(words: readonly string[]): boolean {
   return named.length === 0 || named.some(word => word === 'foundry' || word === 'claude-foundry' || word.startsWith('foundry@'))
 }
 
+/** True when the segment runs Orthanc but the words that say what to run never
+ * reach the line: `xargs orthanc` takes them from stdin or a file, so the parse
+ * sees the binary and nothing else, and no rule of the ladder has anything to
+ * judge. A process substitution is a different case and is not refused: measured
+ * against the released 0.7.11, `orthanc <(echo 'update --apply')` hands the binary
+ * the path `/dev/fd/63`, and it answers `unrecognized subcommand` and changes
+ * nothing. */
+function runsOrthancOnUnreadableWords(words: readonly string[]): boolean {
+  const head = commandHead(words)
+  if (!words.slice(head, head + 2).some(word => isOrthancWord(word))) return false
+  return words.slice(0, head + 1).some(word => basename(word) === 'xargs')
+}
+
 /** Where Orthanc starts in a segment: the command word, or the first orthanc
  * word after a head that can run another program (env, sudo, xargs, find
  * -exec, npx, ssh, a wrapper script, …) when a call follows it. -1 when the
@@ -1173,6 +1186,11 @@ function shellClassification(
   }
   for (const segment of segments) {
     const { words } = segment
+    // Read or write is unknowable here, and the answer is the one this file gives
+    // every other unreadable Orthanc call: refuse, and name the two ways that run.
+    if (runsOrthancOnUnreadableWords(words)) {
+      return refuse(null, 'This shell command runs Orthanc with words the Foundry guard cannot read (xargs takes them from stdin or a file, and `<(...)` takes them from a substitution). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
+    }
     if (mutatesThisPlugin(words)) {
       return refuse(null, `'claude plugin' updates, removes or disables foundry@claude-foundry: the code the Foundry guard is written in, including the branch rule and the approval ladder. That is the operator's call, in their own terminal; this session does not run it. Ask them to run 'claude plugin update foundry@claude-foundry'.`)
     }

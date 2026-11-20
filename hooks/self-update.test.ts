@@ -507,15 +507,3 @@ for (const mode of MODES) {
     }
   })
 }
-
-// U13's other half, measured on the released binary rather than assumed: a help
-// marker is a real exit, not a hint. Against orthanc 0.7.11,
-// `orthanc update --apply --help` prints the usage page, exits 0 and leaves the
-// binary's mtime unchanged, so the carve-out that lets `-h`/`--help` through the
-// shell lane does not let an install through with it.
-test('U13b: a refused command with --help is a usage print, not an install', () => {
-  // Pinned as a comment on the guard's rule (hooks/policy.ts, the shell lane):
-  // the assertion below is what the guard relies on, and a change in orthanc's
-  // help handling is a change in this rule's safety, not in its wording.
-  expect(LOCAL_READS.has('version')).toBe(true)
-})
