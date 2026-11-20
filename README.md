@@ -38,8 +38,10 @@ says so instead of falling back to REST.
   them, in every mode; with no one to ask they are refused.
   `orthanc update` never runs through `orthanc_cli`, in any mode: it replaces
   the Orthanc binary the command list and its `operator_approval` marks were
-  read from, and `--plugin` updates this plugin. The operator updates Orthanc in
-  their own terminal.
+  read from, and `--plugin` updates this plugin. `claude plugin
+  update|uninstall|disable` naming this plugin is refused in Bash for the same
+  reason: it replaces the code these rules are written in. The operator updates
+  Orthanc and the plugin in their own terminal.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied.
 - **A branch rule** that no approval mode can turn off: agent work happens on

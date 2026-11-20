@@ -1022,6 +1022,26 @@ function printsAndExits(runner: string, flags: readonly string[]): boolean {
   )
 }
 
+/** The other route to the same self-modification, with no Orthanc in the call:
+ * `claude plugin update|uninstall|disable` replaces or removes
+ * `foundry@claude-foundry`, which is the code these rules are written in. Reads
+ * (`list`, `details`, `search`) and any other plugin are left alone; so is a bare
+ * `-h`, which prints help. An update naming no plugin is refused, because it
+ * updates every plugin, this one included. */
+const PLUGIN_SELF_ACTIONS = new Set(['disable', 'remove', 'uninstall', 'update'])
+const CLAUDE_BINARIES = new Set(['claude'])
+
+function mutatesThisPlugin(words: readonly string[]): boolean {
+  const head = commandHead(words)
+  if (!CLAUDE_BINARIES.has(basename(words[head]))) return false
+  const rest = words.slice(head + 1).map(word => unquote(word).toLowerCase())
+  if (rest.some(word => ['-h', '--help', 'help', '-V', '--version'].includes(word))) return false
+  if (rest[0] !== 'plugin' && rest[0] !== 'plugins') return false
+  if (!rest.some(word => PLUGIN_SELF_ACTIONS.has(word))) return false
+  const named = rest.filter(word => word.includes('@') || word === 'foundry' || word === 'claude-foundry')
+  return named.length === 0 || named.some(word => word === 'foundry' || word === 'claude-foundry' || word.startsWith('foundry@'))
+}
+
 /** Where Orthanc starts in a segment: the command word, or the first orthanc
  * word after a head that can run another program (env, sudo, xargs, find
  * -exec, npx, ssh, a wrapper script, …) when a call follows it. -1 when the
@@ -1153,6 +1173,9 @@ function shellClassification(
   }
   for (const segment of segments) {
     const { words } = segment
+    if (mutatesThisPlugin(words)) {
+      return refuse(null, `'claude plugin' updates, removes or disables foundry@claude-foundry: the code the Foundry guard is written in, including the branch rule and the approval ladder. That is the operator's call, in their own terminal; this session does not run it. Ask them to run 'claude plugin update foundry@claude-foundry'.`)
+    }
     if (hidesOrthanc(segment, command, assignments, groups)) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
@@ -1162,7 +1185,7 @@ function shellClassification(
     if (call.path === '' && !call.help && segment.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    // Before the help carve-out, and not by it: `--version` prints the version on
+    // (see below) Before the help carve-out, and not by it: `--version` prints the version on
     // most commands and names the release to install on `update`, so an update
     // spelled `--version <older> --yes --apply` would otherwise read as a question
     // about versions. `-h`, `--help` and `orthanc help …` still print usage.

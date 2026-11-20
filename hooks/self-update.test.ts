@@ -471,3 +471,51 @@ for (const mode of MODES) {
     expect((await shell($, 'orthanc dataset list --version')).deny).toBe(undefined)
   })
 }
+
+// The same self-modification, one binary over: `claude plugin update
+// foundry@claude-foundry` replaces the code these rules are written in, and no
+// Orthanc appears in the call, so no orthanc rule could ever see it. Reads, help,
+// and any other plugin are left alone; an update that names no plugin updates
+// every plugin, this one included, so it is refused too.
+const PLUGIN_SELF_LINES = [
+  'claude plugin update foundry@claude-foundry',
+  'claude plugin uninstall foundry@claude-foundry',
+  'claude plugin disable foundry',
+  'claude plugin update',
+  'cd /home/tester && claude plugin update foundry@claude-foundry',
+]
+const PLUGIN_OTHER_LINES = [
+  'claude plugin list',
+  'claude plugin details foundry@claude-foundry',
+  'claude plugin update other@market',
+  'claude plugin update --help',
+  'echo "claude plugin update foundry@claude-foundry"',
+  'git commit -m "claude plugin update is the operator\'s call"',
+]
+
+for (const mode of MODES) {
+  test(`U14: in ${mode} mode Bash refuses a plugin update that names this plugin`, async ($, on) => {
+    harness(on, mode)
+    for (const line of PLUGIN_SELF_LINES) {
+      const deny = (await shell($, line)).deny ?? ''
+      expect(deny.length).toBeGreaterThan(0)
+      expect(deny.includes('claude plugin')).toBe(true)
+      expect(deny.includes('terminal')).toBe(true)
+    }
+    for (const line of PLUGIN_OTHER_LINES) {
+      expect(((await shell($, line)).deny ?? '').includes('claude plugin')).toBe(false)
+    }
+  })
+}
+
+// U13's other half, measured on the released binary rather than assumed: a help
+// marker is a real exit, not a hint. Against orthanc 0.7.11,
+// `orthanc update --apply --help` prints the usage page, exits 0 and leaves the
+// binary's mtime unchanged, so the carve-out that lets `-h`/`--help` through the
+// shell lane does not let an install through with it.
+test('U13b: a refused command with --help is a usage print, not an install', () => {
+  // Pinned as a comment on the guard's rule (hooks/policy.ts, the shell lane):
+  // the assertion below is what the guard relies on, and a change in orthanc's
+  // help handling is a change in this rule's safety, not in its wording.
+  expect(LOCAL_READS.has('version')).toBe(true)
+})

@@ -59,7 +59,8 @@ export const UPDATE_MUTATION_RISK = 'replaces-binary'
  * per command (`path`, `kind`, `auth`, `operator_approval`,
  * `operator_approval_scope`; `update` carries three of them), and here they say
  * `kind: mutation`, `auth: none`, no `operator_approval`. That is why Bash already
- * refused the command, and why the read fast path never saw it. */export const UPDATE_ENTRY = {
+ * refused the command, and why the read fast path never saw it. */
+export const UPDATE_ENTRY = {
   path: 'update',
   kind: 'mutation',
   auth: 'none',
