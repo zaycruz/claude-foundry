@@ -252,6 +252,8 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
   const values: string[] = []
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] ?? ''
+    // After `--` every word is a positional, so nothing there names a branch.
+    if (arg === '--') return false
     const lower = arg.toLowerCase()
     const name = names.find(found => arg === found || arg.startsWith(`${found}=`))
     if (name !== undefined) {
@@ -266,6 +268,40 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
     if (BRANCH_FLAGS.some(flag => lower === flag || lower.startsWith(`${flag}=`)) || /^-b./i.test(arg)) return false
   }
   return values.length === 1 && WORK_BRANCH_RID.test(values[0]!)
+}
+
+/** True when the entry says this command can print a plan instead of writing: it
+ * declares `--apply`. An entry that lists no flags (an older orthanc, a partial
+ * manifest) says nothing either way, and is treated as one that can, as every
+ * command this rule covers does. An entry that lists flags and none is
+ * `--apply` writes on every call, so the base rule applies to it on every call. */
+function canPlan(entry: ManifestCommand | undefined): boolean {
+  if (entry?.flags === undefined || entry.flags.length === 0) return true
+  return entry.flags.some(flag => typeof flag.flag === 'string' && flag.flag.toLowerCase() === '--apply')
+}
+
+/** True only when one `--base-branch` holds one global branch RID and nothing in
+ * the call could have taken that word for something else. Two shapes hide a base
+ * there: everything after `--` is a positional (oneWorkBranchFlag refuses it),
+ * and pflag binds a value-taking flag's value before it looks for the next flag,
+ * so `--description --base-branch <rid>` sets a description and leaves the base
+ * main. The manifest prices each flag of the command; a flag the entry does not
+ * list may take a value, so the call is unproven and asks. */
+function baseBranchOnWorkBranch(args: readonly string[], entry: ManifestCommand | undefined): boolean {
+  if (!oneWorkBranchFlag(args, BASE_BRANCH_FLAGS)) return false
+  const priced = new Map(
+    (entry?.flags ?? [])
+      .filter(flag => typeof flag.flag === 'string')
+      .map(flag => [flag.flag.toLowerCase(), flag.takesValue] as [string, boolean]),
+  )
+  for (let index = 1; index < args.length; index += 1) {
+    const previous = unquote(args[index - 1] ?? '').toLowerCase()
+    // `--flag=value` binds its own value, so nothing follows it that could be swallowed.
+    if (!previous.startsWith('-') || previous.includes('=')) continue
+    if (priced.get(previous.split('=')[0] ?? '') === false) continue
+    if (BASE_BRANCH_FLAGS.includes(unquote(args[index] ?? '').toLowerCase())) return false
+  }
+  return true
 }
 
 /** True only when the entry's operator_approval_scope (orthanc #118) shows
@@ -567,6 +603,7 @@ function orthancClassification(
   stored?: readonly string[] | null,
 ): GateClassification {
   const action = ACTION_BRANCH_WRITES.has(command) ? actionBranches(command, args) : null
+  const entry = manifest.find(found => found.path === command)
   const base = {
     command,
     hasWorkingBranch: branchIsWorking(workingBranch),
@@ -575,8 +612,8 @@ function orthancClassification(
       MAIN_WRITES.has(command) ||
       // A scenario whose base is not provably one global branch is a scenario on main.
       (BASE_BRANCH_WRITES.has(command) &&
-        argsNameFlag(args, ['--apply']) &&
-        !oneWorkBranchFlag(args, BASE_BRANCH_FLAGS)) ||
+        (!canPlan(entry) || argsNameFlag(args, ['--apply'])) &&
+        !baseBranchOnWorkBranch(args, entry)) ||
       (action !== null && 'branches' in action && action.branches.some(isProtectedValue)) ||
       // A stored branch that could not be read, or none (Foundry reads none as master), may be main.
       (STORED_BRANCH_RUNS.has(command) &&
@@ -1229,6 +1266,14 @@ export function classifyCall(
   return null
 }
 
+/** The fix the agent can actually apply, in the flag this command takes: a
+ * scenario has no --branch, and telling it to pass one sends it back to the
+ * same ask (the loop guard is off in yolo). */
+function workBranchFix(command: string | null): string {
+  if (command !== null && BASE_BRANCH_WRITES.has(command)) return 'otherwise pass --base-branch <global branch RID>, or create one with \'global-branch create agent/<name>\''
+  return 'otherwise pass a work branch'
+}
+
 export function ladderDecision(
   mode: ApprovalMode,
   classification: GateClassification,
@@ -1262,7 +1307,7 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or is a scenario based on main, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
+      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or is a scenario based on main, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`,
     }
   }
   if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
@@ -1272,7 +1317,7 @@ export function ladderDecision(
   if (classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology)${note}`,
+      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology). ${workBranchFix(classification.command)}${note}`,
     }
   }
   if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval` }
@@ -1285,7 +1330,7 @@ export function ladderDecision(
 export function modeGuidance(mode: ApprovalMode): string {
   return (
     'Branch rule: agent work happens on branches, never on a production main. Every ontology write ' +
-    'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
+    'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>; `ontology scenario create` spells its branch --base-branch); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +

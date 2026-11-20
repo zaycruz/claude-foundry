@@ -29,6 +29,23 @@
 //      for a call that changes nothing.
 //  SC6 The fix widens the lane: `ontology action-apply --scenario-rid <rid>
 //      --apply` with no --branch runs, or `ontology scenario rebase` is refused.
+//  SC7 A base the guard proves from the flag word alone, where the words say
+//      something else (both found in review of the first cut):
+//      SC7a `--` makes every word after it a positional, so a `--base-branch`
+//           past it names nothing and the base is main.
+//      SC7b a value-taking flag before `--base-branch` takes that word as its
+//           own value (`--description --base-branch <rid>`): orthanc sets a
+//           description and the base is main. The manifest prices the command's
+//           flags, so a flag the entry does not list is unproven; a flag the
+//           entry says takes no value (--apply), or `--expire-after=6h`, or
+//           `--expire-after 6h` with its own value, swallows nothing.
+//      SC7c `--apply` in another case or with a value is still the call that writes.
+//      SC7d the same call spelled whole in `command`, or run in Bash: the guard
+//           reads the same words, and Bash never runs an Orthanc write.
+//      SC7e the ask names the flag this command takes, so an agent can fix the
+//           call instead of passing --branch and meeting the same ask again.
+//  SC8 `ontology scenario edited` / `conflicts` are treated as writes, so a
+//      read of what a scenario changed asks the operator in every mode.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
@@ -45,9 +62,23 @@ type Mode = (typeof MODES)[number]
 
 const ENTRIES = [
   { path: 'configure list', kind: 'local' },
-  { path: 'ontology scenario create', kind: 'mutation', auth: 'bearer-token' },
+  {
+    // The flags of the released 0.7.11 entry, so the guard prices this command's
+    // words the way orthanc does.
+    path: 'ontology scenario create',
+    kind: 'mutation',
+    auth: 'bearer-token',
+    args: [
+      { kind: 'positional', name: 'ontology', takes_value: true },
+      { kind: 'option', flag: '--base-branch', name: 'base_branch', takes_value: true },
+      { kind: 'option', flag: '--expire-after', name: 'expire_after', takes_value: true },
+      { kind: 'option', flag: '--apply', name: 'apply', takes_value: false },
+    ],
+  },
   { path: 'ontology scenario rebase', kind: 'mutation', auth: 'bearer-token' },
   { path: 'ontology action-apply', kind: 'mutation', auth: 'bearer-token' },
+  { path: 'ontology scenario edited', kind: 'read-only', auth: 'bearer-token' },
+  { path: 'ontology scenario conflicts', kind: 'read-only', auth: 'bearer-token' },
 ]
 
 const envelope = (data: unknown) =>
@@ -218,5 +249,100 @@ for (const mode of SLOW_MODES) {
     expect(h.asked.length).toBe(1)
     expect(wrote.deny).toBeUndefined()
     expect(ran(h, 'ontology scenario create')).toEqual([`ontology scenario create ${args.join(' ')}`])
+  })
+}
+
+// SC7: the shapes a reviewer found where a proof from the flag word alone is not a proof.
+const HARD: [string, string[][]][] = [
+  ['a `--` separator', [['--apply', '--', '--base-branch', RID], ['--base-branch', RID, '--', '--apply']]],
+  ['a flag that swallows it', [['--description', '--base-branch', RID, '--apply'], ['--notes', '--base-branch', RID, '--apply']]],
+  ['another case or a value on --apply', [['--base-branch', 'main', '--APPLY'], ['--base-branch', 'main', '--apply=true']]],
+]
+for (const [what, spellings] of HARD) {
+  for (const args of spellings) {
+    test(`SC7: in yolo a scenario write with ${what} asks`, async ($, on) => {
+      const h = harness(on, 'yolo')
+      h.answer = 'throw'
+      const wrote = await write($, 'ontology scenario create', [ONTOLOGY, ...args])
+      expect(typeof wrote.deny).toBe('string')
+      expect(h.asked.length).toBe(1)
+      expect(ran(h, 'ontology scenario create')).toEqual([])
+    })
+  }
+}
+
+// SC7: what prices a command's words must not ask for a call that spells its base plainly.
+for (const args of [
+  [ONTOLOGY, '--expire-after', '6h', '--base-branch', RID, '--apply'],
+  [ONTOLOGY, '--expire-after=6h', '--base-branch', RID, '--apply'],
+  [ONTOLOGY, '--apply', '--base-branch', RID],
+  [ONTOLOGY, '--base-branch', RID, '--apply=true'],
+  [ONTOLOGY, '--base-branch', RID, '--APPLY'],
+]) {
+  test(`SC7: in yolo a scenario on '${args.slice(1).join(' ')}' runs with no ask`, async ($, on) => {
+    const h = harness(on, 'yolo')
+    h.answer = 'throw'
+    const wrote = await write($, 'ontology scenario create', args)
+    expect(wrote.deny).toBeUndefined()
+    expect(ran(h, 'ontology scenario create')).toEqual([`ontology scenario create ${args.join(' ')}`])
+    expect(h.asked).toEqual([])
+  })
+}
+
+// SC7d: the same call spelled whole in `command`, and the same call in Bash.
+for (const mode of MODES) {
+  test(`SC7: in ${mode} the whole call inside command is read the same way`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'throw'
+    const main = await write($, `ontology scenario create ${ONTOLOGY} --base-branch main --apply`)
+    expect(typeof main.deny).toBe('string')
+    expect(h.asked.length).toBe(1)
+    expect(ran(h, 'ontology scenario create')).toEqual([])
+    const branch = await write($, `ontology scenario create ${ONTOLOGY} --base-branch ${RID} --apply`)
+    if (mode === 'yolo' || mode === 'allow-edits') {
+      expect(branch.deny).toBeUndefined()
+      expect(ran(h, 'ontology scenario create').at(-1)).toBe(`ontology scenario create ${ONTOLOGY} --base-branch ${RID} --apply`)
+    }
+  })
+
+  test(`SC7: in ${mode} Bash runs no scenario write, on a branch or off one`, async ($, on) => {
+    const h = harness(on, mode)
+    for (const call of [
+      `orthanc ontology scenario create ${ONTOLOGY} --apply`,
+      `orthanc ontology scenario create ${ONTOLOGY} --base-branch ${RID} --apply`,
+    ]) {
+      const wrote = (await $.tool.call({ tool: 'Bash', command: call } as never)) as { deny?: string }
+      expect(typeof wrote.deny).toBe('string')
+      expect(wrote.deny).toContain('orthanc_cli')
+    }
+    expect(h.asked).toEqual([])
+    expect(ran(h, 'ontology scenario create')).toEqual([])
+  })
+}
+
+// SC7e: the ask names the flag this command takes; --branch is not it.
+for (const mode of MODES) {
+  test(`SC7: in ${mode} the ask says --base-branch, not just 'a work branch'`, async ($, on) => {
+    const h = harness(on, mode)
+    await write($, 'ontology scenario create', [ONTOLOGY, '--apply'])
+    expect(h.asked.length).toBe(1)
+    expect(h.asked[0]).toContain('--base-branch <global branch RID>')
+    expect(h.asked[0]).not.toContain('otherwise pass a work branch')
+  })
+}
+
+// SC8: the other two subcommands of the class are reads in the manifest, so the
+// guard lets them through the way it lets every read through (checked against
+// the released 0.7.11 entry: both are kind read-only).
+for (const mode of MODES) {
+  test(`SC8: in ${mode} 'ontology scenario edited' and 'conflicts' run as reads, with no ask`, async ($, on) => {
+    const h = harness(on, mode)
+    h.answer = 'throw'
+    for (const command of ['ontology scenario edited', 'ontology scenario conflicts']) {
+      const wrote = await write($, command, [ONTOLOGY, SCENARIO])
+      expect({ command, deny: wrote.deny }).toEqual({ command, deny: undefined })
+      expect(ran(h, command).at(-1)).toBe(`${command} ${ONTOLOGY} ${SCENARIO}`)
+    }
+    expect(h.asked).toEqual([])
   })
 }
