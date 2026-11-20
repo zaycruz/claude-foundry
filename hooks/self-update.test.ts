@@ -482,6 +482,9 @@ const PLUGIN_SELF_LINES = [
   'claude plugin uninstall foundry@claude-foundry',
   'claude plugin disable foundry',
   'claude plugin update',
+  // `--version` names a release to install here, not a usage print: the same trap
+  // the shell lane learned about `orthanc update --version` (U13).
+  'claude plugin update foundry@claude-foundry --version 0.6.4',
   'cd /home/tester && claude plugin update foundry@claude-foundry',
 ]
 const PLUGIN_OTHER_LINES = [
@@ -505,5 +508,52 @@ for (const mode of MODES) {
     for (const line of PLUGIN_OTHER_LINES) {
       expect(((await shell($, line)).deny ?? '').includes('claude plugin')).toBe(false)
     }
+  })
+}
+
+// `xargs orthanc` takes the command from stdin or a file, so the line carries
+// Orthanc and nothing else: not a read, not a write, not a branch, and the ladder
+// has nothing to judge. Reviewers reached `orthanc update --apply` this way
+// (`printf 'update --apply\n' | xargs orthanc`) with the self-update rule in place,
+// which is the same answer any other write gets from a form the parser cannot read.
+//
+// These tests were in the commit that added the rule and were cut out of it by a
+// truncation three lines away; the rule shipped untested for two commits and the
+// message claimed otherwise. They are back, and the second list is the polarity the
+// first version of the rule got wrong: `ls | xargs grep orthanc README.md` mentions
+// the binary and must not be refused (README: text that only mentions Orthanc is not
+// a call). The head word, not the window around it, is what tells the two apart.
+const UNREADABLE_FORMS = [
+  'xargs orthanc',
+  'printf x | xargs orthanc',
+  "printf 'update --apply' | xargs orthanc",
+  'echo update --apply | xargs orthanc',
+  'ls | xargs orthanc update --apply',
+  'xargs -a notes.txt orthanc update --apply',
+  'xargs -n1 orthanc dataset list < ids',
+  'cat jobs.txt | xargs -I{} orthanc {}',
+]
+
+const MENTIONS_ONLY = [
+  'ls | xargs grep orthanc README.md',
+  'cat notes.txt | xargs grep orthanc',
+  'git log --oneline | xargs grep foundry',
+  'orthanc --agent agent-manifest',
+  'orthanc --version',
+]
+
+for (const mode of MODES) {
+  test(`U15: in ${mode} mode Bash refuses an Orthanc call whose words never reach the line, and reads the ones that only mention it`, async ($, on) => {
+    const h = harness(on, mode)
+    for (const line of UNREADABLE_FORMS) {
+      const deny = (await shell($, line)).deny ?? ''
+      expect(deny.length).toBeGreaterThan(0)
+      expect(deny.includes('cannot read')).toBe(true)
+      expect(deny.includes('orthanc_cli')).toBe(true)
+    }
+    for (const line of MENTIONS_ONLY) {
+      expect(((await shell($, line)).deny ?? '').includes('cannot read')).toBe(false)
+    }
+    expect(h.calls.filter(line => line.split(' ')[0] === 'update')).toEqual([])
   })
 }

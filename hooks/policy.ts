@@ -1035,7 +1035,9 @@ function mutatesThisPlugin(words: readonly string[]): boolean {
   const head = commandHead(words)
   if (!CLAUDE_BINARIES.has(basename(words[head]))) return false
   const rest = words.slice(head + 1).map(word => unquote(word).toLowerCase())
-  if (rest.some(word => ['-h', '--help', 'help', '-V', '--version'].includes(word))) return false
+  // Only a usage print escapes: `-V`/`--version` names a release to install here,
+  // the same trap the shell lane learned about `orthanc update --version` (U13).
+  if (rest.some(word => ['-h', '--help', 'help'].includes(word))) return false
   if (rest[0] !== 'plugin' && rest[0] !== 'plugins') return false
   if (!rest.some(word => PLUGIN_SELF_ACTIONS.has(word))) return false
   const named = rest.filter(word => word.includes('@') || word === 'foundry' || word === 'claude-foundry')
@@ -1051,6 +1053,9 @@ function mutatesThisPlugin(words: readonly string[]): boolean {
  * nothing. */
 function runsOrthancOnUnreadableWords(words: readonly string[]): boolean {
   const head = commandHead(words)
+  // A head that names Orthanc without running it (`ls | xargs grep orthanc README`)
+  // is a mention, not a call, exactly as everywhere else in this file.
+  if (NON_EXECUTING.has(basename(words[head]))) return false
   if (!words.slice(head, head + 2).some(word => isOrthancWord(word))) return false
   return words.slice(0, head + 1).some(word => basename(word) === 'xargs')
 }
