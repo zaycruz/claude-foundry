@@ -185,8 +185,8 @@ export function classifyOrthancCommand(
  * `admin marking replace`, `admin group member remove`, `workshop module
  * revert`, `solution-design node/edge remove`) was given, so the same call
  * without `--apply` ran. The act is the same; the ask is keyed on the act.
- * `discard`, `purge`, `destroy`, `truncate`, `wipe` and `erase` name no command
- * on 0.7.11: they cover a rename before the next pin.
+ * `discard`, `purge`, `repair`, `overwrite`, `destroy`, `truncate`, `wipe` and
+ * `erase` name no command on 0.7.11: they cover a rename before the next pin.
  *
  * Read on every word of a command path and every hyphen part of a word, so
  * `resource permanently-delete`, `project remove-orgs` and a future
@@ -204,7 +204,7 @@ export function classifyOrthancCommand(
  * in: it is the same word, and the guard cannot tell a reference from a record.
  */
 const DESTRUCTIVE_TERMS = new Set([
-  'abort', 'clear', 'delete', 'destroy', 'discard', 'erase', 'purge', 'remove', 'replace', 'reset', 'revert', 'revoke', 'truncate', 'uninstall', 'unprotect', 'wipe',
+  'abort', 'clear', 'delete', 'destroy', 'discard', 'erase', 'overwrite', 'purge', 'remove', 'repair', 'replace', 'reset', 'revert', 'revoke', 'truncate', 'uninstall', 'unprotect', 'wipe',
 ])
 
 /** The destructive word in a command path or a flag name, or null. Words are

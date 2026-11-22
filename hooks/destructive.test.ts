@@ -181,7 +181,13 @@ const DESTRUCTIVE: [string, string[]][] = [
   ['global-branch remove-resources', [GLOBAL, DATASET]],
   ['repository checks required remove', [REPO, '--branch', 'agent-x', '--check', 'ci/publish']],
   // A verb no 0.7.11 command uses: a rename into the table is read at once.
+  // These four are the names the parity cycle (FND-17) reported; measured
+  // against the released 0.7.11 manifest none of them is a command today, so
+  // they pin the table rather than the surface.
   ['warehouse snapshot purge', [DATASET]],
+  ['orchestration job discard', ['ri.jemma.main.build.1']],
+  ['ontology resource purge', ['ri.compass.main.folder.1']],
+  ['connectivity sync repair', ['ri.magritte..source.1']],
   // What the rule already read, so the widening cannot quietly drop it.
   ['dataset files delete', [DATASET, '--branch', 'agent-x', '--path', 'a.csv']],
   ['resource delete', ['ri.compass.main.folder.1']],
@@ -214,6 +220,9 @@ const ORDINARY: [string, string[], readonly string[]?][] = [
   ['marketplace installation create', ['ri.marketplace.main.version.1']],
   ['marketplace installation upgrade', [INSTALLATION, '--mode', 'keep-outputs']],
   ['devops draft set', ['ri.devops.main.draft.1', '--resource', 'ri.compass.main.folder.1']],
+  // A stop is no erasure: `compute manage --action stop` halts a running
+  // module, which `--action start` undoes. Orthanc wants --yes for it.
+  ['compute manage', ['--deployed-app-rid', 'ri.foundry.main.deployed-app.1', '--branch', 'agent-x', '--action', 'stop', '--yes']],
 ]
 
 const outcomes = (command: string, args: string[], stored?: readonly string[]) =>
@@ -275,6 +284,10 @@ test('D6: a flag that erases asks, in any case, as =value, at any position', asy
   ]) {
     expect({ args, destructive: isDestructive('data-health check-group update', args) }).toEqual({ args, destructive: true })
   }
+  // A flag a later orthanc could add (`--discard-passes`, reported by FND-17 and
+  // not on 0.7.11) is read the day it appears, on a command whose own name is
+  // no claim.
+  expect(isDestructive('repository checks rerun', [REPO, '--branch', 'agent-x', '--discard-passes'])).toBe(true)
 })
 
 test('D7: the words are read when the manifest does not list them, and when they split across command and args', async () => {
