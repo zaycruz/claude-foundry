@@ -203,25 +203,38 @@ export function classifyOrthancCommand(
  * judges them. A `remove`/`revoke`/`unprotect` that only drops a reference is
  * in: it is the same word, and the guard cannot tell a reference from a record.
  *
- * `DESTRUCTIVE_TERMS` and `DESTRUCTIVE_FORMS` are parallel, in the order the
- * guidance reads them: every word has one plain form, and `modeGuidance` is
- * built from the forms, so the sentence an operator reads cannot fall behind
- * the rule that asked them (pinned by destructive.test.ts D11).
+ * One table, in the order the guidance reads it: each word with what it leaves,
+ * in the plain form the operator and the model are told. `modeGuidance` builds
+ * its sentence from the second column, so the wording an operator reads cannot
+ * fall behind the rule that asked them (pinned by destructive.test.ts D11).
  */
-export const DESTRUCTIVE_TERMS = [
-  'delete', 'remove', 'uninstall', 'purge', 'discard', 'clear', 'reset', 'revert', 'replace', 'repair', 'overwrite', 'truncate', 'abort', 'revoke', 'unprotect', 'destroy', 'wipe', 'erase',
-] as const
+export const DESTRUCTIVE_WORDS = [
+  ['delete', 'deleted'],
+  ['remove', 'removed'],
+  ['uninstall', 'uninstalled'],
+  ['purge', 'purged'],
+  ['discard', 'discarded'],
+  ['clear', 'cleared'],
+  ['reset', 'reset'],
+  ['revert', 'reverted'],
+  ['replace', 'replaced'],
+  ['repair', 'repaired'],
+  ['overwrite', 'overwritten'],
+  ['truncate', 'truncated'],
+  ['abort', 'aborted'],
+  ['revoke', 'revoked'],
+  ['unprotect', 'taken off'],
+  ['destroy', 'destroyed'],
+  ['wipe', 'wiped'],
+  ['erase', 'erased'],
+] as const satisfies ReadonlyArray<readonly [string, string]>
 
-/** What each word leaves, in the plain form the operator and the model read. */
-export const DESTRUCTIVE_FORMS = [
-  'deleted', 'removed', 'uninstalled', 'purged', 'discarded', 'cleared', 'reset', 'reverted', 'replaced', 'repaired', 'overwritten', 'truncated', 'aborted', 'revoked', 'taken off', 'destroyed', 'wiped', 'erased',
-] as const
-
-const TERMS = new Set<string>(DESTRUCTIVE_TERMS)
+const TERMS = new Set<string>(DESTRUCTIVE_WORDS.map(([term]) => term))
 
 /** 'deleted, removed, …, destroyed or erased', for the guidance sentence. */
 function destructiveWords(): string {
-  return `${DESTRUCTIVE_FORMS.slice(0, -1).join(', ')} or ${DESTRUCTIVE_FORMS.at(-1)}`
+  const forms = DESTRUCTIVE_WORDS.map(([, form]) => form)
+  return `${forms.slice(0, -1).join(', ')} or ${forms.at(-1)}`
 }
 
 /** The destructive word in a command path or a flag name, or null. Words are
@@ -235,7 +248,9 @@ export function destructiveTermIn(name: string): string | null {
 
 /** A flag whose name says what the write removes: `--remove`, `--remove-check`,
  * `--remove-resource`, `--delete-project`, `--delete-object-type`. Measured
- * against every flag of 0.7.11, those five are all a name match ever selects.
+ * against every flag of 0.7.11 (`orthanc --agent agent-manifest` on the v0.7.11
+ * release binary; the flags are not in the pinned snapshot), those five are all
+ * a name match ever selects.
  * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
  * build when one job fails), so it reads as no claim. Measured too: no `--no-…`
  * flag of 0.7.11 holds a destructive word, so the negation rule is for the next
@@ -247,22 +262,22 @@ const NON_DESTRUCTIVE_FLAGS = new Set(['--abort-on-failure'])
 
 function destructiveFlagIn(args: readonly string[]): boolean {
   return args.some(arg => {
-    const flag = unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
+    const flag = flagNameOf(arg)
     if (!flag.startsWith('-') || NON_DESTRUCTIVE_FLAGS.has(flag) || flag.startsWith('--no-')) return false
     return destructiveTermIn(flag) !== null
   })
 }
 
-function isDestructiveCommand(command: string): boolean {
-  return destructiveTermIn(command) !== null
+/** One arg as the flag it names, in any case, with or without a `=value`
+ * (`--FORCE` and `--force=true` both read as `--force`). Over-matching only
+ * asks more. */
+function flagNameOf(arg: string): string {
+  return unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
 }
 /** True when any arg names one of these flags, in any case, with or without a
  * `=value` (`--force`, `--APPLY`, `--apply=true`). Over-matching only asks more. */
 function argsNameFlag(args: readonly string[], names: readonly string[]): boolean {
-  return args.some(arg => {
-    const flag = unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
-    return names.includes(flag)
-  })
+  return args.some(arg => names.includes(flagNameOf(arg)))
 }
 
 // The local commands where -f is --force. Elsewhere -f is --format or --folder.
@@ -669,7 +684,7 @@ function orthancClassification(
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
-      isDestructive: isDestructiveCommand(command) || destructiveFlagIn(args) || argsHaveForce(command, args),
+      isDestructive: destructiveTermIn(command) !== null || destructiveFlagIn(args) || argsHaveForce(command, args),
       ...(release !== null ? release : {}),
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
@@ -1233,7 +1248,7 @@ export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   const words = inner.toLowerCase().split(/[^a-z]+/)
   // A destructive word outranks a read word: `get_uninstall_plan` names an
   // uninstall, and a read that reads as a write only costs a refusal.
-  if (words.some(word => WRITE_WORDS.has(word) || TERMS.has(word))) return 'write'
+  if (words.some(word => WRITE_WORDS.has(word)) || destructiveTermIn(inner) !== null) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
   if (words.some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
@@ -1299,7 +1314,7 @@ export function classifyCall(
       // A Palantir MCP write is blocked either way (Orthanc is the only write
       // path); the words say whether it also reads as destructive, in the same
       // words the orthanc lane reads.
-      isDestructive: inner.toLowerCase().split(/[^a-z]+/).some(word => TERMS.has(word)),
+      isDestructive: destructiveTermIn(inner) !== null,
       error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
     }
   }

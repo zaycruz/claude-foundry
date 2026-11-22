@@ -66,9 +66,8 @@ import { expect, test } from 'claude-code/testing'
 import {
   classifyCall,
   classifyMcpIntent,
-  DESTRUCTIVE_FORMS,
   destructiveTermIn,
-  DESTRUCTIVE_TERMS,
+  DESTRUCTIVE_WORDS,
   ladderDecision,
   type ManifestCommand,
   modeGuidance,
@@ -194,7 +193,9 @@ const DESTRUCTIVE: [string, string[]][] = [
   ['dataset files delete', [DATASET, '--branch', 'agent-x', '--path', 'a.csv']],
   ['resource delete', ['ri.compass.main.folder.1']],
   ['resource permanently-delete', ['ri.compass.main.folder.1']],
-  ['ontology object-type-delete', ['Vessel', '--branch', GLOBAL]],
+  // `ontology object-type-delete` is left to foundry.test.ts:56, which pins
+  // the same ladder outcome; `resource permanently-delete` covers the word in
+  // the middle of a hyphenated name.
 ]
 
 /** Writes the ladder must keep running in allow-edits: an ordinary change, or a
@@ -360,14 +361,13 @@ test('D10: --force still asks, the ask reason names the command, and the MCP lan
 })
 
 test('D11: the words the operator is told match the words the guard reads', async () => {
-  // One plain form per word, and both guidance sentences carry every one of
-  // them: an operator told the rule asks for "a delete" would not know why an
-  // uninstall or a revoke asked.
-  expect(DESTRUCTIVE_FORMS.length).toBe(DESTRUCTIVE_TERMS.length)
-  expect(DESTRUCTIVE_TERMS.every(term => destructiveTermIn(`orthanc group ${term}`) === term)).toBe(true)
+  // One plain form per word in the table, and every one of them in both
+  // guidance sentences: an operator told the rule asks for "a delete" would not
+  // know why an uninstall or a revoke asked.
+  expect(DESTRUCTIVE_WORDS.map(([term]) => destructiveTermIn(`orthanc group ${term}`))).toEqual(DESTRUCTIVE_WORDS.map(([term]) => term))
   for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
     const guidance = modeGuidance(mode)
-    for (const form of DESTRUCTIVE_FORMS) expect({ mode, form, said: guidance.includes(form) }).toEqual({ mode, form, said: true })
+    for (const [, form] of DESTRUCTIVE_WORDS) expect({ mode, form, said: guidance.includes(form) }).toEqual({ mode, form, said: true })
   }
 })
 
