@@ -55,8 +55,9 @@
 //
 // Measured against the orthanc v0.7.11 agent-manifest (claude-foundry FND-17),
 // written before the fix: every command that declares a wait, its flags and
-// its manifest defaults, run through cliWait. orthanc-source names the file
-// where each bound lives.
+// its manifest defaults, run through cliWait. Every flag, positional and default
+// in the fixtures below is as the release lists it, and orthanc-source names the
+// file where each bound lives.
 //  W19 A wait bounded by a flag other than --timeout is not counted at all, so
 //      the call dies at the 300 s floor: `functions execute --timeout-seconds`
 //      (src/functions.rs, default 300), `models deployment get --wait
@@ -71,18 +72,30 @@
 //      or --wait=false keeps the floor.
 //  W21 So do the Marketplace writes, whose draft waits and job wait are in code
 //      and not in the manifest: `marketplace installation create`/`upgrade
-//      --apply --wait` wait two drafts (120 s each) and the job (540 s) = 780 s
-//      and `marketplace job cancel --apply --wait` the job (540 s)
-//      (src/marketplace_draft.rs, MI30).
+//      --apply --wait` wait two drafts (120 s each) and the job (540 s) = 780 s,
+//      `marketplace job cancel --apply --wait` the job (540 s)
+//      (src/marketplace_draft.rs, MI30), and `marketplace installation
+//      uninstall --apply` polls its delete job for 600 s with no --wait flag.
 //  W22 A call over the cap because of one of these new flags is told to pass a
-//      smaller --timeout, which it does not have.
-//  W23 A manifest default for a fixed-wait command's --timeout counts once, and
-//      the command's own defaults still fit under the cap.
+//      smaller --timeout, which it does not have. And a per-request ceiling
+//      (--timeout-seconds on search, update, functions) must never refuse: that
+//      call ran before this change, and the number says nothing about its length.
+//  W23 Orthanc's fixed wait is no flag, so no flag an agent passes may erase it,
+//      and every command's own defaults still fit under the cap.
+//  W24 A flag the command does not have counts for nothing: orthanc's own usage
+//      error names its real flags, and a refusal built on a flag it would reject
+//      sends the agent into a usage error.
+//  W25 `marketplace installation uninstall` has no --wait and polls its own
+//      delete job for 600 s after the POST (src/marketplace_uninstall_verify.rs).
+//  W26 `marketplace installation upgrade` waits what an install waits.
+//  W27 A manifest default that arrives as a JSON number still counts.
+//  W28 A fixed-wait write whose own wait ran out is reported as an unknown
+//      mutation; a 404 on any other command is not.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, notRunFailure } from './orthanc'
+import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, guideEnvelope, manifestFrom, notRunFailure } from './orthanc'
 import type { ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
@@ -131,13 +144,30 @@ const DEVOPS_DRAFT_PUBLISH: ManifestCommand = {
     { flag: '--yes', takesValue: false },
   ],
 }
+// The release lists store_rid and spec_rid as positionals on create; --store is
+// only a flag on `marketplace job list`. The argv here is what the command
+// really takes, so a test cannot pass on a flag orthanc would reject.
 const MARKETPLACE_INSTALL: ManifestCommand = {
   path: 'marketplace installation create',
   kind: 'mutation',
   flags: [
-    { flag: '--store', takesValue: true },
     { flag: '--folder', takesValue: true },
+    { flag: '--ontology', takesValue: true },
     { flag: '--wait', takesValue: false },
+    { flag: '--apply', takesValue: false },
+    { flag: '--yes', takesValue: false },
+  ],
+}
+// Same wait, same code path, and the release lists `upgrade` with no --wait
+// either way of spelling it: it shares the install entry.
+const MARKETPLACE_UPGRADE: ManifestCommand = { ...MARKETPLACE_INSTALL, path: 'marketplace installation upgrade' }
+// No --wait flag anywhere: after the POST it polls its own delete job for 600 s.
+const MARKETPLACE_UNINSTALL: ManifestCommand = {
+  path: 'marketplace installation uninstall',
+  kind: 'mutation',
+  flags: [
+    { flag: '--mode', takesValue: true, default: 'detach' },
+    { flag: '--delete-project', takesValue: false },
     { flag: '--apply', takesValue: false },
     { flag: '--yes', takesValue: false },
   ],
@@ -177,6 +207,25 @@ const CHECKS_RERUN: ManifestCommand = {
     { flag: '--interval', takesValue: true, default: '10' },
     { flag: '--readback-timeout', takesValue: true, default: '60' },
     { flag: '--apply', takesValue: false },
+  ],
+}
+// --timeout-seconds here caps one HTTP request (default 30 s on a GET), not a
+// wait: these calls must never be refused over it.
+const SEARCH: ManifestCommand = {
+  path: 'search',
+  kind: 'read-only',
+  flags: [
+    { flag: '--limit', takesValue: true, default: '20' },
+    { flag: '--timeout-seconds', takesValue: true, default: '30' },
+  ],
+}
+const UPDATE: ManifestCommand = {
+  path: 'update',
+  kind: 'mutation',
+  flags: [
+    { flag: '--timeout-seconds', takesValue: true, default: '120' },
+    { flag: '--apply', takesValue: false },
+    { flag: '--yes', takesValue: false },
   ],
 }
 const DEPLOYMENT_WAIT: ManifestCommand = {
@@ -319,36 +368,123 @@ test('W20: devops draft publish --wait gets orthanc\'s 900 s finalise, a plan do
 
 test('W21: the Marketplace waits cover two draft waits and the job wait', async () => {
   // MI30: 120 + 120 + 540 = 780 s, orthanc's own e2e bound.
-  expect(seconds(cliTimeoutMs(MARKETPLACE_INSTALL, ['--store', 'ri.ms', '--wait', '--apply', '--yes']))).toBe(
+  expect(seconds(cliTimeoutMs(MARKETPLACE_INSTALL, ['ri.ms', 'ri.spec', '--wait', '--apply', '--yes']))).toBe(
     JOB_WAIT_S + MARKETPLACE_DRAFT_WAITS_S + MARGIN_S,
   )
   expect(seconds(cliTimeoutMs(MARKETPLACE_JOB_CANCEL, ['ri.job', '--wait', '--apply', '--yes']))).toBe(JOB_WAIT_S + MARGIN_S)
-  expect(cliTimeoutMs(MARKETPLACE_INSTALL, ['--store', 'ri.ms', '--wait'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+  expect(cliTimeoutMs(MARKETPLACE_INSTALL, ['ri.ms', 'ri.spec', '--wait'])).toBe(CLI_TIMEOUT_FLOOR_MS)
   expect(cliTimeoutMs(MARKETPLACE_JOB_CANCEL, ['ri.job', '--apply', '--yes'])).toBe(CLI_TIMEOUT_FLOOR_MS)
 })
 
-test('W22: an over-cap wait caused by one of these flags names that flag', async () => {
-  const secondsOver = cliWait(FUNCTIONS_EXECUTE, ['fn', '--apply', '--timeout-seconds', '5000'])
-  expect({ overCap: secondsOver.overCap, cap: seconds(secondsOver.capMs), max: secondsOver.maxTimeoutS, flags: secondsOver.overFlags }).toEqual({
+test('W22: a request ceiling never refuses; a wait deadline is named with a value that fits', async () => {
+  // --timeout-seconds on a command with no --wait bounds one HTTP request. Such
+  // a call ran before this PR at the cap, and a refusal would take that away.
+  for (const [command, args] of [
+    [FUNCTIONS_EXECUTE, ['fn', '--apply', '--timeout-seconds', '5000']],
+    [SEARCH, ['dataset', '--timeout-seconds', '3600']],
+    [UPDATE, ['--target', 'linux-x86_64', '--apply', '--yes', '--timeout-seconds', '2400']],
+  ] as [ManifestCommand, string[]][]) {
+    const wait = cliWait(command, args)
+    expect({ path: command.path, overCap: wait.overCap, timeoutMs: wait.timeoutMs, capMs: wait.capMs, flags: wait.overFlags }).toEqual({
+      path: command.path,
+      overCap: false,
+      timeoutMs: wait.capMs,
+      capMs: CLI_TIMEOUT_CAP_MS,
+      flags: undefined,
+    })
+  }
+  // The same flag on a command that waits on it (--wait present) is the caller's
+  // to lower, and the refusal names it with the largest value that fits.
+  const deployment = cliWait(DEPLOYMENT_WAIT, ['dep', '--wait', '--timeout-seconds', '2500'])
+  expect({ overCap: deployment.overCap, flag: deployment.maxFlag, max: deployment.maxValueS, flags: deployment.overFlags }).toEqual({
     overCap: true,
-    cap: seconds(CLI_TIMEOUT_CAP_MS),
-    max: undefined,
+    flag: '--timeout-seconds',
+    max: 2165,
     flags: ['--timeout-seconds'],
   })
+  // A --readback-timeout over the cap is named too, and no --timeout is invented.
   const readback = cliWait(CHECKS_RERUN, ['agent/x', '--wait', '--apply', '--readback-timeout', '3000'])
-  expect({ overCap: readback.overCap, flags: readback.overFlags }).toEqual({ overCap: true, flags: ['--readback-timeout'] })
+  expect({ overCap: readback.overCap, flag: readback.maxFlag, max: readback.maxValueS, flags: readback.overFlags }).toEqual({
+    overCap: true,
+    flag: '--readback-timeout',
+    max: 1560,
+    flags: ['--readback-timeout'],
+  })
 })
 
-test('W23: a declared default wins over the fixed wait, and every default here fits under the cap', async () => {
+test('W24: a flag the command does not have counts for nothing', async () => {
+  // `marketplace installation create` has no --timeout: orthanc's own usage
+  // error is the answer to that flag, not a timer of ours or a refusal.
+  const extra = cliWait(MARKETPLACE_INSTALL, ['ri.ms', 'ri.spec', '--wait', '--apply', '--yes', '--timeout', '2000'])
+  expect({ timeoutMs: seconds(extra.timeoutMs), overCap: extra.overCap, flags: extra.overFlags }).toEqual({
+    timeoutMs: JOB_WAIT_S + MARKETPLACE_DRAFT_WAITS_S + MARGIN_S,
+    overCap: false,
+    flags: undefined,
+  })
+})
+
+test('W25: uninstall waits its 600 s verify, and a plan does not', async () => {
+  expect(seconds(cliTimeoutMs(MARKETPLACE_UNINSTALL, ['ri.msi.x', '--apply', '--yes']))).toBe(600 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(MARKETPLACE_UNINSTALL, ['ri.msi.x', '--mode', 'detach', '--apply', '--yes']))).toBe(600 + MARGIN_S)
+  // A plan (no --apply) sends nothing and waits for nothing.
+  expect(cliTimeoutMs(MARKETPLACE_UNINSTALL, ['ri.msi.x'])).toBe(CLI_TIMEOUT_FLOOR_MS)
+})
+
+test('W26: an install upgrade waits what an install waits', async () => {
+  expect(cliTimeoutMs(MARKETPLACE_UPGRADE, ['ri.msi.x', 'ri.spec', '--wait', '--apply', '--yes'])).toBe(
+    cliTimeoutMs(MARKETPLACE_INSTALL, ['ri.ms', 'ri.spec', '--wait', '--apply', '--yes']),
+  )
+})
+
+test('W27: a manifest default that arrives as a number still counts', async () => {
+  // JSON may carry seconds as a number. One that is dropped is a wait that
+  // silently falls back to the floor: the failure this file exists to stop.
+  const envelope = {
+    data: {
+      commands: [
+        {
+          path: 'repository checks wait',
+          kind: 'mutation',
+          args: [
+            { kind: 'positional', name: 'branch' },
+            { flag: '--wait', takes_value: false },
+            { flag: '--timeout', takes_value: true, default: 600 },
+          ],
+        },
+      ],
+    },
+  }
+  const [command] = manifestFrom(envelope)
+  expect(seconds(cliTimeoutMs(command, ['agent/x', '--wait', '--apply']))).toBe(600 + MARGIN_S)
+})
+
+test('W28: a fixed-wait write whose own wait ran out is an unknown mutation', async () => {
+  // Orthanc sends the write, then polls its own constant. When that poll runs
+  // out the answer is an unsupported-capability error, and the write is out.
+  const timedOut = { errors: [{ type: 'unsupported-capability', message: 'job ri.job did not end within 540 s' }] }
+  expect(guideEnvelope(timedOut, MARKETPLACE_INSTALL, null).uncertain_mutation).toBe(true)
+  expect(guideEnvelope(timedOut, MARKETPLACE_UNINSTALL, null).uncertain_mutation).toBe(true)
+  // A command whose wait the caller sets is orthanc's own answer to report: a
+  // 404 is a 404, and a flag that always cries uncertain teaches to ignore it.
+  expect(guideEnvelope(timedOut, CHECKS_RERUN, null).uncertain_mutation).toBeUndefined()
+  expect(guideEnvelope({ errors: [{ type: 'foundry-api-error', message: 'HTTP 404 not found' }] }, MARKETPLACE_INSTALL, null).uncertain_mutation).toBeUndefined()
+})
+
+test('W23: a flag an agent can lower never removes Orthanc\'s fixed wait, and every default here fits', async () => {
+  // FINALIZE_TIMEOUT is not a flag: a command that also declares --timeout still
+  // finalises for 900 s.
   const declared: ManifestCommand = {
     ...DEVOPS_DRAFT_PUBLISH,
     flags: (DEVOPS_DRAFT_PUBLISH.flags ?? []).concat({ flag: '--timeout', takesValue: true, default: '300' }),
   }
-  expect(seconds(cliTimeoutMs(declared, ['draft', '--apply', '--yes', '--wait']))).toBe(300 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(declared, ['draft', '--apply', '--yes', '--wait']))).toBe(900 + 300 + MARGIN_S)
+  expect(seconds(cliTimeoutMs(declared, ['draft', '--apply', '--yes', '--wait', '--timeout', '60']))).toBe(900 + 60 + MARGIN_S)
   for (const [command, args] of [
     [DEVOPS_DRAFT_PUBLISH, ['draft', '--apply', '--yes', '--wait']],
-    [MARKETPLACE_INSTALL, ['--store', 'ri.ms', '--wait', '--apply', '--yes']],
+    [MARKETPLACE_INSTALL, ['ri.ms', 'ri.spec', '--wait', '--apply', '--yes']],
+    [MARKETPLACE_UPGRADE, ['ri.msi.x', 'ri.spec', '--wait', '--apply', '--yes']],
     [MARKETPLACE_JOB_CANCEL, ['ri.job', '--wait', '--apply', '--yes']],
+    [MARKETPLACE_UNINSTALL, ['ri.msi.x', '--apply', '--yes']],
     [FUNCTIONS_EXECUTE, ['fn', '--apply']],
     [CHECKS_RERUN, ['agent/x', '--wait', '--apply']],
     [DEPLOYMENT_WAIT, ['dep', '--wait']],
@@ -373,7 +509,7 @@ const MANIFEST = envelope({
   commands: [
     { path: 'configure list', kind: 'local', args: [] },
     { path: 'ontology list', kind: 'read-only', args: [] },
-    ...[AI_FDE_RUN, CHECKS_WAIT, DEVOPS_DRAFT_PUBLISH, MARKETPLACE_JOB_CANCEL, FUNCTIONS_EXECUTE].map(command => ({
+    ...[AI_FDE_RUN, CHECKS_WAIT, DEVOPS_DRAFT_PUBLISH, MARKETPLACE_JOB_CANCEL, MARKETPLACE_INSTALL, MARKETPLACE_UPGRADE, MARKETPLACE_UNINSTALL, FUNCTIONS_EXECUTE, SEARCH, UPDATE, CHECKS_RERUN, DEPLOYMENT_WAIT].map(command => ({
       path: command.path,
       kind: command.kind,
       args: manifestArgs(command),
@@ -571,16 +707,27 @@ test('W3 W20: through the tool, devops draft publish --wait is not stopped at th
   expect(parsed(await running).errors[0]!.timeout_seconds).toBe(1020)
 })
 
-test('W22: through the tool, an over-cap --timeout-seconds is refused, and the answer names that flag', async ($, on) => {
+test('W22: through the tool, an over-cap wait is refused and the answer names the flag and a value', async ($, on) => {
   const { h } = harness(on)
-  const out = parsed(await call($, 'functions execute', ['fn', '{}', '--apply', '--timeout-seconds', '5000']))
+  // 1900 + 300 + 10 + 120 = 2330 s over a 2290 s cap: --timeout is the flag with
+  // room, and the agent is told the number, not a search.
+  const out = parsed(await call($, 'repository checks rerun', ['agent/x', '--wait', '--apply', '--timeout', '1900', '--readback-timeout', '300']))
   expect(h.spawns).toEqual([])
   expect(h.runs).toEqual([])
   const error = out.errors[0]!
   expect(error.type).toBe('timeout-over-cap')
   expect(error.cap_seconds).toBe(2290)
-  expect(String(error.message)).toContain('--timeout-seconds')
-  expect(String(error.message)).toContain('Pass a smaller --timeout-seconds')
+  expect(error.max_timeout_seconds).toBe(1860)
+  expect(String(error.message)).toContain('Pass --timeout 1860 or less')
+})
+
+test('W22: through the tool, a big request ceiling runs at the cap instead of being refused', async ($, on) => {
+  const { h, clock } = harness(on)
+  h.child = 'hang'
+  const running = call($, 'update', ['--target', 'linux-x86_64', '--apply', '--yes', '--timeout-seconds', '2400'])
+  expect(await after(clock, running, 2_289_000)).toBe(false)
+  expect(await after(clock, running, 2_000)).toBe(true)
+  expect(parsed(await running).errors[0]!.timeout_seconds).toBe(2290)
 })
 
 test('W8: through the tool, a call stopped before its timer says it was cancelled, not timed out', async ($, on) => {
@@ -640,7 +787,8 @@ test('W13: a stop at the timer reads as a timeout whatever the host calls it', a
   expect(await after(clock, running, 310_000)).toBe(true)
   const error = parsed(await running).errors[0]!
   expect({ reason: error.reason, elapsed: error.elapsed_seconds, timer: error.timeout_seconds }).toEqual({ reason: 'timeout', elapsed: 310, timer: 310 })
-  expect(String(error.hint)).toContain('--timeout that fits')
+  // Names a flag this command really has (and its grace), not a bare guess.
+  expect(String(error.hint)).toContain('with a --timeout or --publish-grace that fits')
 })
 
 test('W14: an over-cap call is refused before the approval ladder asks the operator', async ($, on) => {

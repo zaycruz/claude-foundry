@@ -7,20 +7,23 @@ says so instead of falling back to REST.
 
 - **Two tools.** `orthanc_help` discovers Orthanc's command surface; `orthanc_cli`
   runs a command in agent mode and returns its `foundry-agent-v1` envelope.
-  A waiting command (`repository checks wait`, `ontology branch-index-status
-  --wait`, `sql wait`, `ai-fde run --apply`, `devops draft publish --wait`,
-  `marketplace installation create --wait`, `functions execute`, `models
-  deployment get --wait`) runs as long as Orthanc bounds its own wait —
-  `--timeout`, `--timeout-seconds`, `--publish-grace`, `--readback-timeout` or
-  `--time-budget-seconds`, plus the fixed time Orthanc adds around it (370 s for
-  `ai-fde run`; the 900 s a draft takes to finalise; two job drafts and the job,
-  780 s, for a Marketplace install) — and a margin, from 300 s up to 2,290 s
-  (more for a command whose own defaults need more). A call that would need more
-  is refused before it starts and before any approval prompt, with the largest
-  `--timeout` that fits or the flag to make smaller (for `ai-fde run`, also
-  `--detach` with `ai-fde status` and `ai-fde result`). A call stopped from
-  outside its timer says `reason: cancelled`; a stop by the timer says
-  `reason: timeout`.
+  A waiting command (`repository checks wait`, `sql wait`, `devops draft publish
+  --wait`, `marketplace installation create|upgrade|uninstall --apply`,
+  `marketplace job cancel --wait`, `functions execute`, `models deployment get
+  --wait`, `ai-fde run --apply`) runs as long as Orthanc bounds its own wait —
+  one of `--timeout`, `--timeout-seconds`, `--publish-grace`,
+  `--readback-timeout`, `--time-budget-seconds`, plus a wait Orthanc keeps as a
+  constant with no flag for it (the 900 s a draft takes to finalise; the 780 s
+  of a Marketplace install; the 600 s an uninstall polls its delete job; 370 s
+  around `ai-fde run`) — and a margin, from 300 s up to 2,290 s (more for a
+  command whose own defaults need more). A call that would need more is refused
+  before it starts and before any approval prompt, naming the flag to make
+  smaller and the largest value of it that fits (for `ai-fde run`, also
+  `--detach`). A flag that only caps one HTTP request — `--timeout-seconds` on
+  `search`, `update` or `functions` — lengthens the timer and never refuses. A
+  call stopped from outside its timer says `reason: cancelled`; a stop by the
+  timer says `reason: timeout`. A write stopped by either is reported as an
+  unknown mutation: reconcile before you retry it.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
