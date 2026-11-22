@@ -1090,6 +1090,70 @@ function orthancShellCall(
   return { path: leading.join(' ').toLowerCase(), known: false, help }
 }
 
+// One Orthanc call a shell line runs, in the order the shell runs them.
+type ShellCall =
+  // A segment that runs Orthanc where the guard cannot read it (a variable, eval
+  // or interpreter code): what it runs is unknown, so neither the ladder nor a
+  // timer has anything to judge.
+  | { hides: true }
+  | {
+      hides: false
+      /** The manifest entry the words name; null when they name none. */
+      entry: ManifestCommand | null
+      /** Every word after the binary: the positionals and the flags, what cliWait reads. */
+      args: string[]
+      path: string
+      known: boolean
+      help: boolean
+      /** The segment ended at a substitution: the call continues inside it. */
+      split: boolean
+    }
+
+/** The Orthanc calls a Bash command runs, unreadable ones marked where they sit. */
+function shellCalls(command: string, manifest: readonly ManifestCommand[]): ShellCall[] {
+  const segments = commandSegments(command)
+  // The first words of the manifest paths: what can follow `orthanc` as a call.
+  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
+  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
+  const assignments = new Map<string, string[]>()
+  for (const word of segments.flatMap(segment => segment.words)) {
+    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
+    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
+  }
+  const calls: ShellCall[] = []
+  for (const segment of segments) {
+    const { words } = segment
+    if (hidesOrthanc(segment, command, assignments, groups)) {
+      calls.push({ hides: true })
+      continue
+    }
+    const start = orthancStart(segment, groups)
+    if (start < 0) continue
+    const call = orthancShellCall(words, start, manifest)
+    calls.push({
+      hides: false,
+      entry: manifest.find(entry => entry.path === call.path) ?? null,
+      args: words.slice(start + 1),
+      ...call,
+      split: segment.split,
+    })
+  }
+  return calls
+}
+
+/**
+ * What the Orthanc calls a Bash command runs, as the manifest describes them,
+ * with the words after the binary. The Bash tool holds its own timer over them;
+ * register.tsx turns these into waits and covers that timer (hooks/process.ts).
+ * A command with no readable Orthanc call, or one the guard cannot read, brings
+ * nothing: the guard answers those before the timer is read.
+ */
+export function shellOrthancCalls(command: string, manifest: readonly ManifestCommand[]): { command: ManifestCommand; args: string[] }[] {
+  return shellCalls(command, manifest).flatMap(call =>
+    call.hides || !call.known || call.help || call.entry === null ? [] : [{ command: call.entry, args: call.args }],
+  )
+}
+
 // Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
 // where the branch rule and the ladder see its arguments as data, not shell.
 function shellClassification(
@@ -1106,32 +1170,18 @@ function shellClassification(
     isDestructive: false,
     error,
   })
-  const segments = commandSegments(command)
-  // The first words of the manifest paths: what can follow `orthanc` as a call.
-  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
-  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
-  const assignments = new Map<string, string[]>()
-  for (const word of segments.flatMap(segment => segment.words)) {
-    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
-    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
-  }
-  for (const segment of segments) {
-    const { words } = segment
-    if (hidesOrthanc(segment, command, assignments, groups)) {
+  for (const call of shellCalls(command, manifest)) {
+    if (call.hides) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    const start = orthancStart(segment, groups)
-    if (start < 0) continue
-    const call = orthancShellCall(words, start, manifest)
-    if (call.path === '' && !call.help && segment.split) {
+    if (call.path === '' && !call.help && call.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
     if (call.help || call.path === '' || call.path === 'repository clone') continue
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
-    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
-    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && call.entry?.operatorApproval === undefined) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null

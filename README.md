@@ -15,7 +15,12 @@ says so instead of falling back to REST.
   it starts and before any approval prompt, with the largest `--timeout` that
   fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
   `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
-  says `reason: cancelled`; a stop by the timer says `reason: timeout`.
+  says `reason: cancelled`; a stop by the timer says `reason: timeout`. The same
+  wait typed into `Bash` gets that budget too: the call's `timeout` is raised to
+  what its own flags ask for (the shell's limits, `BASH_DEFAULT_TIMEOUT_MS` 120 s
+  and `BASH_MAX_TIMEOUT_MS` 600 s by default, decide how much it can take), and a
+  wait no Bash timeout holds is refused before the command starts, naming
+  `orthanc_cli` and `run_in_background: true` as the ways that do fit.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a

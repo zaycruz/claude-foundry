@@ -112,8 +112,17 @@ function flagArgument(args: readonly string[], flag: string): string | undefined
 }
 
 export type CliWait = {
+  /** The manifest path this wait belongs to ('' when no command was named). */
+  path: string
   timeoutMs: number
   neededMs: number
+  /**
+   * What the call's own flags ask for, margin included, in ms: 0 when nothing
+   * waits (--detach, --no-wait, a plan, a command with no wait flags). The
+   * Bash timer is held to this, not to `neededMs`: the 300 s floor is this
+   * mod's floor for an ordinary call, not a wait a shell command must hold.
+   */
+  waitMs: number
   /** The cap for this command: the general cap, or what its own defaults need when that is more. */
   capMs: number
   overCap: boolean
@@ -132,6 +141,7 @@ const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
  * flags to make smaller.
  */
 export function cliWait(command: ManifestCommand | undefined, args: readonly string[]): CliWait {
+  const path = command?.path ?? ''
   const flags = command?.flags ?? []
   const extra = command ? WAIT_EXTRAS[command.path] : undefined
   const declares = (flag: string) => flags.some(entry => entry.flag === flag)
@@ -161,17 +171,19 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
   }
   const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
   const totalS = waits ? totalOf(seconds) : 0
-  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false }
+  if (totalS === 0) return { path, timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, waitMs: 0, capMs, overCap: false }
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
   const overCap = neededMs > capMs
-  if (!overCap) return { timeoutMs: neededMs, neededMs, capMs, overCap }
+  if (!overCap) return { path, timeoutMs: neededMs, neededMs, waitMs: totalS * 1000, capMs, overCap }
   const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
   // When no --timeout fits, the other passed flags are what to make smaller.
   const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== '--timeout' && given(flag) && seconds(flag) > 0)
   const overFlags = fits > 0 ? ['--timeout'] : others
   return {
+    path,
     timeoutMs: capMs,
     neededMs,
+    waitMs: totalS * 1000,
     capMs,
     overCap,
     ...(fits > 0 ? { maxTimeoutS: fits } : {}),

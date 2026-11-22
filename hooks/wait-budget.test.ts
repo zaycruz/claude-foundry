@@ -52,12 +52,42 @@
 //      default wait.
 //  W18 orthanc raises a command's default wait past the cap and every call
 //      with that default is refused.
+//
+// The same wait typed into Bash (claude-foundry #19), written before the fix:
+//  B1 orthanc_cli's timer covers the call it makes, and nothing else: the same
+//      `checks wait --timeout N` run through Bash dies at the Bash tool's own
+//      timer, which moves the command to the background so the turn never gets
+//      its answer. A waiting call in Bash gets the time its own flags ask for.
+//  B2 The cover reads the shell's real limits, not a guess: the call's
+//      `timeout`, then BASH_DEFAULT_TIMEOUT_MS, then 120 s, and the largest one
+//      the host takes, BASH_MAX_TIMEOUT_MS or 600 s, the default never above
+//      it. A call already given enough time is left alone; a timeout bigger
+//      than the host takes counts as what the host takes.
+//  B3 A wait no Bash timeout holds is refused before the command starts, and
+//      says what it costs, what Bash allows, and the ways that do fit.
+//  B4 A command that waits for nothing keeps the timeout the model gave:
+//      --no-wait, --detach, a plan with no --apply, a plain read, and a line
+//      that only names orthanc.
+//  B5 The wait comes from the same flags as orthanc_cli's timer: manifest
+//      defaults, --publish-grace, --interval, the last of a repeated --timeout,
+//      and a value orthanc would reject counted as the default.
+//  B6 A line with several Orthanc calls takes the longest of their waits; a
+//      line the guard already refuses (a write, an unreadable call) is answered
+//      before any timeout is raised, so nothing gets time for a call that does
+//      not run.
+//  B7 run_in_background has no foreground limit to cover: the call is untouched.
+//  B8 The raised timeout reaches the tool: the event handed to next carries it
+//      (the host reads the call's `timeout`), and a refusal leaves it alone.
+//  B9 A wait past even orthanc_cli's cap is refused in Bash too, and says the
+//      flag that is too big there, not a --timeout that would fit Bash.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
 import { CLI_TIMEOUT_CAP_MS, CLI_TIMEOUT_FLOOR_MS, cliTimeoutMs, cliWait, failure, notRunFailure } from './orthanc'
 import type { ManifestCommand } from './policy'
+import { shellOrthancCalls } from './policy'
+import { BASH_TIMEOUT_DEFAULT_MS, BASH_TIMEOUT_MAX_MS, coverShellWaits, shellTimer, shellWaitDenial } from './process'
 
 const CLI = 'mcp__foundry__orthanc_cli'
 const seconds = (ms: number) => ms / 1000
@@ -221,6 +251,10 @@ type Harness = {
   asks: string[]
   /** The approval mode the plugin reads. */
   mode: string
+  /** Every Bash call that reached the tool, with the timeout it was handed. */
+  bash: { command: string; timeoutMs?: number }[]
+  /** The session's environment, for the shell's own timeout variables. */
+  env: Map<string, string>
 }
 
 const lineOf = (argv: readonly string[]) => {
@@ -231,7 +265,8 @@ const lineOf = (argv: readonly string[]) => {
 
 function harness(on: On) {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const h: Harness = { runs: [], spawns: [], stopped: [], child: 'finish', missing: false, asks: [], mode: 'yolo' }
+  const env = new Map<string, string>([['HOME', '/home/tester']])
+  const h: Harness = { runs: [], spawns: [], stopped: [], child: 'finish', missing: false, asks: [], mode: 'yolo', bash: [], env }
   const done = (line: string) => envelope({ ran: line })
   on('process.run', async (_$, e) => {
     const line = lineOf(e.argv)
@@ -273,7 +308,6 @@ function harness(on: On) {
     await clock.sleep(h.child.abortAfterMs)
     return { deny: '$.process.spawn aborted' }
   })
-  const env = new Map<string, string>([['HOME', '/home/tester']])
   on('env.get', (_$, e) => ({ value: env.get(e.name) }))
   on('env.set', (_$, e) => {
     if (e.value === undefined) env.delete(e.name)
@@ -297,7 +331,8 @@ function harness(on: On) {
   on('classic.SubagentStart', () => ({}))
   // $.ui.ask reaches the operator as an AskUserQuestion call (as in tag.test.ts).
   on('tool.call', (_$, e) => {
-    const asked = e as unknown as { tool: string; questions?: { question: string }[] }
+    const asked = e as unknown as { tool: string; command?: string; timeout?: number; questions?: { question: string }[] }
+    if (asked.tool === 'Bash') h.bash.push({ command: asked.command ?? '', timeoutMs: asked.timeout })
     if (asked.tool !== 'AskUserQuestion') return { result: 'ran' } as never
     const question = asked.questions?.[0]?.question ?? ''
     h.asks.push(question)
@@ -455,4 +490,206 @@ test('W14: an over-cap call is refused before the approval ladder asks the opera
   parsed(await call($, 'ai-fde run', ['do it', '--apply', '--detach']))
   expect(h.asks.length).toBe(1)
   expect(h.runs.map(run => run.line)).toEqual(['ai-fde run do it --apply --detach'])
+})
+
+// ---------- the same wait typed into Bash ----------
+
+// The manifest as the guard holds it, for the pure reads of a shell line.
+const SHELL_MANIFEST: ManifestCommand[] = [CHECKS_WAIT, AI_FDE_RUN, IMPORT_RUN, { path: 'ontology list', kind: 'read-only' }]
+const DEFAULT_SHELL = shellTimer(undefined, undefined, undefined)
+
+/** The waits, in seconds, of the Orthanc calls a shell line runs. */
+const shellWaits = (line: string) => shellOrthancCalls(line, SHELL_MANIFEST).map(entry => cliWait(entry.command, entry.args).waitMs / 1000)
+
+test('B1: a Bash call that waits gets the time its own flags ask for', async () => {
+  const wait = cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '300'])
+  // 300 + 120 grace + 10 interval + 120 margin, over the shell's 120 s default.
+  expect({ waitS: wait.waitMs / 1000, timer: DEFAULT_SHELL }).toEqual({ waitS: 550, timer: { givenMs: 120_000, maxMs: 600_000 } })
+  expect(coverShellWaits([wait], DEFAULT_SHELL)).toEqual({ kind: 'raise', timeoutMs: 550_000, wait, timer: DEFAULT_SHELL })
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 300')).toEqual([550])
+})
+
+test('B2: the cover reads the shell\'s limits, and leaves a call that has enough time alone', async () => {
+  expect(shellTimer(undefined, undefined, undefined)).toEqual({ givenMs: 120_000, maxMs: 600_000 })
+  expect(shellTimer(300_000, undefined, undefined).givenMs).toBe(300_000)
+  // BASH_DEFAULT_TIMEOUT_MS is the timer of a call that gives no timeout; the
+  // largest timeout never falls under it.
+  expect(shellTimer(undefined, '300000', undefined)).toEqual({ givenMs: 300_000, maxMs: 600_000 })
+  expect(shellTimer(undefined, '900000', undefined)).toEqual({ givenMs: 900_000, maxMs: 900_000 })
+  // A timeout bigger than the host takes is what the host takes.
+  expect(shellTimer(900_000, undefined, '420000')).toEqual({ givenMs: 420_000, maxMs: 420_000 })
+  // Anything else in those variables leaves the host\'s defaults standing.
+  for (const junk of ['abc', '', '-5', '0', 'NaN', 'Infinity']) {
+    expect({ junk, timer: shellTimer(junk, junk, junk) }).toEqual({
+      junk,
+      timer: { givenMs: BASH_TIMEOUT_DEFAULT_MS, maxMs: BASH_TIMEOUT_MAX_MS },
+    })
+  }
+  const wait = cliWait(CHECKS_WAIT, ['ri.r', 'v1', '--timeout', '300'])
+  expect(coverShellWaits([wait], shellTimer(600_000, undefined, undefined))).toEqual({ kind: 'keep' })
+  // A session whose ceiling sits under the wait: nothing fits it.
+  expect(coverShellWaits([wait], shellTimer(undefined, '30000', '60000'))).toEqual({ kind: 'over', wait, timer: shellTimer(undefined, '30000', '60000') })
+})
+
+test('B3: a wait no Bash timeout holds is refused, and says what fits', async () => {
+  // 600 default + 120 grace + 10 interval + 120 margin, over the 600 s ceiling.
+  const wait = cliWait(CHECKS_WAIT, ['ri.r', 'v1'])
+  const cover = coverShellWaits([wait], DEFAULT_SHELL)
+  expect({ kind: cover.kind, waitS: cover.kind === 'over' ? cover.wait.waitMs / 1000 : 0 }).toEqual({ kind: 'over', waitS: 850 })
+  const reason = shellWaitDenial(wait, DEFAULT_SHELL)
+  expect(reason).toContain("Bash runs a command for at most 600 s, and 'orthanc repository checks wait' waits 850 s here, so the command was not run")
+  expect(reason).toContain('orthanc_cli, which waits up to 2290 s for it')
+  expect(reason).toContain('run_in_background: true')
+  // A wait that fits orthanc_cli is not told to shrink it.
+  expect(reason.includes('--timeout 8')).toBe(false)
+})
+
+test('B4: what waits for nothing keeps the timeout the model gave', async () => {
+  for (const line of [
+    'orthanc repository checks wait ri.r v1 --no-wait',
+    'orthanc ai-fde run do it --apply --detach --timeout 1800',
+    'orthanc connectivity import run ri.c --wait --timeout 900',
+    'orthanc ontology list',
+    "python3 scripts/e2e/run.py --bin target/debug/orthanc --only '^checks$'",
+    'grep -rn "orthanc repository checks wait --timeout 1500" hooks/',
+    'MSG="orthanc checks wait ran"; git commit -m "$MSG"',
+  ]) {
+    const waits = shellWaits(line)
+    expect({ line, waits }).toEqual({ line, waits: waits.map(() => 0) })
+    expect(coverShellWaits(shellOrthancCalls(line, SHELL_MANIFEST).map(entry => cliWait(entry.command, entry.args)), DEFAULT_SHELL)).toEqual({ kind: 'keep' })
+  }
+})
+
+test('B5: the Bash wait reads the same flags as orthanc_cli\'s timer', async () => {
+  expect(shellWaits('orthanc repository checks wait ri.r v1')).toEqual([850])
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 1200 --interval 30')).toEqual([1470])
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 60 --publish-grace 900')).toEqual([1090])
+  // The last of a repeated --timeout is the one orthanc runs.
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 100 --timeout 200')).toEqual([450])
+  // A value orthanc would reject counts as its default, so the timer is never short.
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout abc')).toEqual([850])
+  // The agent flags the tool supplies are not part of the wait.
+  expect(shellWaits('orthanc --agent --non-interactive --profile tester repository checks wait ri.r v1 --timeout 300')).toEqual([550])
+  // A launcher in front of the binary, and a redirect behind it, change nothing.
+  expect(shellWaits('sudo orthanc repository checks wait ri.r v1 --timeout 300')).toEqual([550])
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 300 > out.log')).toEqual([550])
+  expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 300 | jq .data.status')).toEqual([550])
+})
+
+test('B6: a line with several Orthanc calls is covered by its longest wait', async () => {
+  expect(shellWaits('orthanc ontology list && orthanc repository checks wait ri.r v1 --timeout 100 && orthanc repository checks wait ri.r v2 --timeout 300')).toEqual([0, 350, 550])
+  const waits = shellOrthancCalls('orthanc repository checks wait ri.a --timeout 100 && orthanc repository checks wait ri.b --timeout 300', SHELL_MANIFEST).map(entry => cliWait(entry.command, entry.args))
+  expect(coverShellWaits(waits, DEFAULT_SHELL)).toEqual({
+    kind: 'raise',
+    timeoutMs: 550_000,
+    wait: cliWait(CHECKS_WAIT, ['ri.b', '--timeout', '300']),
+    timer: DEFAULT_SHELL,
+  })
+})
+
+// ---------- through the gate: the Bash call the plugin hands to the host ----------
+
+const bash = ($: Engine, command: string, options: Record<string, unknown> = {}) =>
+  $.tool.call({ tool: 'Bash', command, ...options } as never) as Promise<Reply>
+
+test('B8: through the gate, a waiting Bash call is handed the timeout that covers it', async ($, on) => {
+  const { h } = harness(on)
+  const command = 'orthanc repository checks wait ri.r v1 --timeout 300'
+  const ran = await bash($, command, { timeout: 1_000 })
+  expect(ran.deny).toBe(undefined)
+  expect(h.bash).toEqual([{ command, timeoutMs: 550_000 }])
+})
+
+test('B2 B4: what does not wait, or already has the time, reaches the tool as it came', async ($, on) => {
+  const { h } = harness(on)
+  const short = 'orthanc ontology list'
+  expect((await bash($, short, { timeout: 5_000 })).deny).toBe(undefined)
+  expect((await bash($, 'orthanc repository checks wait ri.r v1 --timeout 300', { timeout: 600_000 })).deny).toBe(undefined)
+  expect((await bash($, 'orthanc repository checks wait ri.r v1 --no-wait', { timeout: 2_000 })).deny).toBe(undefined)
+  expect(h.bash).toEqual([
+    { command: short, timeoutMs: 5_000 },
+    { command: 'orthanc repository checks wait ri.r v1 --timeout 300', timeoutMs: 600_000 },
+    { command: 'orthanc repository checks wait ri.r v1 --no-wait', timeoutMs: 2_000 },
+  ])
+})
+
+test('B2: the cover is the session\'s own shell limits, not the plugin\'s guess', async ($, on) => {
+  const { h } = harness(on)
+  h.env.set('BASH_MAX_TIMEOUT_MS', '300000')
+  // 150 + 120 grace + 10 interval + 120 margin = 400 s, past the 300 s ceiling
+  // this session set: refused where the 600 s default would have covered it.
+  const over = await bash($, 'orthanc repository checks wait ri.r v1 --timeout 150', { timeout: 1_000 })
+  expect(over.deny).toContain('at most 300 s')
+  expect(h.bash).toEqual([])
+  // A wait that fits the session's ceiling is given its time and runs.
+  expect((await bash($, 'orthanc repository checks wait ri.r v1 --timeout 30', { timeout: 1_000 })).deny).toBe(undefined)
+  expect(h.bash.map(entry => entry.timeoutMs)).toEqual([280_000])
+})
+
+test('B3 B9: a Bash wait nothing fits is refused before the command runs', async ($, on) => {
+  const { h } = harness(on)
+  const plain = await bash($, 'orthanc repository checks wait ri.r v1', { timeout: 1_000 })
+  expect(h.bash).toEqual([])
+  expect(plain.deny).toContain("so the command was not run")
+  expect(plain.deny).toContain('orthanc_cli, which waits up to 2290 s')
+  // Past orthanc_cli\'s own cap too: the refusal says the flag that is too big there.
+  const over = await bash($, 'orthanc repository checks wait ri.r v1 --timeout 5000', { timeout: 1_000 })
+  expect(over.deny).toContain('waits 5250 s')
+  expect(over.deny).toContain('orthanc_cli, which waits up to 2290 s for it, with --timeout 2040 or less')
+  expect(h.bash).toEqual([])
+})
+
+test('B7: run_in_background has no foreground timer to cover', async ($, on) => {
+  const { h } = harness(on)
+  const command = 'orthanc repository checks wait ri.r v1'
+  expect((await bash($, command, { timeout: 1_000, run_in_background: true })).deny).toBe(undefined)
+  expect(h.bash).toEqual([{ command, timeoutMs: 1_000 }])
+})
+
+test('B6: a line the guard refuses is answered before any timeout is raised', async ($, on) => {
+  const { h } = harness(on)
+  // A write waits behind the same timer, but the ladder answers it first.
+  const write = await bash($, 'orthanc ai-fde run do it --apply --timeout 1200')
+  expect(write.deny).toContain('orthanc_cli')
+  const unreadable = await bash($, 'O=orthanc; $O repository checks wait ri.r v1 --timeout 1200')
+  expect(unreadable.deny).toContain('cannot read')
+  expect(h.bash).toEqual([])
+})
+
+// The lane test FND-17 asked for: one wait, read once, whichever door the call
+// comes through. `devops draft publish --wait` waits a fixed 900 s in Orthanc
+// (open PR #25 puts that constant in WAIT_EXTRAS); the fixture names what the
+// manifest holds today, so the test pins the mechanism, not the table.
+const DRAFT_PUBLISH: ManifestCommand = {
+  path: 'devops draft publish',
+  kind: 'mutation',
+  flags: [
+    { flag: '--wait', takesValue: false },
+    { flag: '--timeout', takesValue: true, default: '900' },
+  ],
+}
+
+test('B9: one wait, read the same by both lanes', async () => {
+  const lanes: [ManifestCommand, string, number][] = [
+    [CHECKS_WAIT, 'repository checks wait ri.x v1 --wait --timeout 1200', 1450],
+    [DRAFT_PUBLISH, 'devops draft publish p --wait', 1020],
+  ]
+  for (const [command, argv, waitS] of lanes) {
+    const manifest = command === CHECKS_WAIT ? SHELL_MANIFEST : [...SHELL_MANIFEST, DRAFT_PUBLISH]
+    const inBash = shellOrthancCalls(`orthanc ${argv}`, manifest).map(entry => cliWait(entry.command, entry.args))
+    const inCli = cliWait(command, argv.split(/\s+/).slice(3))
+    expect({ argv, bashS: inBash.map(wait => wait.waitMs / 1000), cliS: inCli.waitMs / 1000 }).toEqual({ argv, bashS: [waitS], cliS: waitS })
+    // orthanc_cli runs to that wait; Bash holds what its ceiling allows and
+    // refuses with the number its own timer is short by.
+    expect(inCli.timeoutMs / 1000).toBe(waitS)
+    expect(coverShellWaits(inBash, DEFAULT_SHELL).kind).toBe('over')
+    expect(shellWaitDenial(inBash[0]!, DEFAULT_SHELL)).toContain(`waits ${waitS} s here`)
+  }
+})
+
+test('B6: a waiting write in Bash is refused for being a write, timer and all', async ($, on) => {
+  const { h } = harness(on)
+  const ran = await bash($, 'orthanc ai-fde run do it --apply --wait --timeout 1200')
+  expect(ran.deny).toContain("Orthanc writes run through orthanc_cli")
+  expect(h.bash).toEqual([])
 })
