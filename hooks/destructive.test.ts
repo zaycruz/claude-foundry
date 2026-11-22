@@ -49,6 +49,13 @@
 //      whose destructive word is not the whole last word
 //      (`resource permanently-delete`). The Palantir MCP lane reads the same
 //      words as the orthanc lane.
+//  D11 The words the operator is told fall behind the words the guard reads, so
+//      a prompt that says "deletes ask" fires for a revoke and reads as a bug.
+//  D12 The ask, and the line the debug log keeps, do not say which of the three
+//      the guard read: a word in the command name, a flag that names what the
+//      write removes, or `--force`. After the widening those are three different
+//      claims about the write, and `data-health check-group update
+//      --remove-check …` would read the same as `project remove-orgs`.
 //
 // Through the real hook, on a synthetic stack:
 //  E1  In allow-edits and auto an uninstall asks the operator, names the
@@ -371,11 +378,17 @@ test('D11: the words the operator is told match the words the guard reads', asyn
   }
 })
 
-// The term table's effect on every command name of the tied 0.7.11 surface that
-// carries a word in it, or a word a reader could mistake for one. The names are
-// copied from hooks/orthanc-snapshot.json; each verdict was read against that
-// command's own description in the released agent-manifest, so this pins the
-// table's meaning and not the table: adding or dropping a term flips a line.
+// Every one of the 51 command names in the pinned hooks/orthanc-snapshot.json
+// that carries a word from the table, each read against that command's own
+// description in the released agent-manifest, plus the names a reader could
+// mistake for one. Pinned as a table and not read from the file because the
+// plugin sandbox allows no file read from a test (a hooks module imports by
+// relative path and 'claude-code', nothing else), so the count below is the
+// drift trip: re-pin orthanc, and a name added or renamed away from the table
+// fails here until this table is recounted with
+//   jq -r '.commands[].path' hooks/orthanc-snapshot.json | grep -Ei '(^|-| |-)'
+//     '(delete|remove|uninstall|purge|discard|clear|reset|revert|replace|repair|overwrite|truncate|abort|revoke|unprotect|destroy|wipe|erase)(-|$)'
+const SURFACE_TRUE = 51
 const SURFACE: [string, boolean][] = [
   ['admin group delete', true],
   ['admin group member remove', true],
@@ -384,8 +397,10 @@ const SURFACE: [string, boolean][] = [
   ['alias clear', true],
   ['alias remove', true],
   ['auth delete', true],
+  ['automate delete', true],
   ['branch-protection project policy delete', true],
   ['branch-protection repo unprotect', true],
+  ['configure delete', true],
   ['connectivity code-import remove-importer', true],
   ['connectivity import delete', true],
   ['data-health check delete', true],
@@ -426,7 +441,6 @@ const SURFACE: [string, boolean][] = [
   ['streams stream reset', true],
   ['workshop module delete', true],
   ['workshop module revert', true],
-  // A word like one in the table, in the same shape, meaning something else.
   ['admin group member add', false],
   ['automate pause', false],
   ['automate unmute', false],
@@ -457,10 +471,43 @@ const SURFACE: [string, boolean][] = [
   ['workshop module update', false],
 ]
 
+test('D12: the ask and the log name which of the three the guard read', async () => {
+  const byName = classifyCall(CLI, { command: 'marketplace installation uninstall', args: [INSTALLATION, '--mode', 'delete'] }, MANIFEST, 'agent/x')
+  const byFlag = classifyCall(CLI, { command: 'data-health check-group update', args: ['ri.health.main.group.1', '--remove-check', 'ri.health.main.check.1'] }, MANIFEST, 'agent/x')
+  const byForce = classifyCall(CLI, { command: 'dataset create', args: ['people', '--force'] }, MANIFEST, 'agent/x')
+  // A word in the name is one claim, a flag another, `--force` says nothing
+  // about what is erased at all. The operator decides on that difference, and so
+  // does whoever reads the log the next week.
+  expect([byName?.destructiveWhy, byFlag?.destructiveWhy, byForce?.destructiveWhy]).toEqual(['uninstall', '--remove-check', '--force'])
+  for (const [classification, word] of [
+    [byName, 'uninstall'],
+    [byFlag, '--remove-check'],
+    [byForce, '--force'],
+  ] as const) {
+    for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
+      const reason = ladderDecision(mode, classification!, approve).reason
+      expect({ mode, said: reason.startsWith(`destructive mutation '${classification!.command}' (${word}) asks`) }).toEqual({ mode, said: true })
+    }
+    // In yolo the write runs, and the reason the turn records still names what
+    // the guard read, so a post-mortem of an unasked uninstall shows the guard
+    // saw it as destructive.
+    expect({ word, said: ladderDecision('yolo', classification!, approve).reason.includes(`(${word})`) }).toEqual({ word, said: true })
+  }
+  // An ordinary write keeps the plain yolo reason: the extra words are only for
+  // a write the guard read as destructive.
+  const plain = classifyCall(CLI, { command: 'dataset create', args: ['people'] }, MANIFEST, 'agent/x')
+  expect(plain?.destructiveWhy).toBe(undefined)
+  expect(ladderDecision('yolo', plain!, approve).reason).toBe('yolo mode: nothing else asks; work stays on branches that are not main')
+})
+
 test('the term table reads the 0.7.11 surface by what each write leaves gone', async () => {
   for (const [path, destructive] of SURFACE) {
     expect({ path, term: destructiveTermIn(path) !== null }).toEqual({ path, term: destructive })
   }
+  // The table above lists every destructive-named command of the pinned
+  // surface, so a re-pin that adds one fails here rather than quietly leaving
+  // the table shorter than the surface it claims to cover.
+  expect(SURFACE.filter(([, destructive]) => destructive).length).toBe(SURFACE_TRUE)
 })
 
 // ---------------------------------------------------------------------------

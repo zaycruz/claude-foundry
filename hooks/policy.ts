@@ -135,6 +135,12 @@ export type GateClassification = {
   hasWorkingBranch: boolean
   targetsProtected: boolean
   isDestructive: boolean
+  /** Why it read as destructive: the word in its name, the flag it was given,
+   * or `--force`. Carried into the ask and the debug log, so the operator
+   * deciding the dialog and whoever reads the log later can tell the three
+   * apart (`data-health check-group update --remove-check …` is not a
+   * `project remove-orgs`). */
+  destructiveWhy?: string
   proposedName?: string
   /** The question to put to the operator for a release tag apply. */
   release?: string
@@ -191,7 +197,7 @@ export function classifyOrthancCommand(
  * Read on every word of a command path and every hyphen part of a word, so
  * `resource permanently-delete`, `project remove-orgs` and a future
  * `orthanc remove resource` all count, and on a flag name
- * (`destructiveFlagIn`). Measured on the 541 names of 0.7.11, every destructive
+ * (`destructiveFlag`). Measured on the 541 names of 0.7.11, every destructive
  * word sits in the last word of its path, so reading the whole path asks
  * nothing new today and covers a name that puts the verb first. Never read a
  * value, a positional or a branch name: `--mode keep-outputs`,
@@ -241,31 +247,46 @@ function destructiveWords(): string {
  * split on hyphens, so `permanently-delete` and `remove-orgs` read; case is
  * ignored. An argument reaches here only as a flag name, so a value, a
  * positional or a branch name carries nothing into the answer. */
+/** One word per run of letters and digits, so `-`, `_` and a space all split a
+ * name: `permanently-delete`, `remove-orgs`, `delete_object` and
+ * `--remove-check` all read, and the leading `--` of a flag carries nothing. */
 export function destructiveTermIn(name: string): string | null {
-  const words = (name.trim().toLowerCase().match(/[a-z0-9-]+/g) ?? []).flatMap(token => token.replace(/^-+/, '').split('-'))
+  const words = name.toLowerCase().match(/[a-z0-9]+/g) ?? []
   return words.find(word => TERMS.has(word)) ?? null
 }
 
 /** A flag whose name says what the write removes: `--remove`, `--remove-check`,
- * `--remove-resource`, `--delete-project`, `--delete-object-type`. Measured
- * against every flag of 0.7.11 (`orthanc --agent agent-manifest` on the v0.7.11
- * release binary; the flags are not in the pinned snapshot), those five are all
- * a name match ever selects.
+ * `--remove-resource`, `--delete-project`, `--delete-object-type`. The flags are
+ * not in the pinned snapshot, so this is measured against the binary the pin
+ * names, and re-run that way before the pin moves:
+ *
+ *   gh release download v0.7.11 --repo zaycruz/orthanc --pattern '*linux-gnu.tar.gz*'
+ *   tar xzf orthanc-x86_64-unknown-linux-gnu.tar.gz && ./orthanc --agent agent-manifest \
+ *     | jq -r '.data.commands[] | .path as $p | .args[]? | [.flag] | @tsv' | sort -u
+ *
+ * On 0.7.11 those five are all a name match ever selects.
  * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
- * build when one job fails), so it reads as no claim. Measured too: no `--no-…`
- * flag of 0.7.11 holds a destructive word, so the negation rule is for the next
- * pin — a flag that denies what it names is not a claim that the write erases.
+ * build when one job fails), so it reads as no claim; the exemption is by flag
+ * name, not by command, because the name says the same thing wherever it
+ * appears. Measured too: no `--no-…` flag of 0.7.11 holds a destructive word, so
+ * the negation rule is for the next pin — a flag that denies what it names is
+ * not a claim that the write erases.
  * The two negations that drop a protection (`--no-read-only`,
  * `--no-auto-protect-new-resources`) are marked `operator_approval` by Orthanc
  * and ask on that. */
 const NON_DESTRUCTIVE_FLAGS = new Set(['--abort-on-failure'])
 
-function destructiveFlagIn(args: readonly string[]): boolean {
-  return args.some(arg => {
-    const flag = flagNameOf(arg)
-    if (!flag.startsWith('-') || NON_DESTRUCTIVE_FLAGS.has(flag) || flag.startsWith('--no-')) return false
-    return destructiveTermIn(flag) !== null
-  })
+/** The flag whose name says what the write removes, or null: `--remove`,
+ * `--remove-check`, `--remove-resource`, `--delete-project`,
+ * `--delete-object-type`. */
+function destructiveFlag(args: readonly string[]): string | null {
+  return args.map(flagNameOf).find(flag => flag.startsWith('-') && !NON_DESTRUCTIVE_FLAGS.has(flag) && !flag.startsWith('--no-') && destructiveTermIn(flag) !== null) ?? null
+}
+
+/** Why a write reads as destructive, in the words the operator is told: a word
+ * in the command name, a flag that names what the write removes, or `--force`. */
+function destructiveTrigger(command: string, args: readonly string[]): string | null {
+  return destructiveTermIn(command) ?? destructiveFlag(args) ?? (argsHaveForce(command, args) ? '--force' : null)
 }
 
 /** One arg as the flag it names, in any case, with or without a `=value`
@@ -680,11 +701,13 @@ function orthancClassification(
         : null
     const approval = operatorApprovalQuestion(command, args, manifest)
     const approvalOnBranch = approval !== null && approvalOnWorkBranch(command, args, manifest)
+    const trigger = destructiveTrigger(command, args)
     return {
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
-      isDestructive: destructiveTermIn(command) !== null || destructiveFlagIn(args) || argsHaveForce(command, args),
+      isDestructive: trigger !== null,
+      ...(trigger === null ? {} : { destructiveWhy: trigger }),
       ...(release !== null ? release : {}),
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
@@ -1304,6 +1327,7 @@ export function classifyCall(
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
   if (PALANTIR_MCP.test(tool)) {
     const inner = tool.replace(PALANTIR_MCP, '')
+    const mcpWord = destructiveTermIn(inner)
     if (classifyMcpIntent(inner) === 'read') return null
     return {
       command: null,
@@ -1314,7 +1338,8 @@ export function classifyCall(
       // A Palantir MCP write is blocked either way (Orthanc is the only write
       // path); the words say whether it also reads as destructive, in the same
       // words the orthanc lane reads.
-      isDestructive: destructiveTermIn(inner) !== null,
+      isDestructive: mcpWord !== null,
+      ...(mcpWord === null ? {} : { destructiveWhy: mcpWord }),
       error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
     }
   }
@@ -1357,9 +1382,15 @@ export function ladderDecision(
       reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
     }
   }
-  if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
+  if (mode === 'yolo')
+    return {
+      outcome: 'run',
+      reason: classification.destructiveWhy
+        ? `yolo mode: nothing else asks; this write is destructive (${classification.destructiveWhy}) and runs with no ask`
+        : 'yolo mode: nothing else asks; work stays on branches that are not main',
+    }
   if (classification.isDestructive) {
-    return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode but yolo${note}` }
+    return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${note}` }
   }
   if (classification.targetsProtected) {
     return {
