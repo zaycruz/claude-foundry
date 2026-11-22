@@ -74,7 +74,7 @@ function flagsFrom(args: unknown): ManifestFlag[] {
 // gives them that wait, any fixed time Orthanc adds around it, one poll
 // interval (Orthanc can overshoot its deadline by one) and a margin, so Orthanc
 // reports its own timeout instead of being killed. A command bounds its wait
-// with one of four flags (`--timeout`, `--timeout-seconds`, `--publish-grace`,
+// with one of five flags (`--timeout`, `--timeout-seconds`, `--publish-grace`,
 // `--readback-timeout`, `--time-budget-seconds`) and the timer adds every one
 // it names. The floor is the old fixed
 // 300 s; the cap is Orthanc's longest default wait (ai-fde run: 1800 s plus
@@ -112,6 +112,9 @@ const AI_FDE_RUN_EXTRA: WaitExtra = {
 // A Marketplace install or upgrade waits two job drafts and the job itself:
 // 120 s + 120 s + 540 s = 780 s, orthanc's own bound (src/marketplace_draft.rs,
 // MI30). The job wait is the command's; the two draft waits are fixed around it.
+// `--time-budget-seconds`, the other soft bound counted here, is `reported in
+// the budget only` for the dependency reads: orthanc notes it and may still run
+// past it, so counting it only ever lengthens the timer.
 const MARKETPLACE_INSTALL_EXTRA: WaitExtra = {
   defaults: { '--timeout': '540' },
   aroundS: 120 + 120,
@@ -130,11 +133,11 @@ const WAIT_EXTRAS: Readonly<Record<string, WaitExtra>> = {
     stoppedHint:
       "The version may still be finalising in Foundry: read the draft with 'devops draft get <draft>' before you publish it again.",
   },
-  // A Marketplace install or upgrade waits two drafts and the job: 120 s + 120 s
-  // + 540 s (orthanc-source src/marketplace_draft.rs, MI30). The job wait is the
-  // command's own; the two draft waits are the fixed time around it.
+  // A Marketplace install or upgrade: see MARKETPLACE_INSTALL_EXTRA.
   'marketplace installation create': MARKETPLACE_INSTALL_EXTRA,
   'marketplace installation upgrade': MARKETPLACE_INSTALL_EXTRA,
+  // `job cancel --wait` waits only the job (orthanc-source
+  // src/marketplace_uninstall.rs → marketplace_draft.rs::wait_job).
   'marketplace job cancel': {
     defaults: { '--timeout': '540' },
     aroundS: 0,
