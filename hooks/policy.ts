@@ -176,43 +176,51 @@ export function classifyOrthancCommand(
  *
  * The rule used to read one word, `delete`, and only as the whole last word of
  * a command path. Measured on the orthanc 0.7.11 agent-manifest the plugin pins
- * (260 mutation and local commands), 26 of them name an erasure in another
- * word: 15 asked nobody outside yolo (`marketplace installation uninstall`,
- * "the plan previews what is deleted"; `streams stream reset`, "Clear all
- * records from the stream on a branch"; `dataset transactions abort`,
- * "discard its changes"; `devops draft abort`, "Drop a draft"; `alias clear`,
- * "Delete all saved aliases"; the two `project …remove…`, `repository imports
- * remove`, `dev-console scope remove`, `media-sets input-schema remove`,
- * `connectivity code-import remove-importer`, the two `… check/schedule
- * replace`, `admin org replace`), and 11 more asked only when the operator
- * flag Orthanc marks them on (`resource remove-markings`,
- * `resource-role revoke`, `global-branch remove-repo`, `… remove-resources`,
+ * (541 command names, 260 of them mutation or local): 25 writes the old rule
+ * read, 51 carry a word in this table. The 26 it missed split two ways. 15
+ * asked nobody outside yolo — `marketplace installation uninstall` ("the plan
+ * previews what is deleted"), `streams stream reset` ("Clear all records from
+ * the stream on a branch"), `dataset transactions abort` ("discard its
+ * changes"), `devops draft abort` ("Drop a draft"), `alias clear` ("Delete all
+ * saved aliases"), `alias remove`, the two `project …remove…`,
+ * `repository imports remove`, `dev-console scope remove`,
+ * `media-sets input-schema remove`, `connectivity code-import remove-importer`,
+ * `data-health check replace`, `orchestration schedules replace`,
+ * `admin org replace`. 11 more asked only with the `--apply` their
+ * `operator_approval` condition names, so the same call without it ran:
+ * `resource remove-markings`, `resource-role revoke`,
+ * `global-branch remove-repo`, `global-branch remove-resources`,
  * `repository checks required remove`, `branch-protection repo unprotect`,
  * `admin marking replace`, `admin group member remove`, `workshop module
- * revert`, `solution-design node/edge remove`) was given, so the same call
- * without `--apply` ran. The act is the same; the ask is keyed on the act.
- * `discard`, `purge`, `repair`, `overwrite`, `destroy`, `truncate`, `wipe` and
- * `erase` name no command on 0.7.11: they cover a rename before the next pin.
+ * revert`, `solution-design node remove`, `solution-design edge remove`. The act
+ * is the same; the ask is keyed on the act, not on the word orthanc chose.
  *
- * Read on every word of a command path and every hyphen part of a word, so
- * `resource permanently-delete`, `project remove-orgs` and a future
- * `orthanc remove resource` all count, and on a flag name
- * (`destructiveFlag`). Measured on the 541 names of 0.7.11, every destructive
- * word sits in the last word of its path, so reading the whole path asks
- * nothing new today and covers a name that puts the verb first. Never read a
- * value, a positional or a branch name: `--mode keep-outputs`,
- * `--branch delete-me` and `alias remove delete` say nothing about what the
- * write erases.
+ * `purge`, `discard`, `destroy`, `truncate`, `wipe`, `erase`, `repair` and
+ * `overwrite` name no command on 0.7.11: they cover a rename before the next
+ * pin. `repair` and `overwrite` are the words the parity cycle of 2026-11-22
+ * named for writes it saw planned; a sync-gap repair rewrites history, so its
+ * plain form in the sentence the operator reads is 'rewritten'.
+ *
+ * Read on every word of a command path, and on a flag name
+ * (`destructiveFlag`), split on anything that is not a letter or a digit, so
+ * `resource permanently-delete`, `project remove-orgs`, `delete_object` and a
+ * future `orthanc remove resource` all count. Measured on the 541 names of
+ * 0.7.11, every destructive word sits in the last word of its path, so reading
+ * the whole path asks nothing new today and covers a name that puts the verb
+ * first. Never read a value, a positional or a branch name: `--mode
+ * keep-outputs`, `--branch delete-me` and `alias remove delete` say nothing
+ * about what the write erases.
  *
  * `set`, `update`, `add`, `close`, `cancel`, `pause` and `restore` stay out:
  * they change or stop something that is still there, and the `auto` guard
- * judges them. A `remove`/`revoke`/`unprotect` that only drops a reference is
- * in: it is the same word, and the guard cannot tell a reference from a record.
+ * judges them. A `remove`, `revoke` or `unprotect` that only drops a reference
+ * is in: it is the same word, and the guard cannot tell a reference from a
+ * record.
  *
- * One table, in the order the guidance reads it: each word with what it leaves,
- * in the plain form the operator and the model are told. `modeGuidance` builds
- * its sentence from the second column, so the wording an operator reads cannot
- * fall behind the rule that asked them (pinned by destructive.test.ts D11).
+ * The table carries each word with what it leaves, in the plain form the
+ * operator and the model are told, and `modeGuidance` builds its sentence from
+ * that second column, so the wording an operator reads cannot fall behind the
+ * rule that asked them (pinned by destructive.test.ts D11).
  */
 export const DESTRUCTIVE_WORDS = [
   ['delete', 'deleted'],
@@ -224,12 +232,12 @@ export const DESTRUCTIVE_WORDS = [
   ['reset', 'reset'],
   ['revert', 'reverted'],
   ['replace', 'replaced'],
-  ['repair', 'repaired'],
+  ['repair', 'rewritten'],
   ['overwrite', 'overwritten'],
   ['truncate', 'truncated'],
   ['abort', 'aborted'],
   ['revoke', 'revoked'],
-  ['unprotect', 'taken off'],
+  ['unprotect', 'unprotected'],
   ['destroy', 'destroyed'],
   ['wipe', 'wiped'],
   ['erase', 'erased'],
@@ -243,13 +251,12 @@ function destructiveWords(): string {
   return `${forms.slice(0, -1).join(', ')} or ${forms.at(-1)}`
 }
 
-/** The destructive word in a command path or a flag name, or null. Words are
- * split on hyphens, so `permanently-delete` and `remove-orgs` read; case is
- * ignored. An argument reaches here only as a flag name, so a value, a
- * positional or a branch name carries nothing into the answer. */
-/** One word per run of letters and digits, so `-`, `_` and a space all split a
- * name: `permanently-delete`, `remove-orgs`, `delete_object` and
- * `--remove-check` all read, and the leading `--` of a flag carries nothing. */
+/** The destructive word in a command path or a flag name, or null. One word per
+ * run of letters and digits, so `-`, `_` and a space all split a name and the
+ * leading `--` of a flag carries nothing: `permanently-delete`, `remove-orgs`,
+ * `delete_object` and `--remove-check` all read. Case is ignored. An argument
+ * reaches this only as a flag name, so a value, a positional or a branch name
+ * carries nothing into the answer. */
 export function destructiveTermIn(name: string): string | null {
   const words = name.toLowerCase().match(/[a-z0-9]+/g) ?? []
   return words.find(word => TERMS.has(word)) ?? null
