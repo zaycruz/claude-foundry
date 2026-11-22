@@ -165,10 +165,78 @@ export function classifyOrthancCommand(
   return 'mutation'
 }
 
-function isDestructiveCommand(command: string): boolean {
-  return lastWord(command.trim().toLowerCase()).split('-').at(-1) === 'delete'
+/**
+ * A word that says the write leaves something gone or overwritten.
+ *
+ * The rule used to read one word, `delete`, and only as the whole last word of
+ * a command path. Measured on the orthanc 0.7.11 agent-manifest the plugin pins
+ * (260 mutation and local commands), 26 of them name an erasure in another
+ * word: 15 asked nobody outside yolo (`marketplace installation uninstall`,
+ * "the plan previews what is deleted"; `streams stream reset`, "Clear all
+ * records from the stream on a branch"; `dataset transactions abort`,
+ * "discard its changes"; `devops draft abort`, "Drop a draft"; `alias clear`,
+ * "Delete all saved aliases"; the two `project …remove…`, `repository imports
+ * remove`, `dev-console scope remove`, `media-sets input-schema remove`,
+ * `connectivity code-import remove-importer`, the two `… check/schedule
+ * replace`, `admin org replace`), and 11 more asked only when the operator
+ * flag Orthanc marks them on (`resource remove-markings`,
+ * `resource-role revoke`, `global-branch remove-repo`, `… remove-resources`,
+ * `repository checks required remove`, `branch-protection repo unprotect`,
+ * `admin marking replace`, `admin group member remove`, `workshop module
+ * revert`, `solution-design node/edge remove`) was given, so the same call
+ * without `--apply` ran. The act is the same; the ask is keyed on the act.
+ * `discard`, `purge`, `destroy`, `truncate`, `wipe` and `erase` name no command
+ * on 0.7.11: they cover a rename before the next pin.
+ *
+ * Read on every word of a command path and every hyphen part of a word, so
+ * `resource permanently-delete`, `project remove-orgs` and a future
+ * `orthanc remove resource` all count, and on a flag name
+ * (`destructiveFlagIn`). Measured on the 541 names of 0.7.11, every destructive
+ * word sits in the last word of its path, so reading the whole path asks
+ * nothing new today and covers a name that puts the verb first. Never read a
+ * value, a positional or a branch name: `--mode keep-outputs`,
+ * `--branch delete-me` and `alias remove delete` say nothing about what the
+ * write erases.
+ *
+ * `set`, `update`, `add`, `close`, `cancel`, `pause` and `restore` stay out:
+ * they change or stop something that is still there, and the `auto` guard
+ * judges them. A `remove`/`revoke`/`unprotect` that only drops a reference is
+ * in: it is the same word, and the guard cannot tell a reference from a record.
+ */
+const DESTRUCTIVE_TERMS = new Set([
+  'abort', 'clear', 'delete', 'destroy', 'discard', 'erase', 'purge', 'remove', 'replace', 'reset', 'revert', 'revoke', 'truncate', 'uninstall', 'unprotect', 'wipe',
+])
+
+/** The destructive word in a command path or a flag name, or null. Words are
+ * split on hyphens, so `permanently-delete` and `remove-orgs` read; case is
+ * ignored. An argument reaches here only as a flag name, so a value, a
+ * positional or a branch name carries nothing into the answer. */
+export function destructiveTermIn(name: string): string | null {
+  const words = (name.trim().toLowerCase().match(/[a-z0-9-]+/g) ?? []).flatMap(token => token.replace(/^-+/, '').split('-'))
+  return words.find(word => DESTRUCTIVE_TERMS.has(word)) ?? null
 }
 
+/** A flag whose name says what the write removes: `--remove`, `--remove-check`,
+ * `--remove-resource`, `--delete-project`, `--delete-object-type`. Measured
+ * against every flag of 0.7.11, those five are all a name match ever selects.
+ * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
+ * build when one job fails), and a `--no-…` flag denies what it names, so both
+ * read as no claim. A negation that drops a protection (`--no-read-only`,
+ * `--no-auto-protect-new-resources`) is marked `operator_approval` by Orthanc
+ * and asks on that. */
+const NON_DESTRUCTIVE_FLAGS = new Set(['--abort-on-failure'])
+
+function destructiveFlagIn(args: readonly string[]): boolean {
+  return args.some(arg => {
+    const flag = unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
+    if (!flag.startsWith('-') || NON_DESTRUCTIVE_FLAGS.has(flag) || flag.startsWith('--no-')) return false
+    return destructiveTermIn(flag) !== null
+  })
+}
+
+function isDestructiveCommand(command: string): boolean {
+  return destructiveTermIn(command) !== null
+}
 /** True when any arg names one of these flags, in any case, with or without a
  * `=value` (`--force`, `--APPLY`, `--apply=true`). Over-matching only asks more. */
 function argsNameFlag(args: readonly string[], names: readonly string[]): boolean {
@@ -582,7 +650,7 @@ function orthancClassification(
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
-      isDestructive: isDestructiveCommand(command) || argsHaveForce(command, args),
+      isDestructive: isDestructiveCommand(command) || destructiveFlagIn(args) || argsHaveForce(command, args),
       ...(release !== null ? release : {}),
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
@@ -1144,7 +1212,9 @@ const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'li
 
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   const words = inner.toLowerCase().split(/[^a-z]+/)
-  if (words.some(word => WRITE_WORDS.has(word))) return 'write'
+  // A destructive word outranks a read word: `get_uninstall_plan` names an
+  // uninstall, and a read that reads as a write only costs a refusal.
+  if (words.some(word => WRITE_WORDS.has(word) || DESTRUCTIVE_TERMS.has(word))) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
   if (words.some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
@@ -1207,7 +1277,10 @@ export function classifyCall(
       isBranchScoped: false,
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
-      isDestructive: inner.toLowerCase().split(/[^a-z]+/).includes('delete'),
+      // A Palantir MCP write is blocked either way (Orthanc is the only write
+      // path); the words say whether it also reads as destructive, in the same
+      // words the orthanc lane reads.
+      isDestructive: inner.toLowerCase().split(/[^a-z]+/).some(word => DESTRUCTIVE_TERMS.has(word)),
       error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
     }
   }
@@ -1275,12 +1348,14 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes and --force writes run at once, ' +
+      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: destructive writes (a delete, a removal, an uninstall, a reset, a revert) and --force writes run at once, ' +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
+        'A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is deleted, removed, ' +
+        'uninstalled, purged, discarded, cleared, reset, reverted or replaced, or when it is given --force. ' +
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +

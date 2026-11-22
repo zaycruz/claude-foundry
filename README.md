@@ -20,10 +20,17 @@ says so instead of falling back to REST.
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
-  judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
-  delete, `--force`) and release tags ask, protected branches ask, and a call
-  repeated three times is blocked. In `yolo` only a write on main asks:
-  deletes and `--force` writes run at once, and the loop guard is off. A
+  judges each mutation) and `yolo`. Outside `yolo`, destructive changes ask (a
+  write whose command name, or one of its flags, says something is deleted,
+  removed, uninstalled, purged, discarded, cleared, reset, reverted or
+  replaced, or one given `--force`), as do release tags and protected branches,
+  and a call repeated three times is blocked. In `yolo` only a write on main
+  asks: destructive writes run at once, and the loop guard is off. The rule
+  reads the command's name and its flags, never a value, so
+  `marketplace installation uninstall`, `streams stream reset`,
+  `dataset transactions abort`, `project remove-orgs` and `alias clear` ask
+  like `resource delete` does, and `--mode keep-outputs` or a branch named
+  `delete-me` asks nothing. A
   release tag with no `--branch <global branch RID>` is a release on main and
   asks in `yolo` too. A write that Orthanc's agent manifest marks
   `operator_approval` (turning branch protection off, removing a required
