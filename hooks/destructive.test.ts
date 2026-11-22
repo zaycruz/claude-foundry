@@ -66,7 +66,9 @@ import { expect, test } from 'claude-code/testing'
 import {
   classifyCall,
   classifyMcpIntent,
+  DESTRUCTIVE_FORMS,
   destructiveTermIn,
+  DESTRUCTIVE_TERMS,
   ladderDecision,
   type ManifestCommand,
   modeGuidance,
@@ -355,6 +357,18 @@ test('D10: --force still asks, the ask reason names the command, and the MCP lan
     'write',
     'write',
   ])
+})
+
+test('D11: the words the operator is told match the words the guard reads', async () => {
+  // One plain form per word, and both guidance sentences carry every one of
+  // them: an operator told the rule asks for "a delete" would not know why an
+  // uninstall or a revoke asked.
+  expect(DESTRUCTIVE_FORMS.length).toBe(DESTRUCTIVE_TERMS.length)
+  expect(DESTRUCTIVE_TERMS.every(term => destructiveTermIn(`orthanc group ${term}`) === term)).toBe(true)
+  for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+    const guidance = modeGuidance(mode)
+    for (const form of DESTRUCTIVE_FORMS) expect({ mode, form, said: guidance.includes(form) }).toEqual({ mode, form, said: true })
+  }
 })
 
 // The term table's effect on every command name of the tied 0.7.11 surface that

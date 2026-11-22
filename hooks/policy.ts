@@ -202,10 +202,27 @@ export function classifyOrthancCommand(
  * they change or stop something that is still there, and the `auto` guard
  * judges them. A `remove`/`revoke`/`unprotect` that only drops a reference is
  * in: it is the same word, and the guard cannot tell a reference from a record.
+ *
+ * `DESTRUCTIVE_TERMS` and `DESTRUCTIVE_FORMS` are parallel, in the order the
+ * guidance reads them: every word has one plain form, and `modeGuidance` is
+ * built from the forms, so the sentence an operator reads cannot fall behind
+ * the rule that asked them (pinned by destructive.test.ts D11).
  */
-const DESTRUCTIVE_TERMS = new Set([
-  'abort', 'clear', 'delete', 'destroy', 'discard', 'erase', 'overwrite', 'purge', 'remove', 'repair', 'replace', 'reset', 'revert', 'revoke', 'truncate', 'uninstall', 'unprotect', 'wipe',
-])
+export const DESTRUCTIVE_TERMS = [
+  'delete', 'remove', 'uninstall', 'purge', 'discard', 'clear', 'reset', 'revert', 'replace', 'repair', 'overwrite', 'truncate', 'abort', 'revoke', 'unprotect', 'destroy', 'wipe', 'erase',
+] as const
+
+/** What each word leaves, in the plain form the operator and the model read. */
+export const DESTRUCTIVE_FORMS = [
+  'deleted', 'removed', 'uninstalled', 'purged', 'discarded', 'cleared', 'reset', 'reverted', 'replaced', 'repaired', 'overwritten', 'truncated', 'aborted', 'revoked', 'taken off', 'destroyed', 'wiped', 'erased',
+] as const
+
+const TERMS = new Set<string>(DESTRUCTIVE_TERMS)
+
+/** 'deleted, removed, …, destroyed or erased', for the guidance sentence. */
+function destructiveWords(): string {
+  return `${DESTRUCTIVE_FORMS.slice(0, -1).join(', ')} or ${DESTRUCTIVE_FORMS.at(-1)}`
+}
 
 /** The destructive word in a command path or a flag name, or null. Words are
  * split on hyphens, so `permanently-delete` and `remove-orgs` read; case is
@@ -213,7 +230,7 @@ const DESTRUCTIVE_TERMS = new Set([
  * positional or a branch name carries nothing into the answer. */
 export function destructiveTermIn(name: string): string | null {
   const words = (name.trim().toLowerCase().match(/[a-z0-9-]+/g) ?? []).flatMap(token => token.replace(/^-+/, '').split('-'))
-  return words.find(word => DESTRUCTIVE_TERMS.has(word)) ?? null
+  return words.find(word => TERMS.has(word)) ?? null
 }
 
 /** A flag whose name says what the write removes: `--remove`, `--remove-check`,
@@ -1216,7 +1233,7 @@ export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   const words = inner.toLowerCase().split(/[^a-z]+/)
   // A destructive word outranks a read word: `get_uninstall_plan` names an
   // uninstall, and a read that reads as a write only costs a refusal.
-  if (words.some(word => WRITE_WORDS.has(word) || DESTRUCTIVE_TERMS.has(word))) return 'write'
+  if (words.some(word => WRITE_WORDS.has(word) || TERMS.has(word))) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
   if (words.some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
@@ -1282,7 +1299,7 @@ export function classifyCall(
       // A Palantir MCP write is blocked either way (Orthanc is the only write
       // path); the words say whether it also reads as destructive, in the same
       // words the orthanc lane reads.
-      isDestructive: inner.toLowerCase().split(/[^a-z]+/).some(word => DESTRUCTIVE_TERMS.has(word)),
+      isDestructive: inner.toLowerCase().split(/[^a-z]+/).some(word => TERMS.has(word)),
       error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
     }
   }
@@ -1350,14 +1367,14 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: destructive writes (a delete, a removal, an uninstall, a reset, a revert) and --force writes run at once, ' +
+      ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()}) and a --force write run at once, ` +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
-        'A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is deleted, removed, ' +
-        'uninstalled, purged, discarded, cleared, reset, reverted or replaced, or when it is given --force. ' +
+        `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
+        'or when it is given --force. ' +
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
