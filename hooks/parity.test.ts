@@ -541,6 +541,26 @@ test('L2: /fde resume keeps the picks that came off the branch it rebinds', asyn
   expect(h.calls).toContain(`ontology link-type-list ${ONT.rid} --branch ${BRANCH.rid}`)
 })
 
+test('main picks survive ending bindings alongside branch picks', async ($, on) => {
+  const h = harness(on)
+  await open($)
+  await say($, 'link-type', FIRST_ORDERS)
+  await say($, 'interface', IFACE.name)
+  await say($, 'fde', `--branch ${BRANCH.rid} first branch`)
+  // Reopening the picker must not relabel its existing main selection.
+  await say($, 'link-type', LINK_TWO.name)
+  expect(saved(h).resources.linkTypes?.find(item => item.rid === LINK_ONE.rid)?.branchRid).toBeUndefined()
+  expect(saved(h).resources.linkTypes?.find(item => item.rid === LINK_TWO.rid)?.branchRid).toBe(BRANCH.rid)
+  await say($, 'fde', 'end')
+  expect(saved(h).resources.linkTypes?.map(item => item.rid)).toEqual([LINK_ONE.rid])
+  expect(saved(h).resources.interfaces?.map(item => item.rid)).toEqual([IFACE.rid])
+  await say($, 'fde', `--branch ${BRANCH_TWO.rid} second branch`)
+  await say($, 'link-type', LINK_TWO.name)
+  await say($, 'fde', 'end')
+  expect(saved(h).resources.linkTypes?.map(item => item.rid)).toEqual([LINK_ONE.rid])
+  expect(saved(h).resources.interfaces?.map(item => item.rid)).toEqual([IFACE.rid])
+})
+
 test('L2: ending FDE mode while on another stack still drops that branch\'s picks', async ($, on) => {
   const h = harness(on)
   await open($)
@@ -567,6 +587,12 @@ test('L2: /fde end after a restart drops the picks made under that binding', asy
   // Both /fde end and a new /fde on act on that binding, so its picks go with it.
   h.store.set('fdeOpen', storedSession())
   expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  const scopes = h.store.get('scopes') as Record<string, unknown>
+  const entry = saved(h)
+  entry.resources.linkTypes![0]!.branchRid = BRANCH.rid
+  h.store.set('scopes', { ...scopes, tester: entry })
+  // Reload the saved scope after the session atom has gone away.
+  await say($, 'profile', 'tester')
   expect(await say($, 'fde', 'end')).toContain('# FDE handoff')
   expect(saved(h).resources.linkTypes).toBeUndefined()
   expect(await say($, 'link-type', '')).toContain(LINK_ONE.name)
@@ -576,10 +602,17 @@ test('L2: /fde end after a restart drops the picks made under that binding', asy
 test('L2: a new /fde on after a restart drops the picks made under the binding it replaces', async ($, on) => {
   const h = harness(on)
   await open($)
+  await say($, 'interface', IFACE.name)
   h.store.set('fdeOpen', storedSession())
   expect(await say($, 'link-type', FIRST_ORDERS)).toContain(`Link types: ${LINK_ONE.name}`)
+  const scopes = h.store.get('scopes') as Record<string, unknown>
+  const entry = saved(h)
+  entry.resources.linkTypes![0]!.branchRid = BRANCH.rid
+  h.store.set('scopes', { ...scopes, tester: entry })
+  await say($, 'profile', 'tester')
   expect(await say($, 'fde', `--branch ${BRANCH_TWO.rid} the second branch`)).toContain('FDE mode on')
   expect(saved(h).resources.linkTypes).toBeUndefined()
+  expect(saved(h).resources.interfaces?.map(item => item.rid)).toEqual([IFACE.rid])
 })
 
 test('L1: /object-type and /action-type list the ontology in scope, and stay on main', async ($, on) => {

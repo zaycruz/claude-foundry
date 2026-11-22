@@ -213,7 +213,7 @@ const types = (value: unknown): FoundryObjectType[] =>
 const resourcesOf = (value: unknown): FoundryResource[] =>
   Array.isArray(value)
     ? value.filter(isRecord).flatMap(entry =>
-        typeof entry.rid === 'string' ? [{ rid: entry.rid, name: asString(entry.name) || entry.rid, hint: asString(entry.hint) }] : [],
+        typeof entry.rid === 'string' ? [{ rid: entry.rid, name: asString(entry.name) || entry.rid, hint: asString(entry.hint), ...(typeof entry.branchRid === 'string' && entry.branchRid ? { branchRid: entry.branchRid } : {}) }] : [],
       )
     : []
 

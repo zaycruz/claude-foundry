@@ -26,7 +26,7 @@ export type FoundryResourceKind =
   | 'automations'
 
 /** One selected resource: its RID (or key), display name and a path or type hint. */
-export type FoundryResource = { rid: string; name: string; hint: string }
+export type FoundryResource = { rid: string; name: string; hint: string; branchRid?: string }
 
 export type FoundryScope = {
   profile: string

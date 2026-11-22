@@ -800,24 +800,21 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 // A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
   spaceCache.clear()
-  // Link types and interfaces are the picks made under a binding: read off its
-  // branch while it matched the scope, off main otherwise. They go when that
-  // binding is replaced or ended, whichever branch a given pick came from. The
-  // binding is looked for in the store too: after a restart the session atom is
-  // gone, and /fde end and a new /fde on still act on the binding the mirror names,
-  // whose picks startupScope put back into scope. A first binding with nothing
-  // behind it clears nothing. The binding is stored first: if the clear cannot be
-  // saved, the session is left on the branch it was told about, not on the old one.
+  // The store mirror also identifies the outgoing binding after a restart.
+  // Store the new binding first, so a failed scope write cannot leave the old
+  // branch active after the operator has ended or replaced it.
   const earlier = (await fdeState($)) ?? (await fdeFromEarlier($))
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
-  if (earlier !== null && earlier.branchRid !== (fde?.branchRid ?? '')) await dropBranchPicks($, earlier.profile)
+  if (earlier !== null && (earlier.branchRid !== fde?.branchRid || earlier.profile !== fde?.profile || earlier.ontologyRid !== fde?.ontologyRid)) await dropBranchPicks($, earlier)
 }
 
-/** The empty value of every scope key read off the bound branch; fresh each call. */
-const branchReadKeys = (): Record<string, FoundryResource[]> =>
-  Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, [] as FoundryResource[]]))
+/** Remove only picks first selected on this branch. Untagged picks came from main. */
+const withoutBranchPicks = (scope: FoundryScope, branchRid: string): FoundryScope => ({
+  ...scope,
+  resources: { ...scope.resources, ...Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, (scope.resources[def.resource] ?? []).filter(item => item.branchRid !== branchRid)])) },
+})
 
 /**
  * Takes the branch-read picks out of one stack's scope. That stack is not the
@@ -825,17 +822,16 @@ const branchReadKeys = (): Record<string, FoundryResource[]> =>
  * bound, so the picks are dropped where they were saved (same shape as
  * storeNamespace, which reaches another stack's record for the same reason).
  */
-async function dropBranchPicks($: EngineInterface, profile: string): Promise<void> {
+async function dropBranchPicks($: EngineInterface, binding: FdeSession): Promise<void> {
   const active = await currentScope($)
-  if (active.profile === profile) {
-    await saveScope($, { ...active, resources: { ...active.resources, ...branchReadKeys() } })
+  if (active.profile === binding.profile) {
+    if (active.ontology?.rid === binding.ontologyRid) await saveScope($, withoutBranchPicks(active, binding.branchRid))
     return
   }
   const stored = await storedScopes($)
-  const entry = normalizeScope(stored[profile], profile, '')
-  const cleared = branchReadKeys()
-  if (Object.keys(cleared).every(key => ((entry.resources as Record<string, FoundryResource[]>)[key]?.length ?? 0) === 0)) return
-  await $.store.set('scopes', { ...stored, [profile]: { ...entry, resources: { ...entry.resources, ...cleared }, updatedAt: new Date().toISOString() } })
+  const entry = normalizeScope(stored[binding.profile], binding.profile, '')
+  if (entry.ontology?.rid !== binding.ontologyRid) return
+  await $.store.set('scopes', { ...stored, [binding.profile]: { ...withoutBranchPicks(entry, binding.branchRid), updatedAt: new Date().toISOString() } })
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
@@ -1369,7 +1365,15 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
   if (picker.resourceKind !== undefined) {
     const kind = picker.resourceKind
     const asResource = (item: FoundryPickItem): FoundryResource => ({ rid: item.key, name: item.label, hint: item.hint })
-    const merged = mergeSelections(scope.resources[kind] ?? [], chosen.map(asResource), picker.items.map(asResource))
+    const existing = scope.resources[kind] ?? []
+    const branch = (picker.kind === 'link-type' || picker.kind === 'interface') && scope.ontology
+      ? readBranch(await fdeState($), scope.profile, scope.ontology.rid) : null
+    const selected = chosen.map(item => {
+      const previous = existing.find(entry => entry.rid === item.key)
+      const branchRid = previous ? previous.branchRid : branch?.rid
+      return { ...asResource(item), ...(branchRid ? { branchRid } : {}) }
+    })
+    const merged = mergeSelections(existing, selected, picker.items.map(asResource))
     await saveScope($, { ...scope, resources: { ...scope.resources, [kind]: merged } })
     return pickedText(kind, merged)
   }
