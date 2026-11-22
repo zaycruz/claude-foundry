@@ -272,11 +272,13 @@ export function destructiveTermIn(name: string): string | null {
  *     | jq -r '.data.commands[] | .path as $p | .args[]? | [.flag] | @tsv' | sort -u
  *
  * On 0.7.11 six flag names carry a word: these five, and `--abort-on-failure`.
- * Four of the five sit on a command Orthanc also marks `operator_approval`
- * (`--delete-object-type` on `global-branch deploy` and `proposal merge`,
- * `--remove` on `global-branch roles set` and `proposal request-review`), where
- * the ask already existed with the marked flag given; the other two
- * (`--remove-check`, `--remove-resource`) and `--delete-project` asked nobody.
+ * Three asked nobody (`--remove-check` on `data-health check-group update`,
+ * `--remove-resource` on `devops draft set`, `--delete-project` on `marketplace
+ * installation uninstall`). Two sit on a command Orthanc also marks
+ * `operator_approval` (`--delete-object-type` on `global-branch deploy` and
+ * `proposal merge`, `--remove` on `global-branch roles set` and `proposal
+ * request-review`), so they asked with the marked flag given and ran without
+ * it. Pinned as data in destructive.test.ts D13.
  * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
  * build when one job fails), so it reads as no claim; the exemption is by flag
  * name, not by command, because the name says the same thing wherever it
@@ -296,9 +298,26 @@ function destructiveFlag(args: readonly string[]): string | null {
 }
 
 /** Why a write reads as destructive, in the words the operator is told: a word
- * in the command name, a flag that names what the write removes, or `--force`. */
+ * in the command name, a flag that names what the write removes, or `--force`.
+ * The answer goes into the approval dialog, the debug log and the trace, and an
+ * argument is text a model wrote, so a flag is only shown as written when it is
+ * spelled like a flag. Anything else is JSON escaped and cut — the same contract
+ * `operatorApprovalQuestion` keeps, where a newline in an arg would otherwise
+ * forge lines in the question a human answers. */
 function destructiveTrigger(command: string, args: readonly string[]): string | null {
-  return destructiveTermIn(command) ?? destructiveFlag(args) ?? (argsHaveForce(command, args) ? '--force' : null)
+  const word = destructiveTermIn(command)
+  if (word !== null) return word
+  const flag = destructiveFlag(args)
+  if (flag !== null) return displayTrigger(flag)
+  return argsHaveForce(command, args) ? '--force' : null
+}
+
+const SHOWN_FLAG = /^--?[a-z0-9][a-z0-9-]*$/
+const SHOWN_MAX = 80
+
+function displayTrigger(flag: string): string {
+  const shown = SHOWN_FLAG.test(flag) ? flag : JSON.stringify(flag)
+  return shown.length > SHOWN_MAX ? `${shown.slice(0, SHOWN_MAX)}…` : shown
 }
 
 /** One arg as the flag it names, in any case, with or without a `=value`
@@ -1402,7 +1421,10 @@ export function ladderDecision(
         : 'yolo mode: nothing else asks; work stays on branches that are not main',
     }
   if (classification.isDestructive) {
-    return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${note}` }
+    // Both claims are kept: outside yolo a write that is destructive *and* names
+    // main asks once, and the operator reads why it cannot be waved through.
+    const also = classification.targetsProtected ? ', and it names main as its branch' : ''
+    return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${also}${note}` }
   }
   if (classification.targetsProtected) {
     return {

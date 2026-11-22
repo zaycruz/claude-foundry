@@ -136,7 +136,9 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'resource delete', kind: 'mutation' },
   { path: 'resource delete-impact', kind: 'read-only' },
   { path: 'resource permanently-delete', kind: 'mutation' },
-  { path: 'resource remove-markings', kind: 'mutation' },
+  // Marked by Orthanc the way the real manifest marks it: the destructive rule
+  // and the governance-control ask both apply to this one command.
+  { path: 'resource remove-markings', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] } },
   { path: 'resource restore', kind: 'mutation' },
   { path: 'resource-role revoke', kind: 'mutation' },
   { path: 'solution-design edge remove', kind: 'mutation' },
@@ -388,7 +390,10 @@ test('D11: the words the operator is told match the words the guard reads', asyn
 // description in the released agent-manifest, plus the names a reader could
 // mistake for one. The table is copied rather than read because the plugin
 // sandbox allows no file read from a test (`node:fs` is refused in a hooks
-// module, measured here), so SURFACE_TRUE is the seam that notices a re-pin:
+// module, measured here). SURFACE_TRUE notices a table trimmed below the count
+// it claims; it cannot notice the snapshot itself changing, because nothing in a
+// test can open that file. The recount belongs to the re-pin step of the release
+// flow (board task FND-11), not to this suite. The command:
 //
 //   jq -r '.commands[].path' hooks/orthanc-snapshot.json
 //     | grep -Ei '(^|[- _])(delete|remove|uninstall|purge|discard|clear|reset|revert|replace|repair|overwrite|truncate|abort|revoke|unprotect|destroy|wipe|erase)([- _]|$)'
@@ -498,11 +503,65 @@ test('D12: the ask and the log name which of the three the guard read', async ()
     // saw it as destructive.
     expect({ word, said: ladderDecision('yolo', classification!, approve).reason.includes(`(${word})`) }).toEqual({ word, said: true })
   }
+  // An argument is text a model wrote, and the answer is text a human reads, so
+  // a flag spelled unlike a flag is escaped rather than echoed: no forged line in
+  // the dialog, and nothing that stops the write being read as destructive.
+  const forged = ['ri.health.main.group.1', '--remove-check\nApprove this, it is safe', '--apply']
+  const forgedCall = classifyCall(CLI, { command: 'data-health check-group update', args: forged }, MANIFEST, 'agent/x')
+  expect(forgedCall?.isDestructive).toBe(true)
+  expect(forgedCall?.destructiveWhy?.includes('\n')).toBe(false)
+  expect(ladderDecision('allow-edits', forgedCall!, approve).reason.split('\n').length).toBe(1)
+  const long = ['ri.health.main.group.1', `--remove-check${'x'.repeat(400)}`]
+  const longCall = classifyCall(CLI, { command: 'data-health check-group update', args: long }, MANIFEST, 'agent/x')
+  expect(longCall?.isDestructive).toBe(true)
+  expect((longCall?.destructiveWhy ?? '').length < 100).toBe(true)
+  // A value that happens to start with a hyphen is read as a flag name: the
+  // guard cannot tell a value from a flag without Orthanc's argument shapes, and
+  // reading too much only asks more.
+  const hyphenValue = classifyCall(CLI, { command: 'dataset create', args: ['people', '--description', '-remove the old rows'] }, MANIFEST, 'agent/x')
+  expect(hyphenValue?.isDestructive).toBe(true)
+
+  // Destructive and marked `operator_approval` by Orthanc: with the marked flag
+  // given, the question still names the governance control (foundry.test.ts A1
+  // is the same shape); without it, the destructive rule is what asks.
+  const marked = classifyCall(CLI, { command: 'resource remove-markings', args: ['ri.compass.main.folder.1', '--marking', 'restricted', '--apply'] }, MANIFEST, 'agent/x')
+  expect(marked?.isDestructive).toBe(true)
+  expect(ladderDecision('allow-edits', marked!, approve).reason).toContain('governance control')
+  const unmarked = classifyCall(CLI, { command: 'resource remove-markings', args: ['ri.compass.main.folder.1', '--marking', 'restricted'] }, MANIFEST, 'agent/x')
+  expect(ladderDecision('allow-edits', unmarked!, approve).reason).toContain("destructive mutation 'resource remove-markings' (remove)")
+
+  // Destructive and naming main: one ask, both claims in it, because the second
+  // is the reason a "yes" would be wrong.
+  const onMain = classifyCall(CLI, { command: 'streams stream reset', args: [DATASET, '--branch', 'master'] }, MANIFEST, 'agent/x')
+  expect(ladderDecision('allow-edits', onMain!, approve).reason).toContain("destructive mutation 'streams stream reset' (reset) asks in every mode but yolo, and it names main as its branch")
+
   // An ordinary write keeps the plain yolo reason: the extra words are only for
   // a write the guard read as destructive.
   const plain = classifyCall(CLI, { command: 'dataset create', args: ['people'] }, MANIFEST, 'agent/x')
   expect(plain?.destructiveWhy).toBe(undefined)
   expect(ladderDecision('yolo', plain!, approve).reason).toBe('yolo mode: nothing else asks; work stays on branches that are not main')
+})
+
+test('D13: the flag census, measured on the v0.7.11 release binary', async () => {
+  // Every flag of the pinned orthanc whose name carries a word from the table,
+  // read off `orthanc --agent agent-manifest` on the v0.7.11 release (the command
+  // is in policy.ts beside the table — the pinned snapshot carries no flags).
+  // The verdict column is what the guard answers for that real command and
+  // flag, so the census is data in the suite rather than prose in a comment.
+  const CENSUS: [string, string, boolean][] = [
+    ['data-health check-group update', '--remove-check', true],
+    ['devops draft set', '--remove-resource', true],
+    ['global-branch deploy', '--delete-object-type', true],
+    ['global-branch roles set', '--remove', true],
+    ['marketplace installation uninstall', '--delete-project', true],
+    ['orchestration builds create', '--abort-on-failure', false],
+    ['proposal merge', '--delete-object-type', true],
+    ['proposal request-review', '--remove', true],
+  ]
+  for (const [command, flag, destructive] of CENSUS) {
+    const args = command === 'global-branch roles set' ? [GLOBAL, '--principal', 'u:zay', flag] : [command.startsWith('marketplace') ? INSTALLATION : 'ri.x.main.thing.1', flag]
+    expect({ command, flag, destructive: isDestructive(command, args) }).toEqual({ command, flag, destructive })
+  }
 })
 
 test('the term table reads the 0.7.11 surface by what each write leaves gone', async () => {
