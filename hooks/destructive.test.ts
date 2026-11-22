@@ -381,13 +381,13 @@ test('D11: the words the operator is told match the words the guard reads', asyn
 // Every one of the 51 command names in the pinned hooks/orthanc-snapshot.json
 // that carries a word from the table, each read against that command's own
 // description in the released agent-manifest, plus the names a reader could
-// mistake for one. Pinned as a table and not read from the file because the
-// plugin sandbox allows no file read from a test (a hooks module imports by
-// relative path and 'claude-code', nothing else), so the count below is the
-// drift trip: re-pin orthanc, and a name added or renamed away from the table
-// fails here until this table is recounted with
-//   jq -r '.commands[].path' hooks/orthanc-snapshot.json | grep -Ei '(^|-| |-)'
-//     '(delete|remove|uninstall|purge|discard|clear|reset|revert|replace|repair|overwrite|truncate|abort|revoke|unprotect|destroy|wipe|erase)(-|$)'
+// mistake for one. The table is copied rather than read because the plugin
+// sandbox allows no file read from a test (`node:fs` is refused in a hooks
+// module, measured here), so SURFACE_TRUE is the seam that notices a re-pin:
+//
+//   jq -r '.commands[].path' hooks/orthanc-snapshot.json
+//     | grep -Ei '(^|[- _])(delete|remove|uninstall|purge|discard|clear|reset|revert|replace|repair|overwrite|truncate|abort|revoke|unprotect|destroy|wipe|erase)([- _]|$)'
+//     | wc -l
 const SURFACE_TRUE = 51
 const SURFACE: [string, boolean][] = [
   ['admin group delete', true],
