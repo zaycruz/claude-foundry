@@ -647,6 +647,11 @@ test('B10: a counted loop pays its wait once per word', async () => {
     timeoutMs: 540_000,
     total: { calls: 2 },
   })
+  // A `done` that is an argument does not close the body: three passes are
+  // still three passes, and the loop is still counted for the rest of the line.
+  const wordNamedDone = shellTotalS('for r in ri.a ri.b ri.c; do orthanc repository checks wait $r done --timeout 20; done')
+  if (wordNamedDone.kind !== 'over') throw new Error('three passes of a 270 s wait are 810 s, not one')
+  expect({ totalS: wordNamedDone.total.totalMs / 1000, calls: wordNamedDone.total.calls }).toEqual({ totalS: 810, calls: 3 })
   // What the guard cannot count is counted once, and said to be so in code: the
   // host's own timer still stops a loop that outruns the raised timeout.
   for (const line of [
