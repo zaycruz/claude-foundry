@@ -73,22 +73,34 @@ function flagsFrom(args: unknown): ManifestFlag[] {
 // their own --timeout, plus --publish-grace after the checks pass. The timer
 // gives them that wait, any fixed time Orthanc adds around it, one poll
 // interval (Orthanc can overshoot its deadline by one) and a margin, so Orthanc
-// reports its own timeout instead of being killed. The floor is the old fixed
+// reports its own timeout instead of being killed. A command bounds its wait
+// with one of four flags (`--timeout`, `--timeout-seconds`, `--publish-grace`,
+// `--readback-timeout`, `--time-budget-seconds`) and the timer adds every one
+// it names. The floor is the old fixed
 // 300 s; the cap is Orthanc's longest default wait (ai-fde run: 1800 s plus
 // 370 s around it) plus the margin, or more for a command whose own defaults
 // need more, so a call with its defaults is never refused. A call that would
 // need more is refused before Orthanc starts.
 const CLI_MARGIN_S = 120
 export const CLI_TIMEOUT_FLOOR_MS = 300_000
-const WAIT_FLAGS = ['--timeout', '--publish-grace']
+// Every flag Orthanc bounds its own wait with, across the 0.7.11 surface:
+// --timeout (checks, sql, imports, branch-index, ai-fde), --timeout-seconds
+// (functions, ontology query-execute, models deployment, search, verify),
+// --publish-grace and --readback-timeout (time after the wait), and
+// --time-budget-seconds (the dependency graph reads, up to 600 s).
+const WAIT_FLAGS = ['--timeout', '--timeout-seconds', '--publish-grace', '--readback-timeout', '--time-budget-seconds']
 const POLL_FLAGS = ['--interval', '--poll-interval']
 
-// What the manifest cannot say about a command's wait (orthanc-source
-// src/ai_fde_web.rs): ai-fde run's --timeout is 1800 s when absent but the
-// flag carries no manifest default, and around it Orthanc gives the browser
-// worker 300 s to start, stops it up to 60 s past the timeout and waits 10 s
-// for it to exit. A manifest default, when one appears, wins over `defaults`.
-type WaitExtra = { defaults: Record<string, string>; aroundS: number; detachHint: string; stoppedHint: string }
+// What the manifest cannot say about a command's wait. `defaults` is a wait
+// orthanc runs with when the flag is absent (or when the manifest lists the
+// flag with no default); `aroundS` is the fixed time Orthanc adds around that
+// wait; `stoppedHint` says what may still be running when the timer stops the
+// call. A manifest default, when one appears, wins over `defaults`.
+//
+// ai-fde run (orthanc-source src/ai_fde_web.rs): --timeout is 1800 s when
+// absent, and around it Orthanc gives the browser worker 300 s to start, stops
+// it up to 60 s past the timeout and waits 10 s for it to exit.
+type WaitExtra = { defaults: Record<string, string>; aroundS: number; detachHint?: string; stoppedHint: string }
 const AI_FDE_RUN_EXTRA: WaitExtra = {
   defaults: { '--timeout': '1800' },
   aroundS: 300 + 60 + 10,
@@ -97,7 +109,38 @@ const AI_FDE_RUN_EXTRA: WaitExtra = {
     "The run may still be going in the AI FDE web app: find its thread with 'ai-fde threads list' and read it with " +
     "'ai-fde status <thread>' and 'ai-fde result <thread>'. For a long run, pass --detach next time.",
 }
-const WAIT_EXTRAS: Readonly<Record<string, WaitExtra>> = { 'ai-fde run': AI_FDE_RUN_EXTRA }
+// A Marketplace install or upgrade waits two job drafts and the job itself:
+// 120 s + 120 s + 540 s = 780 s, orthanc's own bound (src/marketplace_draft.rs,
+// MI30). The job wait is the command's; the two draft waits are fixed around it.
+const MARKETPLACE_INSTALL_EXTRA: WaitExtra = {
+  defaults: { '--timeout': '540' },
+  aroundS: 120 + 120,
+  stoppedHint:
+    "The installation job may still be running: list it with 'marketplace job list --store <store>' and read it with " +
+    "'marketplace job get <job rid>' before you run the install again.",
+}
+const WAIT_EXTRAS: Readonly<Record<string, WaitExtra>> = {
+  'ai-fde run': AI_FDE_RUN_EXTRA,
+  // `devops draft publish --wait` waits FINALIZE_TIMEOUT for the version to
+  // finalise (orthanc-source src/devops_publish.rs) and has no flag to say so:
+  // the manifest lists a bare --wait, so only a fixed wait can cover it.
+  'devops draft publish': {
+    defaults: { '--timeout': '900' },
+    aroundS: 0,
+    stoppedHint:
+      "The version may still be finalising in Foundry: read the draft with 'devops draft get <draft>' before you publish it again.",
+  },
+  // A Marketplace install or upgrade waits two drafts and the job: 120 s + 120 s
+  // + 540 s (orthanc-source src/marketplace_draft.rs, MI30). The job wait is the
+  // command's own; the two draft waits are the fixed time around it.
+  'marketplace installation create': MARKETPLACE_INSTALL_EXTRA,
+  'marketplace installation upgrade': MARKETPLACE_INSTALL_EXTRA,
+  'marketplace job cancel': {
+    defaults: { '--timeout': '540' },
+    aroundS: 0,
+    stoppedHint: "The job may still be running: read it with 'marketplace job get <job rid>'.",
+  },
+}
 const CLI_LONGEST_WAIT_S = 1800 + AI_FDE_RUN_EXTRA.aroundS
 export const CLI_TIMEOUT_CAP_MS = (CLI_LONGEST_WAIT_S + CLI_MARGIN_S) * 1000
 
