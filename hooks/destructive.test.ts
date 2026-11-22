@@ -294,6 +294,11 @@ test('D6: a flag that erases asks, in any case, as =value, at any position', asy
   ]) {
     expect({ args, destructive: isDestructive('data-health check-group update', args) }).toEqual({ args, destructive: true })
   }
+  // The fifth flag that carries a word, `--delete-object-type`, belongs to
+  // `global-branch deploy` and `proposal merge`, and the branch rule reaches
+  // both of those first. Pinned on a neutral command, because the flag rule
+  // reads the flag name and not the command that carries it.
+  expect(isDestructive('dataset schema set', [DATASET, '--branch', 'agent-x', '--delete-object-type', 'Vessel'])).toBe(true)
   // A flag a later orthanc could add (`--discard-passes`, reported by FND-17 and
   // not on 0.7.11) is read the day it appears, on a command whose own name is
   // no claim.

@@ -271,7 +271,12 @@ export function destructiveTermIn(name: string): string | null {
  *   tar xzf orthanc-x86_64-unknown-linux-gnu.tar.gz && ./orthanc --agent agent-manifest \
  *     | jq -r '.data.commands[] | .path as $p | .args[]? | [.flag] | @tsv' | sort -u
  *
- * On 0.7.11 those five are all a name match ever selects.
+ * On 0.7.11 six flag names carry a word: these five, and `--abort-on-failure`.
+ * Four of the five sit on a command Orthanc also marks `operator_approval`
+ * (`--delete-object-type` on `global-branch deploy` and `proposal merge`,
+ * `--remove` on `global-branch roles set` and `proposal request-review`), where
+ * the ask already existed with the marked flag given; the other two
+ * (`--remove-check`, `--remove-resource`) and `--delete-project` asked nobody.
  * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
  * build when one job fails), so it reads as no claim; the exemption is by flag
  * name, not by command, because the name says the same thing wherever it
