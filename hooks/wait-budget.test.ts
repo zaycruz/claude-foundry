@@ -77,9 +77,12 @@
 //      guard already refuses (a write, an unreadable call) is answered before
 //      any timeout is raised, so nothing gets time for a call that does not run.
 //  B10 A counted loop (`for x in a b c`) runs its wait once per word, so its
-//      wait is multiplied; a list built from a substitution or a glob, and a
-//      while/until body, cannot be counted and is counted once — the residual
-//      limit, said here, since the host's own timer still stops it.
+//      wait is multiplied, Orthanc's own time around the wait and the margin
+//      included; a list built from a substitution or a glob, and a while/until
+//      body, cannot be counted and is counted once — the residual limit, said
+//      here, since the host's own timer still stops it. A loop short enough to
+//      finish inside the ceiling may still be refused by this arithmetic: it is
+//      the safe side, because the refusal names how to get the result.
 //  B7 run_in_background has no foreground limit to cover: the call is untouched.
 //  B8 The raised timeout reaches the tool: the event handed to next carries it
 //      (the host reads the call's `timeout`), and a refusal leaves it alone.
@@ -664,6 +667,7 @@ test('B11: waits that do not run in sequence are not added up', async () => {
     [either, 2],
     ['orthanc repository checks wait ri.a v1 --timeout 200 | orthanc repository checks wait ri.b v1 --timeout 200', 2],
     ['if orthanc repository checks wait ri.a v1 --timeout 200; then echo ok; else orthanc repository checks wait ri.b v1 --timeout 200; fi', 2],
+    ['case $r in one) orthanc repository checks wait ri.a v1 --timeout 200;; two) orthanc repository checks wait ri.b v1 --timeout 200;; esac', 2],
     [pipe, 1],
   ] as [string, number][]) {
     const cover = shellTotalS(line)

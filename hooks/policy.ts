@@ -748,8 +748,9 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 }
 
 /** One simple command: its words; fed: a heredoc or here-string feeds its stdin; split: it ended at an unquoted $( or backquote. */
-// The operator that ended a segment: 'alt' for `||`, the next command runs only
-// when this one failed; 'pipe' for `|`, the next command runs alongside this one;
+// The operator that ended a segment: 'alt' for `||` or a `case` arm's `;;`, the
+// next command runs only when this one failed or was the arm chosen; 'pipe' for
+// `|`, the next command runs alongside this one;
 // 'bg' for `&`, this command is left running and the line answers at once.
 // Absent: the next command runs after this one (`&&`, `;`, a newline).
 export type ShellJoin = 'alt' | 'pipe' | 'bg'
@@ -804,10 +805,19 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
   // `split` marks a segment whose command continues inside a substitution, so
   // its words are not the whole call; `join` says how the next command relates
   // to this one ('alt' for ||, 'pipe' for |, 'bg' for a job left running).
-  const endSegment = (operator: '\n' | '$(' | '`' | '<(' | '&&' | '||' | '|' | '&' | '' = '') => {
+  // After `;;` the next words are the next `case` arm's pattern, up to its `)`:
+  // they run nothing, so the arm they name stays an alternative to the last.
+  let armPattern = false
+  const endSegment = (operator: '\n' | '$(' | '`' | '<(' | '&&' | '||' | ';;' | '|' | '&' | '' = '') => {
     endWord()
     target = null
-    const join: ShellJoin | undefined = operator === '||' ? 'alt' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
+    // A `)` closing a `case` arm's pattern is the arm's own separator: the words
+    // before it name a match, they do not run, and the arm is an alternative to
+    // the arm before it.
+    const arm = operator === ')' && armPattern
+    const join: ShellJoin | undefined =
+      operator === '||' || operator === ';;' || arm ? 'alt' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
+    armPattern = operator === ';;' ? true : operator === ')' ? false : words.length > 0 ? false : armPattern
     if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join })
     words = []
   }
@@ -877,12 +887,13 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
         target = tabs ? 'heredoc-tabs' : 'heredoc'
       } else target = 'file'
     } else if (SHELL_OPERATORS.includes(char)) {
-      // `&&` and `||` are one operator each: the first runs the two commands in
-      // sequence, the second runs the right one only when the left one failed.
-      if ((char === '&' || char === '|') && command[index + 1] === char) {
+      // `&&`, `||` and `;;` are one operator each: the first runs the two
+      // commands in sequence, the second runs the right one only when the left
+      // one failed, and `;;` closes a `case` arm, so only one arm ever runs.
+      if ((char === '&' || char === '|' || char === ';') && command[index + 1] === char) {
         index += 1
-        endSegment(char === '&' ? '&&' : '||')
-      } else endSegment(char === '`' ? '`' : char === '|' || char === '&' ? char : '')
+        endSegment(char === '&' ? '&&' : char === '|' ? '||' : ';;')
+      } else endSegment(char === '`' || char === ')' || char === '|' || char === '&' ? char : '')
     }
     else word += char
   }
