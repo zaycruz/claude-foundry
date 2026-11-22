@@ -748,7 +748,13 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 }
 
 /** One simple command: its words; fed: a heredoc or here-string feeds its stdin; split: it ended at an unquoted $( or backquote. */
-export type Segment = { words: string[]; fed: boolean; split: boolean }
+// The operator that ended a segment: 'alt' for `||`, the next command runs only
+// when this one failed; 'pipe' for `|`, the next command runs alongside this one;
+// 'bg' for `&`, this command is left running and the line answers at once.
+// Absent: the next command runs after this one (`&&`, `;`, a newline).
+export type ShellJoin = 'alt' | 'pipe' | 'bg'
+
+export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin }
 
 // Code that can start another process, per interpreter.
 const SPAWNS: [RegExp, RegExp][] = [
@@ -795,10 +801,14 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     word = ''
     quoted = false
   }
-  const endSegment = (split = false) => {
+  // `split` marks a segment whose command continues inside a substitution, so
+  // its words are not the whole call; `join` says how the next command relates
+  // to this one ('alt' for ||, 'pipe' for |, 'bg' for a job left running).
+  const endSegment = (operator: '\n' | '$(' | '`' | '<(' | '&&' | '||' | '|' | '&' | '' = '') => {
     endWord()
     target = null
-    if (words.length > 0) segments.push({ words, fed: false, split })
+    const join: ShellJoin | undefined = operator === '||' ? 'alt' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
+    if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join })
     words = []
   }
   // At a newline: skip the bodies of the heredocs opened on the line that ends here.
@@ -842,11 +852,11 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
       quoted = true
     } else if (char === '\\' && index + 1 < command.length) word += command[++index]
     else if (char === '\n') {
-      endSegment()
+      endSegment('\n')
       index = skipHeredocs(index)
     } else if (/\s/.test(char)) endWord()
     else if (char === '$' && command[index + 1] === '(') {
-      endSegment(true)
+      endSegment('$(')
       index += 1
     } else if (char === '<' || char === '>' || (char === '&' && command[index + 1] === '>')) {
       // A file descriptor glued to the redirect (`2>`, `0<<`) is not a word.
@@ -866,7 +876,14 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
         if (tabs) index += 1
         target = tabs ? 'heredoc-tabs' : 'heredoc'
       } else target = 'file'
-    } else if (SHELL_OPERATORS.includes(char)) endSegment(char === '`')
+    } else if (SHELL_OPERATORS.includes(char)) {
+      // `&&` and `||` are one operator each: the first runs the two commands in
+      // sequence, the second runs the right one only when the left one failed.
+      if ((char === '&' || char === '|') && command[index + 1] === char) {
+        index += 1
+        endSegment(char === '&' ? '&&' : '||')
+      } else endSegment(char === '`' ? '`' : char === '|' || char === '&' ? char : '')
+    }
     else word += char
   }
   endSegment()
@@ -1107,7 +1124,60 @@ type ShellCall =
       help: boolean
       /** The segment ended at a substitution: the call continues inside it. */
       split: boolean
+      /** How many times the shell runs this command: over 1 inside a counted loop. */
+      times: number
+      /** How this command relates to the one before it, or 'unknown' when its
+       * arguments continue inside a substitution the guard cannot read. */
+      join: ShellCallJoin
     }
+
+// Where a command sits against the one before it, for the timer that has to hold
+// them all (hooks/process.ts coverShellWaits).
+export type ShellCallJoin = 'seq' | 'alt' | 'pipe' | 'bg' | 'unknown'
+
+// `if … then A; else B; fi` runs one arm: the segment that opens with `else` or
+// `elif` is an alternative to what came before it.
+function joinOf(segment: Segment, index: number, segments: readonly Segment[]): ShellCallJoin {
+  if (segment.split) return 'unknown'
+  if (segment.join === 'bg') return 'bg'
+  const head = basename(segment.words[0])
+  if (head === 'else' || head === 'elif') return 'alt'
+  const before = index > 0 ? segments[index - 1]! : undefined
+  if (before?.split) return 'unknown'
+  return before?.join === 'alt' || before?.join === 'pipe' ? before.join : 'seq'
+}
+
+const LOOP_HEADS = new Set(['for', 'while', 'until', 'select'])
+// A `for x in a b c` list the guard can count; `$(ls)`, `*.json` and `$@` it cannot.
+const PLAIN_WORD = /^[\w.@:+,-]+$/
+
+/**
+ * How many times each segment's command runs: 1 outside a loop, and inside a
+ * `for … in a b c` body, the count of its literal list (nested loops multiply).
+ * A `while`/`until` body, and a list built from a substitution or a glob, counts
+ * once: the guard cannot say how often it runs, and a wait that runs past the
+ * raised timeout is stopped by the host exactly as it was before this cover.
+ */
+function loopCounts(segments: readonly Segment[]): number[] {
+  const open: number[] = []
+  const counts: number[] = []
+  for (const { words } of segments) {
+    const head = words.find(word => !ASSIGNMENT.test(word)) ?? ''
+    if (LOOP_HEADS.has(basename(head))) {
+      const at = words.indexOf('in')
+      const list = at < 0 ? [] : words.slice(at + 1).filter(word => word !== 'do')
+      open.push(list.length > 0 && list.every(word => PLAIN_WORD.test(word)) ? list.length : 1)
+      counts.push(1)
+      continue
+    }
+    // Only a `done` in command position closes a body: `checks wait rid done` is
+    // an argument, and treating it as the terminator would drop the multiplier.
+    const closes = basename(words[0]) === 'done'
+    counts.push(closes ? 1 : open.reduce((product, count) => product * count, 1))
+    if (closes) open.splice(-1, 1)
+  }
+  return counts
+}
 
 /** The Orthanc calls a Bash command runs, unreadable ones marked where they sit. */
 function shellCalls(command: string, manifest: readonly ManifestCommand[]): ShellCall[] {
@@ -1121,14 +1191,15 @@ function shellCalls(command: string, manifest: readonly ManifestCommand[]): Shel
     if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
   }
   const calls: ShellCall[] = []
-  for (const segment of segments) {
+  const counts = loopCounts(segments)
+  segments.forEach((segment, index) => {
     const { words } = segment
     if (hidesOrthanc(segment, command, assignments, groups)) {
       calls.push({ hides: true })
-      continue
+      return
     }
     const start = orthancStart(segment, groups)
-    if (start < 0) continue
+    if (start < 0) return
     const call = orthancShellCall(words, start, manifest)
     calls.push({
       hides: false,
@@ -1136,21 +1207,24 @@ function shellCalls(command: string, manifest: readonly ManifestCommand[]): Shel
       args: words.slice(start + 1),
       ...call,
       split: segment.split,
+      times: counts[index] ?? 1,
+      join: joinOf(segment, index, segments),
     })
-  }
+  })
   return calls
 }
 
 /**
  * What the Orthanc calls a Bash command runs, as the manifest describes them,
- * with the words after the binary. The Bash tool holds its own timer over them;
+ * with the words after the binary and how often the shell runs each. The Bash
+ * tool holds its own timer over them;
  * register.tsx turns these into waits and covers that timer (hooks/process.ts).
  * A command with no readable Orthanc call, or one the guard cannot read, brings
  * nothing: the guard answers those before the timer is read.
  */
-export function shellOrthancCalls(command: string, manifest: readonly ManifestCommand[]): { command: ManifestCommand; args: string[] }[] {
+export function shellOrthancCalls(command: string, manifest: readonly ManifestCommand[]): { command: ManifestCommand; args: string[]; times: number; join: ShellCallJoin }[] {
   return shellCalls(command, manifest).flatMap(call =>
-    call.hides || !call.known || call.help || call.entry === null ? [] : [{ command: call.entry, args: call.args }],
+    call.hides || !call.known || call.help || call.entry === null ? [] : [{ command: call.entry, args: call.args, times: call.times, join: call.join }],
   )
 }
 

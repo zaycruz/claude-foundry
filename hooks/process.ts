@@ -11,14 +11,16 @@
 // BASH_DEFAULT_TIMEOUT_MS, or 120 s, and the largest `timeout` the host takes is
 // BASH_MAX_TIMEOUT_MS, or 600 s. Past that the host moves the command to the
 // background, so a `checks wait --timeout 1200` run through Bash never answers
-// the turn it started in. shellTimer reads those limits, coverShellWaits says
-// whether a call's own wait fits under them, and shellWaitDenial writes what to
-// answer when it cannot. Pure: the call's env and the rewrite of the call stay
-// in register.tsx.
+// the turn it started in. shellTimer reads those limits, coverShellWaits prices
+// the line's Orthanc calls against them (what runs in sequence adds up, what
+// runs instead of or alongside each other does not), and shellWaitDenial writes
+// what to answer when nothing fits. Pure: the call's env and the rewrite of the
+// call stay in register.tsx.
 
 import type { HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 
 import type { CliWait } from './orthanc'
+import type { ShellCallJoin } from './policy'
 
 /** The longest timeoutMs $.process.run takes. */
 export const PROCESS_RUN_MAX_MS = 600_000
@@ -63,6 +65,50 @@ export const BASH_TIMEOUT_MAX_MS = 600_000
 
 export type ShellTimer = { givenMs: number; maxMs: number }
 
+/** One Orthanc call a Bash command runs: how often the shell runs it, and how it
+ * joins the call before it ('seq' and the two unnamed spellings aside). */
+export type ShellWait = { wait: CliWait; times: number; join?: ShellCallJoin }
+
+/** What a command's Orthanc waits cost, the longest among them, and whether the
+ * guard is sure they run one after another (only then is a refusal honest). */
+export type ShellTotal = { totalMs: number; calls: number; longest: CliWait; serial: boolean }
+
+// A call the guard cannot price: its arguments continue inside a substitution,
+// or a wait flag carries a value Orthanc would read as its default rather than
+// as the number the caller meant.
+function unpriced(entry: ShellWait): boolean {
+  return entry.join === 'unknown' || entry.wait.unreadFlags !== undefined
+}
+
+/**
+ * What the Orthanc calls of one command line cost against its timer.
+ *
+ * `a && b`, `a; b` and a newline run one after another: their waits add up, and
+ * a line raised only to the longest of them loses the later answer. `a || b`
+ * runs the right-hand call only when the left one failed, `a | b` runs its legs
+ * together, and `if … then A; else B; fi` runs one arm: the larger of two is
+ * what the timer must hold. `a &` answers at once and costs the turn nothing.
+ * What cannot be priced counts for nothing and makes the total unconfirmed, so
+ * the line is never refused on a number the guard is not sure of.
+ */
+function totalOf(waiting: readonly ShellWait[]): ShellTotal {
+  let totalMs = 0
+  let calls = 0
+  let serial = true
+  let longest = waiting[0]!.wait
+  for (const entry of waiting) {
+    if (entry.join === 'bg') continue
+    const passes = Math.max(1, entry.times)
+    const cost = entry.wait.waitMs * passes
+    const alternative = entry.join === 'alt' || entry.join === 'pipe'
+    if (alternative || unpriced(entry)) serial = false
+    totalMs = alternative ? Math.max(totalMs, cost) : totalMs + (unpriced(entry) ? 0 : cost)
+    calls += passes
+    if (entry.wait.waitMs > longest.waitMs) longest = entry.wait
+  }
+  return { totalMs, calls, longest, serial }
+}
+
 // A positive, finite count of milliseconds; the host reads its two variables the
 // same way and falls back when one holds anything else.
 function positiveMs(value: unknown): number | undefined {
@@ -77,40 +123,61 @@ function positiveMs(value: unknown): number | undefined {
  * session that raised or lowered them is covered by what it set, not a guess.
  */
 export function shellTimer(givenMs: unknown, envDefaultMs: string | undefined, envMaxMs: string | undefined): ShellTimer {
+  // The ceiling is the ceiling: a session whose default sits above it gets the
+  // host's clamp, not a longer promise. The plugin never hands down a timeout it
+  // cannot be sure the host will run.
+  const maxMs = positiveMs(envMaxMs) ?? BASH_TIMEOUT_MAX_MS
   const defaultMs = positiveMs(envDefaultMs) ?? BASH_TIMEOUT_DEFAULT_MS
-  const maxMs = Math.max(positiveMs(envMaxMs) ?? BASH_TIMEOUT_MAX_MS, defaultMs)
-  // The host takes no foreground timeout past maxMs, whatever the call asked for.
   return { givenMs: Math.min(positiveMs(givenMs) ?? defaultMs, maxMs), maxMs }
 }
 
+// One command line runs its Orthanc calls one after another, so its wait is the
+// sum of theirs, and a counted loop runs each of its calls more than once.
 export type ShellCover =
   | { kind: 'keep' }
-  | { kind: 'raise'; timeoutMs: number; wait: CliWait; timer: ShellTimer }
-  | { kind: 'over'; wait: CliWait; timer: ShellTimer }
+  | { kind: 'raise'; timeoutMs: number; total: ShellTotal; timer: ShellTimer }
+  | { kind: 'over'; total: ShellTotal; timer: ShellTimer }
 
 /**
- * Whether the Orthanc calls a Bash command runs fit under its timer: `keep`
- * when it already runs long enough for the longest wait (or none of its calls
- * waits at all), `raise` with the timeout that covers them, `over` with the
- * call nothing fits when even the largest timeout is too short.
+ * Whether the Orthanc calls a Bash command runs fit under its timer. Waits run
+ * one after another in one command line (`a && b`, `a; b`, a loop body), so what
+ * has to fit is their SUM, not the longest of them: a call raised only to the
+ * longest wait would still run the later ones past the timer, which is the
+ * failure this cover exists to close.
+ *
+ * `keep` when the timer already runs long enough (or nothing waits), `raise`
+ * with the timeout that covers the whole line, `over` when even the largest
+ * timeout the host takes is too short.
  */
-export function coverShellWaits(waits: readonly CliWait[], timer: ShellTimer): ShellCover {
-  const longest = waits.reduce<CliWait | null>((best, wait) => (wait.waitMs > (best?.waitMs ?? 0) ? wait : best), null)
-  if (longest === null || longest.waitMs <= timer.givenMs) return { kind: 'keep' }
-  return longest.waitMs > timer.maxMs
-    ? { kind: 'over', wait: longest, timer }
-    : { kind: 'raise', timeoutMs: longest.waitMs, wait: longest, timer }
+export function coverShellWaits(waits: readonly ShellWait[], timer: ShellTimer): ShellCover {
+  const waiting = waits.filter(entry => entry.wait.waitMs > 0 && entry.join !== 'bg')
+  if (waiting.length === 0) return { kind: 'keep' }
+  const total = totalOf(waiting)
+  if (total.totalMs <= timer.givenMs) return { kind: 'keep' }
+  // Past the ceiling: refuse only what the guard is sure runs in sequence. What
+  // it is not sure of gets the longest timeout the host takes and runs.
+  if (total.totalMs <= timer.maxMs || !total.serial) return { kind: 'raise', timeoutMs: Math.min(total.totalMs, timer.maxMs), total, timer }
+  return { kind: 'over', total, timer }
 }
 
 const seconds = (ms: number) => Math.ceil(ms / 1000)
 
 /** Why a Bash command that waits past any timeout it can be given did not run. */
-export function shellWaitDenial(wait: CliWait, timer: ShellTimer): string {
-  const smaller = wait.overFlags?.length ? wait.overFlags.join(' or ') : '--timeout'
+export function shellWaitDenial(total: ShellTotal, timer: ShellTimer): string {
+  const { longest, totalMs, calls } = total
+  const smaller = longest.overFlags?.length ? longest.overFlags.join(' or ') : '--timeout'
   // orthanc_cli holds the waits Bash cannot: the way out it names is the tool,
   // and, when the call does not fit there either, the flag that is too big.
-  let cli = `run it with orthanc_cli, which waits up to ${seconds(wait.capMs)} s for it`
-  if (wait.overCap) cli += wait.maxTimeoutS === undefined ? `, where a smaller ${smaller} fits` : `, with --timeout ${wait.maxTimeoutS} or less`
-  const ways = [cli, 'pass run_in_background: true and read the output when the command lands']
-  return `Bash runs a command for at most ${seconds(timer.maxMs)} s, and 'orthanc ${wait.path}' waits ${seconds(wait.waitMs)} s here, so the command was not run. To get its result: ${ways.join('; ')}.`
+  let cli = calls === 1
+    ? `run it with orthanc_cli, which waits up to ${seconds(longest.capMs)} s for it`
+    : `run each wait in its own command with orthanc_cli, which waits up to ${seconds(longest.capMs)} s for 'orthanc ${longest.path}'`
+  if (longest.overCap) cli += longest.maxTimeoutS === undefined ? `, where a smaller ${smaller} fits` : `, with --timeout ${longest.maxTimeoutS} or less`
+  const ways = [cli]
+  // A call that fits orthanc_cli but not Bash also has a --timeout that fits
+  // Bash: say the number, or the model has to guess it and be refused again.
+  const fitsBashS = Math.floor((timer.maxMs - longest.fixedMs) / 1000)
+  if (!longest.overCap && calls === 1 && fitsBashS >= 1) ways.push(`pass --timeout ${fitsBashS} or less, which fits Bash`)
+  ways.push('pass run_in_background: true and read the output when the command lands')
+  const cost = calls === 1 ? `'orthanc ${longest.path}' waits ${seconds(totalMs)} s here` : `${calls} Orthanc waits in this command add up to ${seconds(totalMs)} s, the longest 'orthanc ${longest.path}' at ${seconds(longest.waitMs)} s each`
+  return `Bash runs a command for at most ${seconds(timer.maxMs)} s, and ${cost}, so the command was not run. To get its result: ${ways.join('; ')}.`
 }

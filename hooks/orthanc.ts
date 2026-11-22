@@ -130,6 +130,16 @@ export type CliWait = {
   maxTimeoutS?: number
   /** The flags the call passed that put it over the cap, --timeout when one smaller would fit. */
   overFlags?: string[]
+  /**
+   * The wait flags the call passed with a value Orthanc would reject (a
+   * variable, `$((…))`, `abc`). The timer above falls back to the manifest
+   * default, which is never short for orthanc_cli; the Bash lane will not
+   * refuse on a number the command never asked for (hooks/process.ts).
+   */
+  unreadFlags?: string[]
+  /** What the wait costs besides --timeout (other flags, Orthanc's own time around
+   * the wait, one poll interval, the margin), in ms. 0 when nothing waits. */
+  fixedMs: number
 }
 
 const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
@@ -171,24 +181,31 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
   }
   const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
   const totalS = waits ? totalOf(seconds) : 0
-  if (totalS === 0) return { path, timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, waitMs: 0, capMs, overCap: false }
+  // A flag that was passed but does not read as a number: the wait is the
+  // default, and the caller who set the timer is the only one who can say
+  // whether that is a safe number to act on.
+  const unreadFlags = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => given(flag) && parse(flagArgument(args, flag)) === undefined)
+  const withUnread = <T extends object>(wait: T): T & { unreadFlags?: string[] } => (unreadFlags.length === 0 ? wait : { ...wait, unreadFlags })
+  if (totalS === 0) return withUnread({ path, timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, waitMs: 0, capMs, overCap: false, fixedMs: 0 })
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
+  const fixedMs = (totalS - seconds('--timeout')) * 1000
   const overCap = neededMs > capMs
-  if (!overCap) return { path, timeoutMs: neededMs, neededMs, waitMs: totalS * 1000, capMs, overCap }
+  if (!overCap) return withUnread({ path, timeoutMs: neededMs, neededMs, waitMs: totalS * 1000, capMs, overCap, fixedMs })
   const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
   // When no --timeout fits, the other passed flags are what to make smaller.
   const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== '--timeout' && given(flag) && seconds(flag) > 0)
   const overFlags = fits > 0 ? ['--timeout'] : others
-  return {
+  return withUnread({
     path,
     timeoutMs: capMs,
     neededMs,
     waitMs: totalS * 1000,
     capMs,
     overCap,
+    fixedMs,
     ...(fits > 0 ? { maxTimeoutS: fits } : {}),
     ...(overFlags.length > 0 ? { overFlags } : {}),
-  }
+  })
 }
 
 /** How long orthanc_cli lets `command` run with `args`, in ms. */
