@@ -220,10 +220,12 @@ export function destructiveTermIn(name: string): string | null {
  * `--remove-resource`, `--delete-project`, `--delete-object-type`. Measured
  * against every flag of 0.7.11, those five are all a name match ever selects.
  * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
- * build when one job fails), and a `--no-…` flag denies what it names, so both
- * read as no claim. A negation that drops a protection (`--no-read-only`,
- * `--no-auto-protect-new-resources`) is marked `operator_approval` by Orthanc
- * and asks on that. */
+ * build when one job fails), so it reads as no claim. Measured too: no `--no-…`
+ * flag of 0.7.11 holds a destructive word, so the negation rule is for the next
+ * pin — a flag that denies what it names is not a claim that the write erases.
+ * The two negations that drop a protection (`--no-read-only`,
+ * `--no-auto-protect-new-resources`) are marked `operator_approval` by Orthanc
+ * and ask on that. */
 const NON_DESTRUCTIVE_FLAGS = new Set(['--abort-on-failure'])
 
 function destructiveFlagIn(args: readonly string[]): boolean {
