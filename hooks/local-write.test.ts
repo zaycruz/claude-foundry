@@ -53,6 +53,15 @@
 //      refuses `--dry-run=false` ('unexpected value … no more were expected'), so
 //      the plan exemption reads the switch exactly, and a spelled value keeps the
 //      write rather than quietly dropping to a read.
+//  LW12 The plan exemption reads the switch and nothing else: `--force
+//      --dry-run` in either order is the plan orthanc prints, `--target
+//      --dry-run` is that option's value (an install into a folder named
+//      `--dry-run`), `--dry-run=false` is a spelling the binary refuses, and
+//      `--target=./app --dry-run` binds its own value and leaves the switch.
+//  LW14 The same answers hold against a manifest that no longer lists these
+//      flags: an option whose shape the guard cannot read owns the word after
+//      it, so the unknown shape asks rather than plans (the rule
+//      `baseBranchOnWorkBranch` applies to the same pflag hazard).
 //  LW11 A Code Repository branch named main, or HEAD, on a plain clone stays a
 //      read: its --branch is not a Foundry branch (FDE mode pins nothing to a
 //      clone, hooks/register.tsx fdeGate). With --force the same call is judged
@@ -151,12 +160,29 @@ test('LW7: orthanc_help says it on the page of each command, and on no other', (
   }
 })
 
-test('LW8: the pinned manifest still calls both commands read-only, so orthanc can still mislabel them', () => {
-  type Entry = { path: string; kind: string }
-  const commands = (SNAPSHOT as unknown as { commands: Entry[] }).commands
-  for (const path of ['repository clone', 'dev-console sdk install']) {
+// The two facts this guard rests on, read out of the manifest the plugin ships
+// with: each entry still says `read-only` (orthanc can still mislabel it), and
+// the flag that makes the call write this machine is still there, still spelled
+// this way, and `--dry-run` is still a switch. scripts/orthanc-tie.mjs keeps
+// these two entries' flags in the pin for exactly this test — an entry with no
+// approval key carries no flags otherwise. A rename, a dropped flag, or a
+// `--dry-run` that starts taking a value fails here instead of leaving the
+// guard under-reading with the suite green.
+type Pinned = { path: string; kind: string; args?: { flag: string; takes_value: boolean }[] }
+const PINNED_SHAPE: Record<string, { kind: string; flags: [string, boolean][] }> = {
+  'repository clone': { kind: 'read-only', flags: [['--force', false], ['--dry-run', false]] },
+  'dev-console sdk install': { kind: 'read-only', flags: [['--yes', false], ['--target', true], ['--dry-run', false]] },
+}
+
+test('LW8: the pinned manifest still mislabels both, with the flags this rule reads', () => {
+  const commands = (SNAPSHOT as unknown as { commands: Pinned[] }).commands
+  for (const [path, want] of Object.entries(PINNED_SHAPE)) {
     const entry = commands.find(candidate => candidate.path === path)
-    expect({ path, entry: entry === undefined ? 'missing' : entry.kind }).toEqual({ path, entry: 'read-only' })
+    expect({ path, entry: entry === undefined ? 'missing' : entry.kind }).toEqual({ path, entry: want.kind })
+    const given = new Map((entry?.args ?? []).map(flag => [flag.flag, flag.takes_value]))
+    for (const [flag, takesValue] of want.flags) {
+      expect({ path, flag, declared: given.get(flag) ?? 'missing' }).toEqual({ path, flag, declared: takesValue })
+    }
   }
 })
 
@@ -169,6 +195,17 @@ test('LW10: the ask and the Bash refusal say what the call does to this machine'
   expect(ladderDecision('ask-always', asked, { action: 'ask', reason: 'guard says no' }).reason).toContain('deletes what is already in the target folder')
   const planned = classifyCall(CLI, { command: 'dev-console sdk install', args: [APP, '--target', './app', '--dry-run=false'] }, MANIFEST, null)
   expect(planned).not.toBe(null)
+})
+
+// The trace line a ran write leaves is what the operator reads afterwards, and
+// in yolo nothing else said anything: 'destructive (--force)' without the
+// folder it deleted would read as an ordinary Foundry write.
+test('LW10: the reason of a run says it too', () => {
+  const forced = classifyCall(CLI, { command: 'repository clone', args: [REPO, './repo', '--force'] }, MANIFEST, null)!
+  const installed = classifyCall(CLI, { command: 'dev-console sdk install', args: [APP, '--target', './app'] }, MANIFEST, null)!
+  expect(forced ? ladderDecision('yolo', forced).reason.includes('deletes what is already in the target folder') : false).toBe(true)
+  expect(ladderDecision('allow-edits', installed).reason.includes('npm or pip install')).toBe(true)
+  expect(ladderDecision('auto', installed, { action: 'approve', reason: 'ok' }).reason.includes('npm or pip install')).toBe(true)
 })
 
 test('LW11: a clone of main or HEAD is still a read, and --force is judged by --force', () => {
@@ -194,6 +231,28 @@ test('LW12: the plan switch is the switch, not a word that happens to say it', (
   expect(cli('dev-console sdk install', [APP, '--target', '--dry-run'])).toEqual(['ask', 'run', 'run', 'run'])
   // The binary refuses a value on this switch, so a spelled value is not a plan.
   expect(cli('dev-console sdk install', [APP, '--target', './app', '--dry-run=false'])).toEqual(['ask', 'run', 'run', 'run'])
+  // A flag that binds its own value leaves the next word free: this is the plan
+  // orthanc prints (dev_console_local.rs line 172).
+  expect(cli('dev-console sdk install', [APP, '--target=./app', '--dry-run'])).toEqual([null, null, null, null])
+})
+
+// LW14: a manifest that stopped describing these flags must not talk the guard
+// out of the write. Every other argv reader in hooks/policy.ts asks more when a
+// flag has no shape (`givenFlags`, `positionals`, `baseBranchOnWorkBranch`);
+// reading an undeclared `--target` as valueless would answer 'plan' and let the
+// npm install through Bash, allow-edits, auto and yolo.
+const BLIND_MANIFEST: ManifestCommand[] = MANIFEST.map(entry =>
+  entry.path === 'repository clone' || entry.path === 'dev-console sdk install' ? { ...entry, flags: [] } : entry,
+)
+const blind = (command: string, args: string[]) =>
+  MODES.map(mode => ladderDecision(mode, classifyCall(CLI, { command, args }, BLIND_MANIFEST, null)!, { action: 'approve', reason: 'guard model absent' }).outcome)
+
+test('LW14: with no flag shapes in the manifest, the plan spelling still asks', () => {
+  expect(blind('dev-console sdk install', [APP, '--target', '--dry-run'])).toEqual(['ask', 'run', 'run', 'run'])
+  expect(blind('repository clone', [REPO, './repo', '--branch', '--dry-run', '--force'])).toEqual(['ask', 'ask', 'ask', 'run'])
+  // The write-flag test itself needs no shapes: a bare --force is a write with or
+  // without a manifest that describes it.
+  expect(blind('repository clone', [REPO, './repo', '--force'])).toEqual(['ask', 'ask', 'ask', 'run'])
 })
 
 // One harness per test: the kit forbids registering hooks after the first $ call.

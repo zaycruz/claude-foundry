@@ -202,18 +202,24 @@ export function operatorOnlyReason(path: string): string | null {
 // (archive 1983c18a179c54ef1b4f9b18c50acd3db9c364d61f3d5e7cbfa73eea06c0e424,
 // built from commit 7b54958); the source lines are orthanc-source origin/main.
 //  - `repository clone <rid> <dir> --force` — src/repository_git.rs `run_clone`
-//    calls `std::fs::remove_dir_all(target)` on a non-empty target, then
-//    `git clone` into it. Without `--force` a non-empty target is a usage error,
-//    so a plain clone writes only where nothing was, and it stays the read the
-//    plugin's own skill tells the agent to run as plain `orthanc repository clone`.
+//    calls `std::fs::remove_dir_all(target)` (line 44) on a non-empty target,
+//    then `git clone` into it. Without `--force` a non-empty target is a usage
+//    error, so a plain clone writes only where nothing was, and it stays the read
+//    the plugin's own skill tells the agent to run as plain `orthanc repository
+//    clone`.
 //  - `dev-console sdk install --yes | --target <dir>` — src/dev_console_local.rs
-//    returns before `execute_step` unless the coordinates resolve and one of
-//    `--yes` / `--target` is set; the steps `dev_console_local_support.rs` builds
+//    `install` runs the steps unless the call is a plan (line 172: no
+//    coordinates, or neither `--yes` nor `--target`, or `args.dry_run`); the
+//    steps `dev_console_local_support.rs` builds
 //    are `npm install --registry … <name>@<version>` or `python3 -m pip install
 //    --index-url …`, of a package name and version taken from the application's
 //    SDK definition response. A package the server named runs its install scripts
 //    as the agent's user: `npm` needs `--target`, and `pip` needs `--yes` to
-//    leave a virtualenv.
+//    leave a virtualenv. `execute_step` is line 182, past both returns.
+// Both line numbers are read at commit 7b54958, the commit the v0.7.12 binary
+// reports, and both say the same thing about `--dry-run`: the command returns
+// before either the delete or the install (`run_clone` returns at line 30, four-
+// teen lines before the delete), which is what lets a plan stay a read.
 // Each entry keeps its own words, the way OPERATOR_ONLY_COMMANDS does, so the
 // sentence an operator reads cannot fall behind the rule that asked them.
 // Neither command defines a short alias (measured on the v0.7.12 binary:
@@ -275,11 +281,22 @@ function isPlanCall(args: readonly string[], command: ManifestCommand | undefine
   return args.some((raw, index) => {
     if (unquote(raw).trim().toLowerCase() !== '--dry-run') return false
     const previous = index === 0 ? '' : unquote(args[index - 1]!).trim().toLowerCase()
-    // A word another option took as its value is not the switch. The file's argv
-    // reader cannot show this: it nulls such a value and lists the word as a flag
-    // of its own, on purpose, because for a destructive flag over-reading is the
-    // safe direction. Here the safe direction is the other way round.
-    if (previous.startsWith('-') && shapes.get(previous)?.takesValue === true) return false
+    // A word another option took as its value is not the switch, so a hyphen-led
+    // word before this one owns it unless it proves it takes nothing — the same
+    // rule `baseBranchOnWorkBranch` and `positionals` apply to the identical
+    // pflag hazard, where a flag the manifest does not list leaves the call
+    // unproven and the guard asks more. The file's argv reader cannot show this:
+    // it nulls such a swallowed value and lists the word as a flag of its own,
+    // on purpose, because for a destructive flag over-reading is the safe
+    // direction. Here the safe direction is the other way round: an entry that
+    // stopped listing `--target` must not talk the guard into reading
+    // `--target --dry-run` as a plan and run the npm install.
+    if (previous.startsWith('-')) {
+      // `--target=./app` binds its own value, so nothing follows it that could be
+      // swallowed; `--target --dry-run` does not, and takes the word.
+      if (previous.includes('=')) return true
+      return shapes.get(previous)?.takesValue === false
+    }
     return true
   })
 }
@@ -2178,9 +2195,9 @@ export function ladderDecision(
   if (mode === 'yolo')
     return {
       outcome: 'run',
-      reason: classification.destructiveWhy
+      reason: (classification.destructiveWhy
         ? `yolo mode: nothing else asks; this write is destructive (${classification.destructiveWhy}) and runs with no ask`
-        : 'yolo mode: nothing else asks; work stays on branches that are not main',
+        : 'yolo mode: nothing else asks; work stays on branches that are not main') + local,
     }
   if (classification.isDestructive) {
     // Both claims are kept: outside yolo a write that is destructive *and* names
@@ -2195,9 +2212,9 @@ export function ladderDecision(
     }
   }
   if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval${local}` }
-  if (mode === 'allow-edits') return { outcome: 'run', reason: 'allow-edits mode: non-protected mutations run' }
+  if (mode === 'allow-edits') return { outcome: 'run', reason: `allow-edits mode: non-protected mutations run${local}` }
   if (!verdict) return { outcome: 'ask', reason: `'${command}': guard unavailable; failing closed to a human decision${local}` }
-  if (verdict.action === 'approve') return { outcome: 'run', reason: verdict.reason }
+  if (verdict.action === 'approve') return { outcome: 'run', reason: `${verdict.reason}${local}` }
   return { outcome: 'ask', reason: `'${command}': ${verdict.reason}${local}` }
 }
 
