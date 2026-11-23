@@ -153,6 +153,9 @@ type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) 
 const call = ($: Engine, command: string, args: string[] = []) =>
   $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string; result?: unknown }>
 const refusedAsPromotion = (reply: { deny?: string }, asked: number) => asked === 0 && /promotes work .*The operator does it/.test(reply.deny ?? '')
+// The guard's own refusals before any question: no branch where one is needed,
+// or a release tag whose call does not show what the operator would approve.
+const refusedBeforeAsking = (reply: { deny?: string }, asked: number) => asked === 0 && /names no --branch, so it would change the main ontology|names no --branch, so it would write the default branch|must name a repository RID, a plain tag and one --commit-hash/.test(reply.deny ?? '')
 const ran = (h: Harness, path: string) => h.calls.filter(line => line === path || line.startsWith(`${path} `))
 
 /** A call of `entry` with every flag of its operator_approval, a placeholder
@@ -204,6 +207,7 @@ test('S4: in yolo, a work-branch marker of the release snapshot runs on a work b
   const h = harness(on)
   const scoped = markers().filter(entry => ['work-branch', 'flag'].includes(readApprovalScope(entry.operator_approval_scope)?.kind ?? ''))
   expect(scoped.length > 0).toBe(true)
+  const outcomes: string[] = []
   for (const entry of scoped) {
     const before = h.asked.length
     const work = await call($, entry.path, markedCall(entry, 'work'))
@@ -211,11 +215,20 @@ test('S4: in yolo, a work-branch marker of the release snapshot runs on a work b
     const promotion = refusedAsPromotion(work, h.asked.length - before)
     expect({ path: entry.path, deny: promotion ? undefined : work.deny, asked: h.asked.length - before }).toEqual({ path: entry.path, deny: undefined, asked: 0 })
     h.answer = 'Decline'
-    const main = await call($, entry.path, markedCall(entry, readApprovalScope(entry.operator_approval_scope)?.kind === 'flag' ? 'none' : 'main'))
+    // Aimed at main: by name it asks (declined here); with no --branch at all,
+    // a write the guard knows needs a branch is refused before any question.
+    for (const target of readApprovalScope(entry.operator_approval_scope)?.kind === 'flag' ? (['main', 'none'] as const) : (['main'] as const)) {
+      const asked = h.asked.length
+      const main = await call($, entry.path, markedCall(entry, target))
+      const outcome = promotion ? 'promotion' : h.asked.length - asked === 1 ? 'asked' : refusedBeforeAsking(main, h.asked.length - asked) ? 'refused' : 'neither'
+      expect({ path: entry.path, target, denied: typeof main.deny === 'string', stopped: outcome !== 'neither' }).toEqual({ path: entry.path, target, denied: true, stopped: true })
+      outcomes.push(outcome)
+    }
     h.answer = 'Approve'
-    expect({ path: entry.path, denied: typeof main.deny === 'string', stopped: promotion || h.asked.length - before > 0 }).toEqual({ path: entry.path, denied: true, stopped: true })
     expect(ran(h, entry.path).length).toBe(promotion ? 0 : 1)
   }
+  // Most writes aimed at main ask; a refusal is the exception, not the way they pass.
+  expect(outcomes.filter(outcome => outcome === 'asked').length > outcomes.length / 2).toBe(true)
 })
 
 for (const mode of MODES) {
