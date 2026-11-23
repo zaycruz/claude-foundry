@@ -1219,13 +1219,25 @@ export function mcpWords(name: string): string[] {
  * guard ran a write it used to refuse (found in review of this change, and the reason
  * the two answers are not symmetric). A camelCase read such as `listObjects` is
  * refused with a reason; the operator can allow it by hand.
+ *
+ * The write answer is the UNION of both splits, and it has to be. The separator split
+ * cuts on digits and the case split does not, so `list_and_delete2objects` shows the
+ * verb `delete` only to the separator split. Reading only the case-split words hid a
+ * write verb that e01f1dd saw, and the guard ran the write (also found in review).
  */
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
-  const words = mcpWords(inner)
+  const coarse = inner.toLowerCase().split(/[^a-z]+/)
+  const words = [...coarse, ...mcpWords(inner)]
   if (words.some(word => WRITE_WORDS.has(word))) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
-  if (inner.toLowerCase().split(/[^a-z]+/).some(word => READ_WORDS.has(word))) return 'read'
+  if (coarse.some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
+}
+
+/** What the guard says about a blocked Foundry MCP tool: only what the name shows. */
+function mcpIntentError(tool: string, intent: 'read' | 'write' | 'unknown'): string {
+  if (intent === 'write') return `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`
+  return `${tool} is a Foundry call the guard cannot read, so nothing runs. If this tool only reads, give it a name the guard can read (list_objects). To write, use orthanc_cli with --branch.`
 }
 
 /** A Foundry call the guard cannot read: blocked in every mode, so it never runs blind. */
@@ -1290,7 +1302,7 @@ export function classifyCall(
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
       isDestructive: mcpWords(inner).includes('delete'),
-      error: `${tool} ${classifyMcpIntent(inner) === 'write' ? 'writes to Foundry' : 'is a Foundry call the guard cannot read'} outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
+      error: mcpIntentError(tool, classifyMcpIntent(inner)),
     }
   }
   return null

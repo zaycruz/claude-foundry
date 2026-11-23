@@ -48,8 +48,10 @@ says so instead of falling back to REST.
   repository and Foundry writes outside Orthanc are blocked. A MCP tool from a
   server named for Palantir or Foundry counts as such a write in any case or
   spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
-  `mcp__palantirFoundry__…`), not only the exact name `mcp__palantir__`; a tool
-  whose name only reads (`list`, `get`, `search`) still runs; a name carrying both
+  `mcp__palantirFoundry__…`), not only the exact name `mcp__palantir__`. A tool
+  whose name reads with plain separated words (`list_objects`, `get-object`,
+  `search data`) still runs; a camelCase read (`listObjects`) is refused, because
+  the same shape hides a second verb. A name carrying both
   a read verb and a write verb (`view_branch_and_revoke_protection`) counts as a
   write, and one whose name the guard cannot read is refused. A write naming
   `main`/`master` asks the operator (above). Writes whose branch defaults to

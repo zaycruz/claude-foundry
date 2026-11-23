@@ -5,8 +5,8 @@
 // mode. Until now the gate matched one name, `/^mcp__palantir(-mcp)?__/`, so
 // the same call passed whenever the server was spelled or written another way:
 // measured on origin/main (e01f1dd), `mcp__Palantir__delete_object`,
-// `mcp__foundry_tools__delete_object` and `mcp__ontology__delete_object` all
-// ran, unclassified, in ask-always, allow-edits, auto and yolo. The plugin's own
+// `mcp__foundry_tools__delete_object` and `mcp__palantirFoundry__delete_object`
+// all ran, unclassified, in ask-always, allow-edits, auto and yolo. The plugin's own
 // tracer already reads the wider shape (`register.tsx` touchesFoundry:
 // /^mcp__.*(palantir|foundry)/i), so the trace knew about a call the guard had
 // let through. zay, initial commit and standing instructions: "Orthanc is the
@@ -30,9 +30,13 @@
 //      the trace and every other reader see a plain mutation.
 //  MS9 The widening lets through a call the old gate refused — the one failure this
 //      rule can cause. Found in review of the first fix, twice: camelCase splitting
-//      for the read answer made `listAndUpsertRows` read as `list`.
+//      for the read answer made `listAndUpsertRows` read as `list`, and a verb glued
+//      to a digit (`list_and_delete2objects`) was invisible to the new tokenizer.
 //  MS10 A refusal claims more than the name shows, so the operator trusts the wrong
 //      reason: an unreadable name reported as a write.
+//
+// A server that names no Foundry product (`mcp__osdk__…`, `mcp__ontology__…`) stays
+// open, here and at e01f1dd. MS8 pins that as a known limit, not as a pass.
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
@@ -132,6 +136,9 @@ test('MS9: nothing the old gate refused runs now', async () => {
     'mcp__palantir__stopBuild', 'mcp__palantir__acceptRequest', 'mcp__palantir__protectBranch',
     'mcp__palantir__revertCommit', 'mcp__palantir__rollbackPipeline', 'mcp__palantir__syncBranch',
     'mcp__palantir__getAndResetStream', 'mcp__palantir__view_branch_and_revoke_protection',
+    'mcp__palantir__list_and_delete2objects', 'mcp__palantir__list_run2thing',
+    'mcp__palantir__get_and_delete2', 'mcp__palantir__list2deleteObjects',
+    'mcp__palantir__list2objects', 'mcp__foundry__get_object2',
     'mcp__palantir__delete_object', 'mcp__palantir__run_build', 'mcp__palantir__do_the_thing',
     'mcp__palantir__describe_branch', 'mcp__palantir__query_objects', 'mcp__palantir__preview_dataset',
     'mcp__palantir__check_health', 'mcp__palantir__read_object', 'mcp__palantir__inspect_branch',
@@ -145,6 +152,12 @@ test('MS9: nothing the old gate refused runs now', async () => {
     // ran at base and is a write now); it may never run more.
     if (base === false) expect({ tool, runs }).toEqual({ tool, runs: false })
   }
+  // The same rule, read the other way. A verb glued to a digit is a write verb the
+  // old tokenizer saw, so the write answer must see it too. `list2deleteObjects` is
+  // the shape neither split can read as a write (`deleteobjects` is one word to both,
+  // and `list` is a read verb): it ran at e01f1dd and still runs. That is the documented
+  // vocabulary limit, not a new hole, and it is why the server list is the durable fix.
+  expect({ a: classifyMcpIntent('list_and_delete2objects'), b: classifyMcpIntent('list_run2thing'), c: classifyMcpIntent('list2deleteObjects') }).toEqual({ a: 'write', b: 'unknown', c: 'read' })
 })
 
 test('MS10: the refusal says only what the name tells it', async () => {
@@ -153,6 +166,8 @@ test('MS10: the refusal says only what the name tells it', async () => {
   const unknown = classifyCall('mcp__palantir__do_the_thing', {}, MANIFEST, 'agent/x')?.error ?? ''
   expect({ write: write.includes('writes to Foundry'), unknown: unknown.includes('cannot read') }).toEqual({ write: true, unknown: true })
   expect({ namesTool: unknown.includes('mcp__palantir__do_the_thing'), pointsAtOrthanc: unknown.includes('orthanc_cli') }).toEqual({ namesTool: true, pointsAtOrthanc: true })
+  // A name the guard cannot read is never called a write.
+  expect({ unknownCallsWrite: unknown.includes('writes to Foundry') }).toEqual({ unknownCallsWrite: false })
 })
 
 test('MS7: the delete word still marks the call destructive', async () => {
