@@ -122,8 +122,13 @@ const POSITIONAL_BRANCH_WRITES = new Set([
   'branch-protection repo policy set',
   'branch-protection repo unprotect',
 ])
-// Promotion into main is the operator's decision, not the agent's. A release
-// tag is not here: it asks the operator outside yolo (see releaseTagCall).
+// A promotion into main through a proposal: a merge, an accept, an approval, a
+// deploy or a pull-request merge. It is not a direct write to main — the
+// proposal is — so it is not refused (zay, 2026-11-20: "the default fde mode
+// should be able to do whatever it wants on a branch and raise the proposal and
+// merge the proposal, just nothing direct against main or master"). Yolo runs
+// one with no ask; every other mode follows the ladder, where the manifest's
+// operator_approval marks ask. A release tag is not here: it asks outside yolo.
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'global-branch deploy', 'repository pull-request merge'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
@@ -220,6 +225,8 @@ export type GateClassification = {
   operatorApproval?: string
   /** True when operator_approval_scope proves the write lands on one global work branch: yolo skips the ask. */
   operatorApprovalOnWorkBranch?: true
+  /** True for a promotion into main through a proposal (merge, accept, approve, deploy, pull-request merge): not a direct write to main, so yolo runs it with no ask. */
+  promotion?: true
   error?: string
 }
 
@@ -688,7 +695,8 @@ const branchCore = (value: string) =>
     .replace(/^(\.\/)+/, '')
     .replace(/^(refs\/)?heads\//, '')
     .replace(/[/.]+$/, '')
-const isProtectedValue = (value: string) => PROTECTED_BRANCHES.includes(branchCore(value)) || branchCore(value) === 'head'
+/** True when the value names main, master or HEAD, however it is spelled (`refs/heads/main`, `+master`, `:HEAD`, `./main/`). */
+export const isProtectedValue = (value: string) => PROTECTED_BRANCHES.includes(branchCore(value)) || branchCore(value) === 'head'
 
 export function branchIsWorking(branch: string | null | undefined): boolean {
   return typeof branch === 'string' && branch.trim() !== '' && !isProtectedValue(branch)
@@ -805,9 +813,6 @@ const positionals = (args: readonly string[]) => {
 export function branchRuleReason(command: string, args: readonly string[]): string | null {
   if (MAIN_ONLY_WRITES.has(command)) {
     return `'${command}' writes live data on the main ontology branch and cannot take --branch. Agents do not run it: use 'ontology action-apply --branch <global branch RID>' or hand it to the operator.`
-  }
-  if (PROMOTIONS.has(command)) {
-    return `'${command}' promotes work (a merge, an approval or a release). The operator does it; the agent does not.`
   }
   if (argsNameFlag(args, ['--allow-default-branch'])) {
     return `'${command} --allow-default-branch' writes the default branch. Use a work branch (and, for code, a pull request).`
@@ -984,6 +989,7 @@ function orthancClassification(
       ...(release !== null ? release : {}),
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
+      ...(PROMOTIONS.has(command) ? { promotion: true as const } : {}),
       ...(refused ? { error: refused } : {}),
     }
   }
@@ -1896,13 +1902,15 @@ export function ladderDecision(
   // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
   // necessary for anything on the branch, only main." A release tag or a write
   // the manifest marks operator_approval asks in every mode; yolo skips it only
-  // when the call is shown to land on one global work branch. These come before
-  // yolo's early run, so nothing that lands on main runs unasked.
+  // when the call is shown to land on one global work branch. A promotion
+  // (zay, 2026-11-20: "raise the proposal and merge the proposal") asks in
+  // every mode but yolo too. These come before yolo's early run, so nothing
+  // that lands on main runs unasked.
   const yolo = mode === 'yolo'
   if (classification.release && !(yolo && classification.releaseOnWorkBranch)) {
     return { outcome: 'ask', reason: classification.release }
   }
-  if (classification.operatorApproval && !(yolo && classification.operatorApprovalOnWorkBranch)) {
+  if (classification.operatorApproval && !(yolo && (classification.operatorApprovalOnWorkBranch || classification.promotion))) {
     return { outcome: 'ask', reason: classification.operatorApproval }
   }
   if (classification.kind === 'branch-creation') {
@@ -1958,16 +1966,19 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Branch rule: agent work happens on branches, never on a production main. Every ontology write ' +
     'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>; `ontology scenario create` spells its branch --base-branch); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
-    'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
+    'Writes without a branch and default-branch pushes are blocked in every mode. ' +
+    'Promotions — merging, accepting or approving a proposal, global-branch deploy, repository pull-request merge — ' +
+    'are allowed (they land through a proposal, never directly on main). ' +
     'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +
     (mode === 'yolo'
       ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
-        'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
+        'and the loop guard is off. A promotion runs with no ask. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
         'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
-      : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
+      : 'Promotions follow the ladder like any other write. ' +
+        'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
         'when a value a flag takes names such an act, either among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`) or spelled in caps the way Orthanc spells an enumerated value, ' +
         'or when it is given --force. ' +
