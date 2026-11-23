@@ -1710,6 +1710,8 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   // A call over the cap, or one that fills the operator's credential store, is
   // refused here, before the ladder can ask the operator to approve a call that
   // cannot run. executeCli checks again.
+  // It sits after the FDE gate on purpose: that gate can rewrite argv, and the
+  // timer has to cover the call that would really run.
   if (tool === ORTHANC_CLI) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
     const command = manifest.find(entry => entry.path === resolved.path)
