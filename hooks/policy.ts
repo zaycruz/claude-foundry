@@ -196,6 +196,62 @@ export function operatorOnlyReason(path: string): string | null {
   const why = OPERATOR_ONLY_COMMANDS[path]
   return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
 }
+// Two commands whose own manifest entry says `kind: read-only`, because nothing
+// on Foundry changes, and whose flags say the call writes the machine the agent
+// works on. Measured on the sha-256-verified orthanc v0.7.12 release binary
+// (archive 1983c18a179c54ef1b4f9b18c50acd3db9c364d61f3d5e7cbfa73eea06c0e424,
+// built from commit 7b54958); the lines quoted are orthanc-source origin/main.
+//  - `repository clone <rid> <dir> --force` — src/repository_git.rs `run_clone`
+//    calls `std::fs::remove_dir_all(target)` on a non-empty target, then
+//    `git clone` into it. Without `--force` a non-empty target is a usage error,
+//    so a plain clone writes only where nothing was, and it stays the read the
+//    plugin's own skill tells the agent to run as plain `orthanc repository clone`.
+//  - `dev-console sdk install --yes | --target <dir>` — src/dev_console_local.rs
+//    runs the steps `dev_console_local_support.rs` builds: `npm install
+//    --registry … <name>@<version>`, or `python3 -m pip install --index-url …`,
+//    of a package name and version taken from the application's SDK definition
+//    response. A package the server named runs its install scripts as the agent's
+//    user; `npm` needs no flag at all beyond `--target`, and `pip` needs `--yes`
+//    to leave a virtualenv.
+// The flags are read because both commands print a plan and run nothing without
+// them, and `--dry-run` returns before either touches the disk. This is not
+// "a read with a file flag": `sql export --out f.csv` writes a data file and
+// stays a read (hooks/operator-handoff.test.ts Q6). Orthanc still labels both
+// entries `read-only` in the pinned snapshot, and hooks/local-write.test.ts LW8
+// fails loudly when an orthanc-side mark makes this table redundant.
+const LOCAL_WRITE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  'repository clone': ['--force'],
+  'dev-console sdk install': ['--yes', '--target'],
+}
+
+// `orthanc repository clone` is exempt from the ladder in its own right, whatever
+// a manifest says: it pulls a Code Repository into a local folder, and the plugin's
+// own skill tells the agent to run it as plain `orthanc repository clone`. Its
+// `--branch` is a Code Repository branch, so reading it as a write aimed at main
+// would refuse a pull. LOCAL_WRITE_FLAGS above still judges its --force form.
+const LOCAL_PULLS = new Set(['repository clone'])
+
+/** Why this `read-only` command writes this machine instead of reading Foundry,
+ * or null when the call reads. `--dry-run` answers null: the command prints its
+ * plan and stops. Read on the object's own keys, because `command` is free-form
+ * text in the tool schema (hooks/operator-handoff.test.ts Q9). */
+export function writesThisMachine(path: string, args: readonly string[]): string | null {
+  if (!Object.prototype.hasOwnProperty.call(LOCAL_WRITE_FLAGS, path)) return null
+  if (argsNameFlag(args, ['--dry-run'])) return null
+  const flags = LOCAL_WRITE_FLAGS[path]!
+  const named = flags.filter(flag => argsNameFlag(args, [flag]))
+  return named.length === 0 ? null : `'${path}' writes this machine, not Foundry: it runs ${named.map(flag => `\`${flag}\``).join(' or ')}`
+}
+
+/** The line `orthanc_help` puts on the command's own page, so the agent learns
+ * it there instead of spending a call on it. */
+export function localWriteNote(path: string): string | null {
+  if (!Object.prototype.hasOwnProperty.call(LOCAL_WRITE_FLAGS, path)) return null
+  return path === 'repository clone'
+    ? 'Writes this machine, not Foundry: with --force it deletes a non-empty target directory before cloning, so that call goes through the approval ladder and is refused in Bash.'
+    : "Writes this machine, not Foundry: with --yes or --target it runs npm or pip install of the packages this application's SDK definition names, so that call goes through the approval ladder and is refused in Bash."
+}
+
 // Orthanc `local` commands that only read local state.
 const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
@@ -239,9 +295,16 @@ const lastWord = (text: string) => text.split(/\s+/).at(-1) ?? ''
 export function classifyOrthancCommand(
   command: string,
   manifest: readonly ManifestCommand[],
+  /** The words after the command name: two `read-only` entries are a write with
+   * the right flag and a plan without it. Empty reads as a plan. */
+  args: readonly string[] = [],
 ): 'read' | 'mutation' {
   const normalized = command.trim().toLowerCase()
   const declared = manifest.find(entry => entry.path === normalized)
+  // Before the `read-only` short-circuit: two entries Orthanc calls a read write
+  // this machine, and a read short-circuits the ladder, the ask and the trace.
+  if (declared !== undefined && writesThisMachine(normalized, args) !== null) return 'mutation'
+  if (LOCAL_PULLS.has(normalized)) return 'read'
   if (declared?.kind === 'read-only') return 'read'
   if (declared?.kind === 'local' && LOCAL_READS.has(normalized)) return 'read'
   if (declared === undefined && READ_VERBS.has(lastWord(normalized))) return 'read'
@@ -1779,7 +1842,7 @@ function shellClassification(
     if (call.path === '' && !call.help && call.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    if (call.help || call.path === '' || call.path === 'repository clone') continue
+    if (call.help || call.path === '') continue
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
@@ -1794,7 +1857,7 @@ function shellClassification(
     if (operatorOnly !== null) return refuse(call.path, operatorOnly)
     // The manifest entry this call names, read once: the wait timer below
     // (shellOrthancCalls) judges the same entry the ladder judged here.
-    if (classifyOrthancCommand(call.path, manifest) === 'read' && call.entry?.operatorApproval === undefined) continue
+    if (classifyOrthancCommand(call.path, manifest, call.args) === 'read' && call.entry?.operatorApproval === undefined) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null
@@ -1945,13 +2008,13 @@ export function classifyCall(
     if (resolved.path === '' && resolved.args.length > 0) {
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
-    if (resolved.path === '' || resolved.path === 'repository clone') return null
+    if (resolved.path === '') return null
     // Before the read short-circuit: these two are `read-only` in the manifest,
     // and what they print or write is the whole point of the call.
     const operatorOnly = operatorOnlyReason(resolved.path)
     if (operatorOnly !== null) return unreadableCall(input, workingBranch, operatorOnly)
     // A read whose entry also asks for the operator is not let through as a read.
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
+    if (classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
     // orthanc reads the last --profile it is given, so one in the args would move
     // the write off the stack the operator picked. Reads may look at another stack.
     if (resolved.args.some(arg => PROFILE_FLAG.test(unquote(arg)))) {

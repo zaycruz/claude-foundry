@@ -16,7 +16,7 @@
 //  V5  the binary is swapped mid-session: the warning follows the new read.
 
 /** The plugin version, as in .claude-plugin/plugin.json `version`. */
-export const PLUGIN_VERSION = '0.7.0'
+export const PLUGIN_VERSION = '0.7.1'
 /** The oldest orthanc this plugin supports (plugin.json `min_orthanc`). */
 export const MIN_ORTHANC = '0.7.8'
 /** The orthanc the guard was last checked against (plugin.json `orthanc_checked`); hooks/orthanc-manifest.snapshot.ts is its manifest. */

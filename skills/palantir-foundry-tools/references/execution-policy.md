@@ -28,7 +28,7 @@ Code repositories are cloned locally through Orthanc, never through raw git smar
 
 1. Resolve the repository name to a RID with `orthanc search "<name>"` (Compass resources of type code repository; the RID looks like `ri.stemma.main.repository.…`).
 2. Plan first: `orthanc_cli repository clone <rid> <target-dir> --dry-run` — the envelope resolves the git URL, default branch, and target without writing anything.
-3. Clone: `orthanc_cli repository clone <rid> <target-dir>` (add `-b <branch>` for a non-default branch, `--force` to reuse a non-empty directory).
+3. Clone: `orthanc_cli repository clone <rid> <target-dir>` (add `-b <branch>` for a non-default branch). `--force` reuses a non-empty directory by deleting what is in it first, so the mod judges it as a write: do not add it to make a refusal go away — report the directory instead.
 4. Work inside the clone with absolute paths (plain git and file tools); use `orthanc repository context <rid>` for the remote tree and `orthanc repository push` / `repository pull-request *` to ship changes back.
 5. Deleting the clone directory is allowed. Never print `git remote -v` for a clone: the remote URL can carry a token.
 

@@ -883,7 +883,12 @@ async function fdeGate(
   manifest: readonly ManifestCommand[],
 ): Promise<{ deny: string } | { input: Record<string, unknown>; ran: string | null }> {
   const resolved = resolveOrthancCommand(asString(input.command), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
-  const isMutation = resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest) === 'mutation'
+  // `repository clone` stays out of the binding: its --branch is a Code
+  // Repository branch, so binding it to the session's global branch, or reading
+  // `--branch main` as a write aimed at main, would be wrong. Its --force form
+  // is still judged as a write by the ladder (hooks/local-write.test.ts).
+  const isMutation =
+    resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'mutation'
   const bound = fdeBind(fde, resolved.path, resolved.args, isMutation)
   if ('deny' in bound) return bound
   return { input: { ...input, command: resolved.path, args: bound.args }, ran: isMutation ? resolved.path : null }
