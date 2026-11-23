@@ -1684,19 +1684,113 @@ function shellClassification(
   return null
 }
 
-const PALANTIR_MCP = /^mcp__palantir(-mcp)?__/
-const WRITE_WORDS = new Set(['add', 'apply', 'build', 'create', 'delete', 'deploy', 'edit', 'install', 'post', 'publish', 'put', 'remove', 'rename', 'set', 'submit', 'update', 'write'])
+// A Foundry MCP server, in any spelling the operator typed into their config: the
+// name says palantir or foundry (`Palantir`, `palantir-mcp`, `foundry_tools`,
+// `palantirFoundry`). The test is a substring, the same width the plugin's own
+// tracer uses, because a word boundary would miss the glued and camelCase names:
+// `[^a-z]` under `/i` also excludes `A`-`Z`, so a boundary rule leaves
+// `palantirFoundry`, `FoundryMCP` and `palantirfoundry` — the host form this repo
+// itself writes in `register.tsx` and `telemetry.test.ts` — running with no ladder
+// while the trace still calls them Foundry. A gate narrower than the trace is the
+// defect this table exists to close (measured on e01f1dd: `mcp__Palantir__delete_object`
+// and `mcp__foundry_tools__delete_object` ran in all four modes).
+const FOUNDRY_MCP_NAME = /(?:palantir|foundry)/i
+const MCP_PREFIX = 'mcp__'
+// The trace has always read the prefix case-insensitively, so the guard does too.
+// `MCP__Palantir__delete_object` is the same call spelled with the caps-lock on.
+const MCP_PREFIX_RE = /^mcp__/i
+
+/** `mcp__<server>__<tool>` as its two parts; null when the name is not an MCP tool. */
+function mcpToolParts(tool: string): { server: string; inner: string } | null {
+  if (!MCP_PREFIX_RE.test(tool)) return null
+  const rest = tool.slice(MCP_PREFIX.length)
+  const split = rest.indexOf('__')
+  if (split < 1 || split + 2 > rest.length) return null
+  return { server: rest.slice(0, split), inner: rest.slice(split + 2) }
+}
+
+/** True for an MCP tool that reaches Foundry: its server or its own name says so. */
+export function foundryMcpTool(tool: string): { inner: string } | null {
+  const parts = mcpToolParts(tool)
+  if (parts === null)
+    // A name without the `mcp__<server>__<tool>` shape: read the rest as the tool,
+    // so the guard and the trace see the same set of names. The prefix test ignores
+    // case, as the trace's does, or `MCP__Palantir__delete_object` would be traced
+    // as Foundry and never gated.
+    return MCP_PREFIX_RE.test(tool) && FOUNDRY_MCP_NAME.test(tool.slice(MCP_PREFIX.length))
+      ? { inner: tool.slice(MCP_PREFIX.length) }
+      : null
+  return FOUNDRY_MCP_NAME.test(parts.server) || FOUNDRY_MCP_NAME.test(parts.inner) ? { inner: parts.inner } : null
+}
+
+/**
+ * The one answer to "does this call touch Foundry", for the guard and for the
+ * trace. A second copy of the name test is how the two drift apart: a call the
+ * trace called Foundry while the guard did not ran with no ladder.
+ */
+export function touchesFoundryTool(tool: string, input: Record<string, unknown>): boolean {
+  if (tool === ORTHANC_CLI || tool === ORTHANC_HELP) return true
+  if (tool === 'Bash') return /\borthanc\b/.test(typeof input.command === 'string' ? input.command : '')
+  return foundryMcpTool(tool) !== null
+}
+
+// The verbs this plugin already treats as writes elsewhere. `MAIN_ONLY_WRITES` holds
+// `ontology object-upsert` and `dataset transactions start`, the denied set the stream
+// and auth commands, `PROMOTIONS` `proposal accept`. An MCP tool naming one of those
+// verbs is a write too. Without them a name like
+// `view_branch_and_revoke_protection` hits only its read verb and runs with no ladder.
+// The list is a vocabulary and will never be complete; that is why an unreadable name
+// fails closed instead of running.
+const WRITE_WORDS = new Set(['accept', 'add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'reset', 'restart', 'revert', 'revise', 'revoke', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'truncate', 'unprotect', 'update', 'upload', 'upsert', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
 
+/** Words in a tool name: split on separators and on letter case, so `deleteObjects`,
+`delete_objects` and `DeleteObjects` all give `delete` and `objects`. */
+function mcpWords(name: string): string[] {
+  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).map(word => word.toLowerCase()).filter(word => word !== '')
+}
+
+/** Every word either splitter can find in a tool name. */
+function mcpAllWords(inner: string): string[] {
+  return [...inner.toLowerCase().split(/[^a-z]+/), ...mcpWords(inner)]
+}
+
+/**
+ * What a Foundry MCP tool name says about itself. A write or an ambiguous verb wins,
+ * read the second, and anything else is `unknown`, which the guard refuses.
+ *
+ * The read answer is deliberately narrower than the write answer. A name counts as a
+ * read only when the plain separator split — the one that shipped at e01f1dd — finds
+ * the read verb: `list_objects`, `get-object`, `search data`. CamelCase is used to
+ * find writes (`deleteObjects`, `listAndUpsertRows`), never to let a call through,
+ * because camelCase is also how a compound name hides its second verb: splitting on
+ * case for the read answer turned `listAndUpsertRows` into a plain `list` and the
+ * guard ran a write it used to refuse (found in review of this change, and the reason
+ * the two answers are not symmetric). A camelCase read such as `listObjects` is
+ * refused with a reason. Nothing in this plugin lets an operator allow one by hand:
+ * the block holds in every mode.
+ *
+ * The write answer is the UNION of both splits, and it has to be. The separator split
+ * cuts on digits and the case split does not, so `list_and_delete2objects` shows the
+ * verb `delete` only to the separator split. Reading only the case-split words hid a
+ * write verb that e01f1dd saw, and the guard ran the write (also found in review).
+ */
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
-  const words = inner.toLowerCase().split(/[^a-z]+/)
+  const coarse = inner.toLowerCase().split(/[^a-z]+/)
+  const words = mcpAllWords(inner)
   // A destructive word outranks a read word: `get_uninstall_plan` names an
   // uninstall, and a read that reads as a write only costs a refusal.
   if (words.some(word => WRITE_WORDS.has(word)) || destructiveTermIn(inner) !== null) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
-  if (words.some(word => READ_WORDS.has(word))) return 'read'
+  if (coarse.some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
+}
+
+/** What the guard says about a blocked Foundry MCP tool: only what the name shows. */
+function mcpIntentError(tool: string, intent: 'read' | 'write' | 'unknown'): string {
+  if (intent === 'write') return `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`
+  return `${tool} is a Foundry call the guard cannot read, so nothing runs. A name with plain separated words (list_objects) reads; a camelCase name does not. Orthanc is the write path: orthanc_cli with --branch.`
 }
 
 /** A Foundry call the guard will not run and asks no one about: one it cannot
@@ -1753,27 +1847,25 @@ export function classifyCall(
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
-  if (PALANTIR_MCP.test(tool)) {
-    const inner = tool.replace(PALANTIR_MCP, '')
+  // The plugin's own discovery tool reads only the manifest; it is named under the
+  // plugin's own server, which is a Foundry name.
+  if (tool === ORTHANC_HELP) return null
+  const foundryMcp = foundryMcpTool(tool)
+  if (foundryMcp !== null) {
+    const inner = foundryMcp.inner
+    const intent = classifyMcpIntent(inner)
+    if (intent === 'read') return null
     const mcpWord = destructiveTermIn(inner)
-    if (classifyMcpIntent(inner) === 'read') return null
-    // No `destructiveWhy` here: this lane never asks, it refuses, and the refusal
-    // below is the whole answer the operator and the model get.
     return {
       command: null,
       kind: 'mutation',
       isBranchScoped: false,
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
-      // A Palantir MCP write is blocked either way (Orthanc is the only write
-      // path). The word is read here so a tool named for one of the 18 acts is
-      // judged as a write: at the base only `delete` and `remove` were, so
-      // `mcp__palantir__purge_resources` answered 'read' and was let through with
-      // no classification at all. The cost is the other direction — a read whose
-      // name carries such a word is refused and told to use orthanc_cli — which
-      // costs a turn, not a row, and is pinned in destructive.test.ts D10.
-      isDestructive: mcpWord !== null,
-      error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
+      // Read by name too, so a tool named for one of the destructive acts is judged
+      // as destructive, not only one whose name says `delete` (destructive.test.ts D10).
+      isDestructive: mcpWord !== null || mcpAllWords(inner).includes('delete'),
+      error: mcpIntentError(tool, intent),
     }
   }
   return null

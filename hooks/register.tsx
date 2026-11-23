@@ -113,6 +113,7 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
+  touchesFoundryTool,
   shellOrthancCalls,
   branchesIn,
   STORED_BRANCH_RUNS,
@@ -725,12 +726,6 @@ async function exportTurn($: EngineInterface, key: string, answer: string, usage
   } catch (error) {
     sent.status = `failed: ${redactString(error instanceof Error ? error.message : 'fetch error').slice(0, 120)}`
   }
-}
-
-function touchesFoundry(tool: string, input: Record<string, unknown>, classified: boolean): boolean {
-  if (classified || tool === ORTHANC_CLI || tool === ORTHANC_HELP) return true
-  if (tool === 'Bash') return /\borthanc\b/.test(asString(input.command))
-  return /^mcp__.*(palantir|foundry)/i.test(tool)
 }
 
 async function traceText($: EngineInterface): Promise<string> {
@@ -1756,7 +1751,9 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...raw } =
     e as unknown as Record<string, unknown>
   let input: Record<string, unknown> = raw
-  note.foundry = touchesFoundry(tool, input, false)
+  // One predicate with the gate: a call the trace called Foundry while the guard did
+  // not would run with no ladder and no branch rule.
+  note.foundry = touchesFoundryTool(tool, input)
   note.outcome = 'block'
   const rootReason = compassRootReason(tool, input)
   if (rootReason) return { deny: rootReason }
@@ -1844,8 +1841,10 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (classification) {
     note.foundry = true
     note.command = classification.command ?? undefined
+    // A call that already carries a refusal needs no second opinion: the ladder blocks
+    // on `error` before it looks at the model, so the call would only cost a round trip.
     const verdict =
-      mode === 'auto' && classification.kind === 'mutation'
+      mode === 'auto' && classification.kind === 'mutation' && !classification.error
         ? await guardVerdict($, tool, input, classification).catch(() => null)
         : undefined
     const decision = ladderDecision(mode, classification, verdict)

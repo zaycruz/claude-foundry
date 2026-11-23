@@ -77,7 +77,16 @@ says so instead of falling back to REST.
   a pull request. Branchless writes, `--allow-default-branch`, proposal
   merges and approvals, `global-branch deploy`, `repository pull-request
   merge`, default-branch pushes, raw `git push` to a Foundry
-  repository and Foundry writes outside Orthanc are blocked. A write naming
+  repository and Foundry writes outside Orthanc are blocked. A MCP tool counts as
+  such a write when its server name or its tool name says Palantir or Foundry, in any
+  case or spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
+  `mcp__palantirFoundry__…`, `mcp__tools__foundry_delete_object`), not only the exact
+  name `mcp__palantir__`. A tool
+  whose name reads with plain separated words (`list_objects`, `get-object`,
+  `search data`) still runs; a camelCase read (`listObjects`) is refused, because
+  the same shape hides a second verb. A name carrying both
+  a read verb and a write verb (`view_branch_and_revoke_protection`) counts as a
+  write, and one whose name the guard cannot read is refused. A write naming
   `main`/`master` asks the operator (above). The one ontology write whose branch
   spelling is not `--branch` is `ontology scenario create`: it takes
   `--base-branch <global branch RID>`, and a `--apply` without one asks the
