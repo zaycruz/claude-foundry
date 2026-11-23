@@ -120,17 +120,27 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/onboard`, `/mcp-status` | Check orthanc, profiles, stack, credentials, context |
 | `/auth [profile]` | How to store credentials, and whether they work |
 | `/profile`, `/ontology`, `/namespace`, `/project` | Choose the stack, ontology, namespace, projects |
-| `/object-type`, `/action-type` | Ontology types in scope |
-| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
+| `/object-type`, `/action-type`, `/link-type`, `/interface` | Ontology types in scope |
+| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` `/automation` | Compass resources and automations in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
 | `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt any open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
-filter, and `clear`. `/link-type`, `/interface`, `/egress-policy`,
-`/certificate` and `/automation` wait on Orthanc list commands and say so; the
-mod never falls back to Foundry REST.
+filter, and `clear`. `/egress-policy` and `/certificate` wait on Orthanc list
+commands and say so, naming the bead; the mod never falls back to Foundry REST.
+`/link-type` and `/interface` run `ontology link-type-list` and `ontology
+interface-list` on the ontology in scope. While FDE mode is bound to that
+ontology they read its branch (`--branch`, the way `ontology definition` reads a
+branch), so an FDE session picks the link types and interfaces of its own branch,
+and the listing names that branch; otherwise they read the main branch.
+The pick shows what each link joins and which object types implement each
+interface, and names the RID of every pick whose name another pick shares.
+`/automation` runs `automate list` under the selected projects, or under the
+namespace's, or every space when neither is picked, and passes its argument to
+`--name`. When one of those listings fails, the result says how many did, and a
+short walk is never picked from on its own.
 
 `/namespace` scopes the context to one Compass namespace (orthanc's space):
 `/project` and the Compass pickers list only its projects, `/search` stays under
@@ -204,7 +214,9 @@ RID, and an open proposal on it is named when it is adopted. While bound:
 leaves the branch open: merging or closing it is the operator's call. If a
 session ends while bound, the next one offers `/fde resume`. The mode only
 adds checks. The branch rule and the approval ladder (with its destructive
-rule, outside `yolo`) judge every bound call as before.
+rule, outside `yolo`) judge every bound call as before. It changes context in
+one place: the link types and interfaces picked while a binding was in scope go
+with it, when `/fde end` ends it or another binding replaces it.
 
 ## Operator rules and auto mode
 
@@ -287,8 +299,12 @@ against your own stack, record real Orthanc output and replay it:
 
 ```
 FOUNDRY_E2E_PROFILE=<profile> FOUNDRY_E2E_PROJECT=<project rid> \
-FOUNDRY_E2E_ONTOLOGY=<ontology rid> ./scripts/record.sh
+FOUNDRY_E2E_ONTOLOGY=<ontology rid> FOUNDRY_E2E_SPACE=<namespace rid> \
+FOUNDRY_E2E_BRANCH=<open global branch rid on that ontology> ./scripts/record.sh
 ```
+
+`FOUNDRY_E2E_SPACE` is required; `FOUNDRY_E2E_BRANCH` is optional and records the
+branch-qualified link-type and interface reads FDE mode sends.
 
 That writes `hooks/fixtures.local.ts`, which `hooks/e2e.local.test.ts` replays.
 Both stay out of git: they hold your stack's data.
