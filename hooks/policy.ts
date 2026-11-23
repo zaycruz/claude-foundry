@@ -1149,11 +1149,13 @@ function shellClassification(
 // and `mcp__foundry_tools__delete_object` ran in all four modes).
 const FOUNDRY_MCP_NAME = /(?:palantir|foundry)/i
 const MCP_PREFIX = 'mcp__'
+// The trace has always read the prefix case-insensitively, so the guard does too.
+// `MCP__Palantir__delete_object` is the same call spelled with the caps-lock on.
 const MCP_PREFIX_RE = /^mcp__/i
 
 /** `mcp__<server>__<tool>` as its two parts; null when the name is not an MCP tool. */
 function mcpToolParts(tool: string): { server: string; inner: string } | null {
-  if (!tool.startsWith(MCP_PREFIX)) return null
+  if (!MCP_PREFIX_RE.test(tool)) return null
   const rest = tool.slice(MCP_PREFIX.length)
   const split = rest.indexOf('__')
   if (split < 1 || split + 2 > rest.length) return null
@@ -1190,19 +1192,39 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
 // (`DENIED_COMMANDS`, `destructiveFromWords`), so an MCP tool naming one is a write
 // too. Without these words a name like `view_branch_and_revoke_protection` hit only
 // its read verb and ran with no ladder (reviewed at e01f1dd, where it ran too).
-const WRITE_WORDS = new Set(['add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'revoke', 'rotate', 'set', 'submit', 'terminate', 'truncate', 'unprotect', 'update', 'write'])
+// The verbs this plugin already treats as writes somewhere (`DENIED_COMMANDS`,
+// `MAIN_ONLY_WRITES`: object-type-upsert, stream reset, transactions start, pull-request
+// accept), so an MCP tool naming one is a write too. The list is a vocabulary and will
+// never be complete; that is why an unreadable name fails closed instead of running.
+const WRITE_WORDS = new Set(['accept', 'add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'reset', 'restart', 'revert', 'revise', 'revoke', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'truncate', 'unprotect', 'update', 'upload', 'upsert', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
 
+/** Words in a tool name: split on separators and on letter case, so `deleteObjects`,
+`delete_objects` and `DeleteObjects` all give `delete` and `objects`. */
+export function mcpWords(name: string): string[] {
+  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).map(word => word.toLowerCase()).filter(word => word !== '')
+}
+
+/**
+ * What a Foundry MCP tool name says about itself. A write or an ambiguous verb wins,
+ * read the second, and anything else is `unknown`, which the guard refuses.
+ *
+ * The read answer is deliberately narrower than the write answer. A name counts as a
+ * read only when the plain separator split — the one that shipped at e01f1dd — finds
+ * the read verb: `list_objects`, `get-object`, `search data`. CamelCase is used to
+ * find writes (`deleteObjects`, `listAndUpsertRows`), never to let a call through,
+ * because camelCase is also how a compound name hides its second verb: splitting on
+ * case for the read answer turned `listAndUpsertRows` into a plain `list` and the
+ * guard ran a write it used to refuse (found in review of this change, and the reason
+ * the two answers are not symmetric). A camelCase read such as `listObjects` is
+ * refused with a reason; the operator can allow it by hand.
+ */
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
-  // Split on separators and on letter case, so `listObjects`, `list_objects` and
-  // `ListObjects` all read as the words `list` and `objects`. Splitting only on
-  // separators made a camelCase read an unreadable name, and the guard refused a
-  // call that says plainly it only lists.
-  const words = inner.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).map(word => word.toLowerCase())
+  const words = mcpWords(inner)
   if (words.some(word => WRITE_WORDS.has(word))) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
-  if (words.some(word => READ_WORDS.has(word))) return 'read'
+  if (inner.toLowerCase().split(/[^a-z]+/).some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
 }
 
@@ -1267,8 +1289,8 @@ export function classifyCall(
       isBranchScoped: false,
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
-      isDestructive: inner.toLowerCase().split(/[^a-z]+/).includes('delete'),
-      error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
+      isDestructive: mcpWords(inner).includes('delete'),
+      error: `${tool} ${classifyMcpIntent(inner) === 'write' ? 'writes to Foundry' : 'is a Foundry call the guard cannot read'} outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
     }
   }
   return null

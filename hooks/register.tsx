@@ -702,13 +702,6 @@ async function exportTurn($: EngineInterface, key: string, answer: string, usage
   }
 }
 
-function touchesFoundry(tool: string, input: Record<string, unknown>, classified: boolean): boolean {
-  if (classified) return true
-  // One predicate, shared with the gate: a call the trace called Foundry while the
-  // guard did not would run with no ladder and no branch rule.
-  return touchesFoundryTool(tool, input)
-}
-
 async function traceText($: EngineInterface): Promise<string> {
   const lines = [`Tracing ${tracingNote}${literalNote}.`]
   if (tracing === null) {
@@ -1604,7 +1597,9 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...raw } =
     e as unknown as Record<string, unknown>
   let input: Record<string, unknown> = raw
-  note.foundry = touchesFoundry(tool, input, false)
+  // One predicate with the gate: a call the trace called Foundry while the guard did
+  // not would run with no ladder and no branch rule.
+  note.foundry = touchesFoundryTool(tool, input)
   note.outcome = 'block'
   const rootReason = compassRootReason(tool, input)
   if (rootReason) return { deny: rootReason }

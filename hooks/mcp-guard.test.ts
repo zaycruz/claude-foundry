@@ -28,6 +28,11 @@
 //      ask that runs when no one answers.
 //  MS7 The delete word is lost when the server name moves out of the way, so
 //      the trace and every other reader see a plain mutation.
+//  MS9 The widening lets through a call the old gate refused — the one failure this
+//      rule can cause. Found in review of the first fix, twice: camelCase splitting
+//      for the read answer made `listAndUpsertRows` read as `list`.
+//  MS10 A refusal claims more than the name shows, so the operator trusts the wrong
+//      reason: an unreadable name reported as a write.
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
@@ -77,18 +82,18 @@ test('MS1: a Foundry MCP write is blocked in every mode, in every spelling', asy
   }
 })
 
-test('MS2b: a camelCase or mixed-case read verb is still a read', async () => {
-  // Splitting only on separators would make `listObjects` an unreadable name and the
-  // guard would refuse a call that says plainly it only lists.
-  for (const tool of [
-    'mcp__palantir__listObjects',
-    'mcp__Palantir__getObject',
-    'mcp__foundry_tools__searchObjects',
-    'mcp__palantirFoundry__describeBranch',
-    'mcp__foundry-mcp__readObject',
-  ]) {
-    expect({ tool, classified: classifyCall(tool, { typeId: 'T' }, MANIFEST, null) }).toEqual({ tool, classified: null })
+test('MS2b: a camelCase verb finds a write, and never lets a call through', async () => {
+  // CamelCase finds writes; it never excuses one. `listObjects` is refused as unreadable
+  // rather than read as a plain list, because the split that finds the `list` in
+  // `listObjects` also finds the `list` in `listAndUpsertRows`, and that one is a write.
+  for (const tool of ['mcp__palantir__deleteObjects', 'mcp__palantirFoundry__createObject', 'mcp__foundry_tools__updateBranch', 'mcp__palantir__listAndUpsertRows', 'mcp__palantir__getAndResetStream']) {
+    expect({ tool, blocked: blockedEverywhere(classifyCall(tool, {}, MANIFEST, 'agent/x')) }).toEqual({ tool, blocked: true })
   }
+  // A name the separator split can read still runs. A camelCase-only read is refused
+  // with a reason naming the tool, so the operator can decide.
+  expect(classifyCall('mcp__palantir__list_objects', {}, MANIFEST, null)).toBe(null)
+  expect((classifyCall('mcp__palantir__listObjects', {}, MANIFEST, null)?.error ?? '').includes('mcp__palantir__listObjects')).toBe(true)
+  expect({ snake: classifyMcpIntent('list_objects'), camel: classifyMcpIntent('listObjects'), write: classifyMcpIntent('deleteObjects') }).toEqual({ snake: 'read', camel: 'unknown', write: 'write' })
 })
 
 test('MS3b: a read verb does not excuse a write verb in the same name', async () => {
@@ -102,6 +107,52 @@ test('MS3b: a read verb does not excuse a write verb in the same name', async ()
   ]) {
     expect({ tool, blocked: blockedEverywhere(classifyCall(tool, {}, MANIFEST, 'agent/x')) }).toEqual({ tool, blocked: true })
   }
+})
+
+test('MS9: nothing the old gate refused runs now', async () => {
+  // The invariant this PR must keep: widening the name test may only add refusals.
+  // Base (`e01f1dd`) gated `/^mcp__palantir(-mcp)?__/` and, of those names, let one
+  // through when its words read as a read. Base is reproduced here in full so a name
+  // base blocked cannot quietly start running after a change to the word lists.
+  const BASE_GATE = /^mcp__palantir(-mcp)?__/
+  const BASE_WRITE = new Set(['add', 'apply', 'build', 'create', 'delete', 'deploy', 'edit', 'install', 'post', 'publish', 'put', 'remove', 'rename', 'set', 'submit', 'update', 'write'])
+  const BASE_AMBIGUOUS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
+  const BASE_READ = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
+  const baseVerdict = (tool: string): boolean | undefined => {
+    if (!BASE_GATE.test(tool)) return undefined // not gated at base either: no constraint
+    const words = tool.replace(BASE_GATE, '').toLowerCase().split(/[^a-z]+/)
+    if (words.some(word => BASE_WRITE.has(word))) return false
+    if (words.some(word => BASE_AMBIGUOUS.has(word))) return false
+    return words.some(word => BASE_READ.has(word))
+  }
+  const NAMES = [
+    'mcp__palantir__list_objects', 'mcp__palantir-mcp__get_object', 'mcp__palantir__search-data',
+    'mcp__palantir__listObjects', 'mcp__palantir__listAndUpsertRows', 'mcp__palantir__upsertObject',
+    'mcp__palantir__uploadDataset', 'mcp__palantir__resetStream', 'mcp__palantir__startSchedule',
+    'mcp__palantir__stopBuild', 'mcp__palantir__acceptRequest', 'mcp__palantir__protectBranch',
+    'mcp__palantir__revertCommit', 'mcp__palantir__rollbackPipeline', 'mcp__palantir__syncBranch',
+    'mcp__palantir__getAndResetStream', 'mcp__palantir__view_branch_and_revoke_protection',
+    'mcp__palantir__delete_object', 'mcp__palantir__run_build', 'mcp__palantir__do_the_thing',
+    'mcp__palantir__describe_branch', 'mcp__palantir__query_objects', 'mcp__palantir__preview_dataset',
+    'mcp__palantir__check_health', 'mcp__palantir__read_object', 'mcp__palantir__inspect_branch',
+    'mcp__palantir__get_and_grant_access', 'mcp__Palantir__delete_object', 'mcp__foundry_tools__delete_object',
+    'mcp__github__create_issue',
+  ]
+  for (const tool of NAMES) {
+    const base = baseVerdict(tool)
+    const runs = classifyCall(tool, { object: 'ri.x' }, MANIFEST, 'agent/x') === null
+    // One direction only. This rule may refuse more (`view_branch_and_revoke_protection`
+    // ran at base and is a write now); it may never run more.
+    if (base === false) expect({ tool, runs }).toEqual({ tool, runs: false })
+  }
+})
+
+test('MS10: the refusal says only what the name tells it', async () => {
+  // A write verb is called a write; an unreadable name is called unreadable.
+  const write = classifyCall('mcp__palantir__delete_object', {}, MANIFEST, 'agent/x')?.error ?? ''
+  const unknown = classifyCall('mcp__palantir__do_the_thing', {}, MANIFEST, 'agent/x')?.error ?? ''
+  expect({ write: write.includes('writes to Foundry'), unknown: unknown.includes('cannot read') }).toEqual({ write: true, unknown: true })
+  expect({ namesTool: unknown.includes('mcp__palantir__do_the_thing'), pointsAtOrthanc: unknown.includes('orthanc_cli') }).toEqual({ namesTool: true, pointsAtOrthanc: true })
 })
 
 test('MS7: the delete word still marks the call destructive', async () => {
@@ -201,7 +252,7 @@ function harness(on: On, mode: (typeof MODES)[number]) {
   return { asked }
 }
 
-test('MS8: the gate is never narrower than the trace, for any spelling', async () => {
+test('MS8: the gate answers for every spelling, and never wider than the trace', async () => {
   // The defect this rule exists to close: the trace called a call Foundry while the
   // guard did not, so it ran with no ladder. Every name the trace claims must at
   // least reach the guard, even where the guard then lets a read through.
@@ -220,16 +271,28 @@ test('MS8: the gate is never narrower than the trace, for any spelling', async (
   for (const tool of ['mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__linear-project-a__create_issue', 'Read']) {
     expect({ tool, gated: foundryMcpTool(tool) !== null, traced: touchesFoundryTool(tool, {}) }).toEqual({ tool, gated: false, traced: false })
   }
-  // The same name test against the shape the plugin's tracer has always used, so a
-  // change to one that leaves the other behind fails here. It is a copied shape on
-  // purpose: the copy is what shows the drift. A guard narrower than this runs the
-  // call; a guard wider than this refuses calls the trace never called Foundry.
-  const TRACER = /^mcp__.*(palantir|foundry)/i
-  // `osdk` and `ontology` are pinned NOT gated on purpose: they name no Foundry
-  // product, so a name rule cannot reach them, and MS1 records them as still open.
-  // Widening the matcher past the trace fails this loop; so does narrowing it.
-  for (const tool of [...NAMES, 'mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__refoundry__list', 'mcp__osdk__write_object', 'mcp__ontology__delete_object']) {
-    expect({ tool, gate: foundryMcpTool(tool) !== null, trace: TRACER.test(tool) }).toEqual({ tool, gate: TRACER.test(tool), trace: TRACER.test(tool) })
+  // A frozen answer table, gate side, over every shape a config can hold. Narrowing
+  // the matcher fails on the camel and glued rows; widening it fails on `osdk` and
+  // `ontology`, which name no Foundry product and are pinned NOT gated on purpose, so
+  // widening stays a decision and not a slip.
+  const EXPECTED: [string, boolean][] = [
+    ['mcp__palantir__write_object', true],
+    ['mcp__palantir-mcp__write_object', true],
+    ['mcp__palantir_mcp__write_object', true],
+    ['MCP__Palantir__delete_object', true],
+    ['mcp__palantirFoundry__apply_action', true],
+    ['mcp__palantirfoundry__delete_object', true],
+    ['mcp__foundry_tools__delete_object', true],
+    ['mcp__tools__foundry_delete_object', true],
+    ['mcp__refoundry__list', true],
+    ['mcp__palantir__list_objects', true],
+    ['mcp__github__create_issue', false],
+    ['mcp__filesystem__write_file', false],
+    ['mcp__osdk__write_object', false],
+    ['mcp__ontology__delete_object', false],
+  ]
+  for (const [tool, gated] of EXPECTED) {
+    expect({ tool, gated: foundryMcpTool(tool) !== null }).toEqual({ tool, gated })
   }
 })
 
