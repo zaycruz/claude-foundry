@@ -263,7 +263,8 @@ expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
 `$XDG_CONFIG_HOME`, `$PWD`, `$OLDPWD`, `$(pwd)` and the variables the line sets,
 also with bash's operators (`${HOME:-x}`, `${HOME%/}`). It follows indirect ones
 (`${!h}`, `${!h:-x}`, `${!h%/}` with `h=HOME`), a nameref (`declare -n r=HOME`,
-`local -n`, `typeset -n`), and a variable that `printf -v` builds, with its options
+`local -n`, `typeset -n`), including a target assigned later, and variables set by
+`read` from a here-string or heredoc or built by `printf -v`, with its options
 read as bash reads them (`printf -v d -- …`). The default of an unknown variable
 (`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. Inside a longer
 word, these count as any text there, the empty text included: an unknown variable,

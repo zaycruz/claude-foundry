@@ -2979,6 +2979,22 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     const args = rest.slice(1).map(arg => arg.replace(/^~(?=\/|$)/, homeText))
     assigned.set(name, (rest[0] ?? '').replace(/%%|%[-+ #0-9.]*[a-zA-Z]/g, conversion => (conversion === '%%' ? '%' : (args.shift() ?? ''))))
   }
+  // `read` can supply an indirect name or a nameref target from a here-string
+  // or heredoc. Keep the fields it assigns, including the last field's remainder.
+  for (const segment of segments) {
+    const words = segment.words
+    if (words[0] !== 'read' || !segment.stdin?.length) continue
+    let index = 1
+    while (index < words.length && words[index]!.startsWith('-') && words[index] !== '-') {
+      const option = words[index++]!
+      if (option === '--') break
+      if (/^-[adEinNptu]$/.test(option)) index += 1
+    }
+    const names = words.slice(index).filter(name => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+    if (names.length === 0) names.push('REPLY')
+    const fields = (segment.stdin[0] ?? '').trim().split(/\s+/)
+    names.forEach((name, at) => assigned.set(name, at === names.length - 1 ? fields.slice(at).join(' ') : (fields[at] ?? '')))
+  }
   // A nameref (`declare -n r=HOME`, `local -n`, `typeset -n`) reads the variable it
   // names.
   const namerefs = new Set<string>()
@@ -2989,6 +3005,7 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     for (const word of rest) {
       const assign = ASSIGNMENT_WORD.exec(word)
       if (assign?.[1] !== undefined) namerefs.add(assign[1])
+      else if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(word)) namerefs.add(word)
     }
   }
   // Where `~+` and `~-` can point: the session's directory, home, and every directory
