@@ -40,7 +40,14 @@ says so instead of falling back to REST.
   global branch RID: an Ontology scenario is a what-if fork, and its base is
   main unless the call names a branch.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
-  denied.
+  denied. A command whose manifest entry names a credential the operator types —
+  by `input`, or by `credential_store`, the store it writes — never runs, in any
+  mode, through `orthanc_cli` or Bash, and is refused before the ladder can ask
+  (`auth store`, `configure profile create`, `configure configure`,
+  `onboarding`). `orthanc_help` marks those commands `operator-only` and `/auth`
+  lists them for the operator's own terminal. The two entries that only clear the
+  store (`auth delete`, `configure delete`) name it too and type nothing, so the
+  ladder judges them as the deletes they are.
 - **A branch rule** that no approval mode can turn off: agent work happens on
   branches, never on a production main. Ontology writes must pass
   `--branch <global branch RID>`; dataset, stream and build writes must name a
