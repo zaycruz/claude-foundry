@@ -316,11 +316,17 @@ redirect into `"$f"`, `$S/profile-settings.json` or `$S/p*` is still refused on 
 line that names the store. `mktemp` counts as a reader: it only makes a new file and
 never replaces or removes one. It resolves relative names after a `cd`. It reads the
 code after `-c` and `env -S` as shell code (`bash -c`, `sudo sh -c`, `su -c`,
-`npx -c`, `flock -c`, `script -c`), except when the program that runs it is Python
-(`python3`, `sudo python3`, `timeout 5 python3`, `uv run python`). A word of the code,
-a lock file or an argument named `python3` does not count, so
-`sh -c "rm -rf foundry; /usr/bin/python3"` and `flock /tmp/python3 -c "…"` are read
-as shell. The code in
+`npx -c`, `flock -c`, `script -c`), except when it is Python code. The code is Python
+only when the word that owns its `-c` (the nearest word before it that is not a flag)
+is a Python word and is the program. The program is the command word past wrappers
+(`python3`, `sudo python3`, `timeout 5 python3`), or the first word after `uv run`
+(and `poetry`, `hatch`, `pdm`, `pipenv`, `rye`) past only `--` and `--flag=value`. A
+word of the code, a positional argument, a lock file or a flag's value named `python3`
+is not the program, so `sh -c "rm -rf foundry; /usr/bin/python3"`,
+`npx -c "rm -rf foundry" python3`, `flock /tmp/python3 -c "…"` and
+`uv run -p python3 sh -c "…"` are read as shell. When in doubt, the guard reads the
+code as shell, so `uv run --python 3.12 python -c "print('/')"` is refused and
+`uv run --python=3.12 python -c "print('/')"` runs. The code in
 `python3 -c "print('/')"` is Python, so `('/')` is not a subshell whose word `/` is
 the root. Its string literals count as names the command uses, so
 `cd ~/.config && python3 -c 'shutil.rmtree("foundry")'` is still refused. A literal

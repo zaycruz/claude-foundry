@@ -1839,21 +1839,35 @@ const CODE_INTERPRETERS = /^python[0-9.]*$/
 // Project tools whose `run` subcommand starts the program named after it (`uv run python`).
 const RUN_LAUNCHERS = new Set(['uv', 'poetry', 'pipenv', 'pdm', 'hatch', 'rye'])
 
-/** The name of the program a segment runs: its command word past wrappers
- * (`sudo`, `env`, `timeout 5`, and `npx -c`'s code, a flag value) and past `uv run`. */
-function programName(words: readonly string[]): string {
-  let index = commandWord(words)
-  if (index < 0) return ''
-  if (RUN_LAUNCHERS.has(basename(words[index])) && words[index + 1] === 'run') {
-    index += 2
-    while ((words[index] ?? '').startsWith('-')) index += 1
+/** Whether a segment's `-c` code is Python code. The word that owns each code flag (the
+ * nearest word before it that is not a flag) must be a Python word and the segment's
+ * program: its command word past wrappers (`sudo`, `env`, `timeout 5`), or, after
+ * `uv run` and like launchers, the first word after `run` past only `--` and
+ * `--flag=value`. A positional (`npx -c "…" python3`), a lock file
+ * (`flock /tmp/python3 -c`) or a flag's value (`uv run -p python3 sh -c`,
+ * `uv run flock python3 -c`) is not the program. Any doubt reads the code as shell,
+ * which can refuse too much but lets no store write through. */
+function pythonCode(words: readonly string[]): boolean {
+  let program = commandWord(words)
+  if (program < 0) return false
+  if (RUN_LAUNCHERS.has(basename(words[program])) && words[program + 1] === 'run') {
+    program += 2
+    while (program < words.length && (words[program] === '--' || /^--[^=]+=/.test(words[program]!))) program += 1
   }
-  return basename(words[index])
+  let owned = false
+  for (let index = 1; index < words.length; index += 1) {
+    if (!CODE_FLAG.test(words[index]!) || words[index + 1] === undefined) continue
+    let owner = index - 1
+    while (owner > 0 && words[owner]!.startsWith('-')) owner -= 1
+    if (owner !== program || !CODE_INTERPRETERS.test(basename(words[owner]))) return false
+    owned = true
+  }
+  return owned
 }
 
 /** commandSegments for the mark-store guard. Code after `-c` (`su -c`, `npx -c`,
  * `flock -c`, `script -c`, `env -S`) is read as shell code, as codeWords reads it,
- * except when the segment's program (programName) is in CODE_INTERPRETERS. That code's string literals
+ * except when it is Python code (pythonCode). That code's string literals
  * become words of its command instead, so a relative name after a `cd`
  * (`shutil.rmtree("foundry")`) still names the store, and a lone `'/'` is not the root.
  * `python3 -c "print('/')"` is Python: read as shell, `('/')` is a subshell whose
@@ -1861,9 +1875,7 @@ function programName(words: readonly string[]): string {
  * path piece. */
 function storeSegments(command: string, depth = 0): Segment[] {
   const parsed = shellWords(command)
-  // Only the program that runs the code decides, not a word of the code, a lock file
-  // or an argument (`sh -c "…; /usr/bin/python3"`, `flock /tmp/python3 -c …`).
-  const interpreted = (words: readonly string[]) => CODE_INTERPRETERS.test(programName(words))
+  const interpreted = pythonCode
   const shellCode = (words: readonly string[]) => (interpreted(words) ? [] : codeWords(words))
   const literals = (code: string) =>
     [...code.matchAll(/(['"])((?:\\.|(?!\1)[^\\])*)\1/g)].map(match => match[2]!).filter(text => text !== '' && !/^\/+$/.test(text))
