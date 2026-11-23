@@ -1833,6 +1833,21 @@ export function commandSegments(command: string, depth = 0): Segment[] {
 }
 
 const basename = (word: string | undefined) => (word ?? '').split('/').at(-1)?.replace(/^!/, '') ?? ''
+
+/** commandSegments for the mark-store guard. Code after `-c` is read as shell code
+ * only when a shell (or `eval`, `watch` …) runs it. `python3 -c "print('/')"` is
+ * Python: read as shell, `('/')` is a subshell whose word `/` is the root. A path in
+ * such code is still met in the outer word, as a path piece. */
+function storeSegments(command: string, depth = 0): Segment[] {
+  const { segments, code, hidden } = shellWords(command)
+  const own = hidden ? [...segments, UNREADABLE] : segments
+  const shellCode = (words: readonly string[]) =>
+    words.some(word => SHELLS.test(basename(word)) || LINE_RUNNERS.has(basename(word))) ? codeWords(words) : []
+  const nested = [...code, ...segments.flatMap(segment => shellCode(segment.words))].filter(item => item.trim() !== '')
+  if (nested.length === 0) return own
+  if (depth >= NESTING_LIMIT) return [...own, UNREADABLE]
+  return [...own, ...nested.flatMap(item => storeSegments(item, depth + 1))]
+}
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 // orthanc as a word or the last segment of a path (`/opt/bin/orthanc`), not part of a longer name or a directory in a path.
 const NAMES_ORTHANC = /(?<![\w.-])orthanc(?![\w./-])|ORTHANC_BIN/i
@@ -2852,6 +2867,8 @@ const STORE_READERS = new Set([
   // Text filters: they read files or stdin and write stdout only.
   'tr', 'cut', 'paste', 'sort', 'join', 'comm', 'fold', 'fmt', 'expand', 'unexpand', 'rev', 'seq', 'zcat',
   'printenv', 'uname',
+  // mktemp makes a new file with a name no file has: it never replaces or removes one.
+  'mktemp',
 ])
 // The flags with which a reader writes a file or runs a program: short flags (also
 // bundled, `-ro`), long options with every abbreviation GNU accepts (`--o`, `--out=`),
@@ -3286,7 +3303,7 @@ function rangeParts(body: string): string[] | 'overflow' | undefined {
  * here-string feeds a command is kept apart as `stdin`, split into words. */
 function runWords(command: string, home: string, configHome: string, cwd = '/'): { words: string[]; targets: string[]; stdin: string[] }[] {
   const config = configHome.trim() === '' ? `${home}/.config` : configHome.trim()
-  const segments = commandSegments(command)
+  const segments = storeSegments(command)
   const assigned = new Map<string, string>()
   const homeText = home === '' ? '~' : home
   for (const segment of segments)
@@ -3420,6 +3437,12 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     // An unknown expansion inside a longer word can be any text there; one that is the
     // whole word is left as written (`rm -rf "$f"`: a variable the line does not set).
     const any = word.length > whole.length ? '*' : ''
+    // An unknown name that starts the word and is followed by `/name` is a directory
+    // the line does not know (`$TMPDIR/out.txt`, `$S/marks.json`). Set elsewhere it is
+    // the documented limit; unset it is the empty text, so the word is `/name`. Read
+    // as `*`, it was resolved against every directory the line names, and
+    // `ls ~/.config > $S/o.txt` met the store as `~/.config/*/o.txt`.
+    const unknown = head === '' && /^\/[^/]/.test(word.slice(end + 1)) ? '' : any
     const tails = parameters(word.slice(end + 1))
     const inner = word.slice(start + 2, end)
     // `${!NAME…}` reads the variable NAME holds, with any operator after it
@@ -3434,11 +3457,11 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     const operand = match?.[3] ?? ''
     const choices: { text: string; open: boolean }[] = []
     if (match === null || (known === undefined && !['', ':-', '-', ':=', '=', ':+', '+'].includes(op))) {
-      choices.push({ text: whole, open: false }, { text: any, open: false })
+      choices.push({ text: whole, open: false }, { text: unknown, open: false })
     } else if (known === undefined) {
-      if (op === '') choices.push({ text: whole, open: false }, { text: any, open: false })
+      if (op === '') choices.push({ text: whole, open: false }, { text: unknown, open: false })
       else if (op === ':+' || op === '+') choices.push({ text: operand, open: true }, { text: '', open: false })
-      else choices.push({ text: operand, open: true }, { text: whole, open: false }, { text: any, open: false })
+      else choices.push({ text: operand, open: true }, { text: whole, open: false }, { text: unknown, open: false })
     } else {
       for (const value of known) {
         if (op === ':+' || op === '+') choices.push({ text: operand, open: true })
@@ -3677,7 +3700,7 @@ function storeLineForms(command: string, home: string): string[] {
     return out
   }
   const output = (body: string, inside: boolean): string => {
-    const words = commandSegments(body)[0]?.words ?? []
+    const words = storeSegments(body)[0]?.words ?? []
     const atHome = (word: string) => word.replace(/^~(?=\/|$)/, home === '' ? '~' : home)
     if (words[0] === 'pwd') return '${PWD}'
     if (words[0] === 'echo') return words.slice(1).filter(word => !/^-[neE]+$/.test(word)).map(atHome).join(' ')
@@ -3724,7 +3747,10 @@ function storeLineForms(command: string, home: string): string[] {
         continue
       }
       const inside = !edge.test(out.slice(-1)) || !endsWord
-      out += output(substitution.body, inside)
+      // A substitution with unknown output that starts a word and is followed by
+      // `/name` is a directory the line does not know, read as an unknown name is.
+      const prefix = edge.test(out.slice(-1)) && /^"?\/[^/]/.test(text.slice(substitution.end + 1))
+      out += prefix && output(substitution.body, true) === '*' ? '${' + UNKNOWN_DIR + '}' : output(substitution.body, inside)
       index = substitution.end
     }
     return out
@@ -3741,14 +3767,35 @@ function storeLineForms(command: string, home: string): string[] {
   return [...forms]
 }
 
+// The name a leading command substitution with unknown output stands under
+// (`"$(mktemp -d)/x"`): no line sets it, so it reads as an unknown directory.
+const UNKNOWN_DIR = 'FOUNDRY_GUARD_UNKNOWN_DIR'
+
+/** Where `${X}/tail` can point when the line does not know X: each directory above the
+ * store followed by the tail, and the store itself when the tail's first name can be
+ * a mark file. So `rm -rf $X/.config/foundry` and `rm -f $D/profile-settings.json` can
+ * reach the store, and `> $TMPDIR/out.txt` cannot. (Unset, X is the empty text: that
+ * form, `/tail`, is already among the words.) */
+function unknownDirPaths(word: string, dir: string): string[] {
+  const match = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}(\/.+)$/.exec(word)
+  if (match === null) return []
+  const tail = match[1]!
+  const above: string[] = []
+  for (let cut = dir.lastIndexOf('/'); cut > 0; cut = dir.lastIndexOf('/', cut - 1)) above.push(dir.slice(0, cut))
+  const first = tail.split('/').find(part => part !== '') ?? ''
+  return [...above, ].map(base => base + tail)
+}
+
 function storeLineWriteReason(command: string, cwd: string, home: string, configHome: string, dir: string): string | null {
   const input = { command }
   const segments = runWords(input.command, home, configHome, cwd)
-  const raw = commandSegments(input.command)
+  const raw = storeSegments(input.command)
   const every = (segment: { words: string[]; targets: string[]; stdin: string[] }) => [...segment.words, ...segment.targets, ...segment.stdin]
   const allWords = segments.flatMap(every)
   const mentioned = mentionedDirs(segments.map(segment => [...segment.words, ...segment.targets]), cwd, home)
   const reaches = (words: readonly string[]) => words.some(word => namesStore(word, cwd, home, dir, mentioned))
+  // A word or redirect of this command whose unknown directory can make it the store.
+  const reachesThrough = (words: readonly string[]) => reaches(words.flatMap(word => unknownDirPaths(word, dir)))
   const names = (segment: { words: string[]; targets: string[]; stdin: string[] }) => {
     // A search limited by a name or path pattern reaches the mark only when that
     // pattern can name it: `find ~ -name 'profile-*.png' -delete` takes someone
@@ -3759,16 +3806,28 @@ function storeLineWriteReason(command: string, cwd: string, home: string, config
     if (limited && !segment.words.some(word => bareNamesStore(word, dir))) return false
     return reaches(every(segment))
   }
+  const namesThrough = (segment: { words: string[]; targets: string[]; stdin: string[] }) =>
+    !segment.words.some(word => NAME_LIMIT_FLAG.test(word)) && reachesThrough([...segment.words, ...segment.targets])
+  // A redirect the guard cannot read: a variable path with no file name written out
+  // (`: > "$f"`), or one whose file name can be a mark file or the store
+  // (`> $S/profile-settings.json`, `> $S/p*`). `> $TMPDIR/out.txt` writes a file
+  // called out.txt, which clears no mark wherever $TMPDIR points. (`> $S/$name` reads
+  // as `/*` when $S is unset, and that names the store.)
+  const blind = (target: string) => {
+    if (!/[$`]/.test(target)) return false
+    const cut = target.lastIndexOf('/')
+    return cut < 0 || bareNamesStore(target.slice(cut + 1), dir)
+  }
   // A command that can change a file: anything but a reader, a redirect into the
-  // store, or a redirect to a path the guard cannot read (`: > "$f"`).
+  // store, or a redirect the guard cannot read.
   const writes = (segment: { words: string[]; targets: string[]; stdin: string[] }) =>
     !readsOnly(segment.words) ||
-    segment.targets.some(target => /[$`]/.test(target) || namesStore(target, cwd, home, dir, mentioned))
+    segment.targets.some(target => blind(target) || namesStore(target, cwd, home, dir, mentioned) || reachesThrough([target]))
   // Per simple command: a writer that names the store, anything in it, or a directory
   // above it (`rm -rf ~/.config`), however the word is spelled (globs, braces,
   // quoting, `~` forms, variables the line sets), from a relative name after a `cd`,
   // or through text fed to its stdin (`xargs rm <<< …`).
-  if (segments.some(segment => names(segment) && writes(segment))) return PROFILE_STORE_WRITE_REASON
+  if (segments.some(segment => (names(segment) || namesThrough(segment)) && writes(segment))) return PROFILE_STORE_WRITE_REASON
   // Across the line: the store (or a path in it) named anywhere, and a writer anywhere,
   // because a pipe, a variable, a loop or a substitution can carry the path from one
   // to the other (`ls -d <store> | while read d; do rm -rf "$d"; done`).

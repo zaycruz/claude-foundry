@@ -301,18 +301,31 @@ compute exactly (a substring, a replacement, a case change, a pattern trim). So
 substitution that runs `echo`, `printf` or `pwd` counts as what it prints. One
 whose output is unknown and that is a variable's whole value (`OUT=$(mktemp)`)
 makes that variable unknown, not empty, so `curl -o "$OUT"` is not a write to `/`
-or `~/*`. It resolves relative names after a `cd`, and reads the
-path inside `bash -c '…'`. A pattern (`*/x.bak`) is not a directory the command
-works in, so `rm -f */x.bak` from home does not read as `~/*/*/x.bak`. A backslash
-that quoting keeps (`--jq '"\(.number)"'`, `sed 's/\(a\)/x/'`) is a character of
-the name, not a `/`, and a lone `/` inside a program's text (`split("/")`,
-`s|/|_|`) is not the root; a program that reads `\/` as `/` in a pattern
-(`find -path '*/.config\/foundry'`) is read that way too. A `find ... -delete` whose name pattern cannot match the
+or `~/*`. An unknown variable or substitution that starts a word and is followed
+by `/name` (`$TMPDIR/out.txt`, `"$S/marks.json"`, `"$(mktemp -d)/x"`) reads as an
+unknown directory: if unset, it is the empty text, so the word is `/name`. It is not
+read as `*`, which would resolve against every directory the line names. A redirect
+into such a path writes a file whose name the line spells. When that name cannot be
+a mark file or the store, the redirect clears no mark wherever the variable points,
+so `ls ~/.config > $TMPDIR/o.txt` and `jq . <mark> > "$S/marks.json"` run. A
+redirect into `"$f"`, `$S/profile-settings.json` or `$S/p*` is still refused on a
+line that names the store. `mktemp` counts as a reader: it only makes a new file and
+never replaces or removes one. It resolves relative names after a `cd`. It reads the
+code after `-c` as shell code only when a shell, `eval`, `watch` and similar programs
+run it (`bash -c '…'`, `sudo sh -c '…'`). The code in `python3 -c "print('/')"` is
+Python, so `('/')` is not a subshell whose word `/` is the root. A path written in
+such code is still found inside the word. A pattern (`*/x.bak`) is not a directory
+the command works in, so `rm -f */x.bak` from home does not read as `~/*/*/x.bak`. A
+backslash that quoting keeps (`--jq '"\(.number)"'`, `sed 's/\(a\)/x/'`) is a
+character of the name, not a `/`. A lone `/` inside a program's text (`split("/")`,
+`s|/|_|`, `'/'.join(…)`) is not the root. A program that reads `\/` as `/` in a
+pattern (`find -path '*/.config\/foundry'`) is read that way too. A `find ... -delete` whose name pattern cannot match the
 mark (`find ~ -name "profile-*.png" -delete`) still runs. The guard reads the
 command line, not a running shell, so it has these limits. It does not catch a path
 built at run time inside a script
 (`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`). It does not catch
-a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`)
+a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`),
+or such a variable followed by `..` (`rm -rf "$X"/../.config/foundry`),
 or a command substitution whose output only the run shows (`rm -rf $(cat list)`).
 It also does not catch a path that a file the line reads supplies
 (`xargs rm -rf < list`, `source script.sh`). The rule also refuses more than it must: a command that is not a reader

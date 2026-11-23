@@ -1083,3 +1083,124 @@ test('Q21: reads, jq filters, sed expressions and scratchpad paths run; writes i
     if (!((await fileTool($, 'Bash', { command })).deny ?? '').includes('profile-settings.json')) ran.push(`${cwd}: ${command}`)
   expect(ran).toEqual([])
 })
+
+// FND-29, review round 1. Ways this can still fail, written before the code:
+//  R5 A redirect into a path held in a variable the line does not know
+//     (`> $TMPDIR/out.txt`, `> "$S/marks.json"`, `S=$(mktemp -d); … > $S/ro.json`)
+//     counts as a write, so a read of ~, ., ~/.config or the store on the same
+//     line is refused. Its file name is written out and is not a mark file, so
+//     whatever the variable holds, it cannot clear a mark.
+//  R6 Interpreter code after -c (`python3 -c "print('/')"`) is read with shell
+//     grammar, so `('/')` is a subshell whose word `/` is the root.
+//  R7 The fix opens a door: a redirect whose file name the line does not spell
+//     (`> "$f"`, `> $S/$name`), or that names a mark file (`> $S/profile-settings.json`),
+//     on a line that names the store, still runs; or shell code after `bash -c` or
+//     `sh -c` stops being read.
+test('Q22: a redirect into a variable path and a / in interpreter text do not meet the store', async ($, on) => {
+  harness(on, 'yolo')
+  let cwd = '/home/tester'
+  on('session.cwd', () => ({ value: cwd }) as never)
+  const mark = '~/.config/foundry/profile-settings.json'
+  const runs: [string, string][] = [
+    // The reviewer's cases4, from home.
+    ['/home/tester', 'ls . > $TMPDIR/out.txt'],
+    ['/home/tester', 'grep -r foo . > $TMPDIR/out.txt'],
+    ['/home/tester', 'grep -r foo . > "$TMPDIR/out.txt"'],
+    ['/home/tester', 'S=$TMPDIR; grep -r foo . > $S/out.txt'],
+    ['/home/tester', 'du -sh . > $TMPDIR/du.txt'],
+    ['/home/tester', 'ls ~ > $TMPDIR/out.txt'],
+    ['/home/tester', 'ls .config > $TMPDIR/o.txt'],
+    ['/home/tester', 'echo x > $TMPDIR/out.txt'],
+    ['/home/tester', "S=$(mktemp -d); find . -name '*.md' > $S/list.txt"],
+    ['/home/tester', 'ls projects > $TMPDIR/out.txt'],
+    ['/home/tester', 'cat ./notes.txt > $TMPDIR/out.txt'],
+    ['/home/tester', 'git -C projects/app status > $TMPDIR/s.txt'],
+    ['/', 'grep -r foo . > $TMPDIR/out.txt'],
+    // The reviewer's cases5, from a project.
+    ['/home/tester/projects/app', 'ls ~ > $TMPDIR/out.txt'],
+    ['/home/tester/projects/app', 'ls ~/.config > $TMPDIR/o.txt'],
+    ['/home/tester/projects/app', `cat ${mark} > $TMPDIR/copy.json`],
+    ['/home/tester/projects/app', `jq . ${mark} > "$S/marks.json"`],
+    ['/home/tester/projects/app', 'ls -la ~/.config/foundry > $TMPDIR/ls.txt'],
+    ['/home/tester/projects/app', `S=$(mktemp -d); jq .read_only ${mark} > $S/ro.json`],
+    ['/home/tester/projects/app', 'cat ~/.bashrc > $TMPDIR/b'],
+    ...['/home', '/home/tester', '/home/tester/.config', '/home/tester/projects/app', '/'].flatMap(where => [
+      'rm -rf $TMPDIR/build/*',
+      'rm -f $TMPDIR/foundry.log',
+      'rm -rf "$BUILD_DIR"/dist',
+      'cp notes.txt "$S/notes.txt"',
+      'echo x > $TMPDIR/out.txt',
+    ].map(command => [where, command] as [string, string])),
+    ['/home/tester/projects/app', `jq . ${mark} > "$(mktemp -d)/marks.json"`],
+    // The reviewer's cases3: a / in interpreter text.
+    ...[
+      `python3 -c "print('/')"`,
+      `python3 -c "f('/')"`,
+      `python3 -c "x.split('/')"`,
+      `python3 -c "x.split( '/' )"`,
+      `python3 -c "x.rstrip('/')"`,
+      `python3 -c "os.path.join(a, '/')"`,
+      `python3 -c "x.replace('/', '_')"`,
+      `python3 -c "print('a\\\\b'.split('/'))"`,
+      `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b`,
+      `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b > o.txt`,
+      `node -e "x.split('/')"`,
+      `ruby -e "puts 'a/b'.split('/')"`,
+      `perl -e "print join('/', @x)"`,
+      `jq 'split("/")' f`,
+      `awk -F'/' '{print $2}' f`,
+    ].map(command => ['/home/tester/projects/app', command] as [string, string]),
+  ]
+  const refused: string[] = []
+  for (const [where, command] of runs) {
+    cwd = where
+    if (((await fileTool($, 'Bash', { command })).deny ?? '') !== '') refused.push(`${where}: ${command}`)
+  }
+  expect(refused).toEqual([])
+
+  const writes: [string, string][] = []
+  for (const where of ['/home/tester', '/home/tester/projects/app'])
+    writes.push(
+      ...[
+        `for f in ~/.config/foundry/*; do cat "$f" > "$f"; done`,
+        `cat ${mark} > "$f"`,
+        `ls ~/.config/foundry > $S/$name`,
+        `jq '.read_only = []' ${mark} > $S/profile-settings.json`,
+        `jq '.read_only = []' ${mark} > $S/profile-settings.*`,
+        `jq '.read_only = []' ${mark} > $S/*`,
+        `jq '.read_only = []' ${mark} > $S/p*`,
+        `jq '.read_only = []' ${mark} > "$S"/profile-settings.json`,
+        `jq '.read_only = []' ${mark} > $S/../foundry/profile-settings.json`,
+        'ls ~/.config/foundry > ~/.config/foundry/profile-settings.json',
+        `bash -c 'rm -rf ~/.config/foundry'`,
+        `sh -c "echo {} > ${mark}"`,
+        `sudo bash -c 'rm -rf ~/.config/foundry'`,
+        `python3 -c "import os; os.remove('/home/tester/.config/foundry/profile-settings.json')"`,
+        `python3 -c "import shutil; shutil.rmtree('/home/tester/.config/foundry')"`,
+        `python3 -c "import os; os.system('rm -rf ~/.config/foundry')"`,
+        // A directory the line does not know, followed by a path that ends at the store
+        // or in it, from any working directory. ($X: home; $P: its parent; $C:
+        // ~/.config; $D: the store.)
+        'rm -rf $X/.config/foundry',
+        'rm -rf "$X"/.config/foundry',
+        'rm -f ${X}/.config/foundry/profile-settings.json',
+        'echo {} > $X/.config/foundry/profile-settings.json',
+        'rm -rf "$X"/../tester/.config/foundry',
+        'rm -rf $P/tester/.config/foundry',
+        'rm -rf $C/foundry',
+        'rm -f $D/profile-settings.json',
+        'rm -rf "$(printenv X)"/.config/foundry',
+        'cd -P ~/.confi? && rm -rf foundry',
+        'cd -P -- ~/.c*g && rm -rf foundry',
+        'cd -L ~/.config && rm -rf foundry',
+        'cd -e -P ~/.config/foundry && rm -f profile-settings.json',
+        'pushd -n ~/.config >/dev/null; cd ~/.config && rm -rf foundry',
+      ].map(command => [where, command] as [string, string]),
+    )
+  const ran: string[] = []
+  for (const [where, command] of writes) {
+    cwd = where
+    if (!((await fileTool($, 'Bash', { command })).deny ?? '').includes('profile-settings.json')) ran.push(`${where}: ${command}`)
+  }
+  expect(ran).toEqual([])
+})
