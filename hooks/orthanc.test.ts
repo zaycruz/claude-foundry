@@ -14,7 +14,10 @@
 //  T8  Commands that do not wait lose the 300 s floor.
 //  T9  Flags written inside the command string (F16) are not seen.
 //  T10 An older manifest without flag defaults breaks the derivation.
-//  T11 A manifest without args loses the flags it does carry.
+//  T11 A manifest without args loses the flags it does carry, and an enumerated
+//      option loses the values it accepts. That list is the only source the
+//      destructive value lane has for a declared act, so it is pinned at the
+//      parser as well as where it is read.
 //  T12 $.process.run kills its child at ten minutes whatever timeoutMs says,
 //      so any timer over 600 s is still cut (found after the first fix).
 //  T13 The streamed run never ends: a silent child outlives its deadline, or
@@ -122,7 +125,7 @@ test('T9: flags inside the command string count once resolved', async () => {
   expect(seconds(cliTimeoutMs(CHECKS_WAIT, resolved.args))).toBe(1750)
 })
 
-test('T10 T11: the manifest keeps flag defaults; without them only explicit values count', async () => {
+test('T10 T11: the manifest keeps flag defaults and enumerated values; without them only explicit values count', async () => {
   const parsed = manifestFrom({
     schema_version: 'foundry-agent-v1',
     data: {
@@ -137,6 +140,18 @@ test('T10 T11: the manifest keeps flag defaults; without them only explicit valu
             { kind: 'option', flag: 7 },
           ],
         },
+        {
+          // The enumerated option the destructive value lane reads: Orthanc lists
+          // the values an option accepts, and that list is what tells a declared
+          // act (`--transaction-type delete`) from a word someone named.
+          path: 'dataset transactions start',
+          kind: 'mutation',
+          args: [
+            { kind: 'positional', name: 'dataset_rid', takes_value: true },
+            { kind: 'option', flag: '--transaction-type', takes_value: true, default: 'APPEND', values: ['APPEND', 'UPDATE', 'SNAPSHOT', 'DELETE'] },
+            { kind: 'option', flag: '--apply', takes_value: false },
+          ],
+        },
         { path: 'version', kind: 'local' },
       ],
     },
@@ -145,7 +160,11 @@ test('T10 T11: the manifest keeps flag defaults; without them only explicit valu
     { flag: '--timeout', takesValue: true, default: '600' },
     { flag: '--wait', takesValue: false },
   ])
-  expect(parsed[1]!.flags).toEqual([])
+  expect(parsed[1]!.flags).toEqual([
+    { flag: '--transaction-type', takesValue: true, default: 'APPEND', values: ['APPEND', 'UPDATE', 'SNAPSHOT', 'DELETE'] },
+    { flag: '--apply', takesValue: false },
+  ])
+  expect(parsed[2]!.flags).toEqual([])
   const bare: ManifestCommand = { path: 'repository checks wait' }
   expect(cliTimeoutMs(bare, ['ri.r', 'v1'])).toBe(CLI_TIMEOUT_FLOOR_MS)
   expect(seconds(cliTimeoutMs(bare, ['ri.r', 'v1', '--timeout', '1500']))).toBe(1620)
