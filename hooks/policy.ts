@@ -122,8 +122,13 @@ const POSITIONAL_BRANCH_WRITES = new Set([
   'branch-protection repo policy set',
   'branch-protection repo unprotect',
 ])
-// Promotion into main is the operator's decision, not the agent's. A release
-// tag is not here: it asks the operator outside yolo (see releaseTagCall).
+// A promotion into main through a proposal: a merge, an accept, an approval, a
+// deploy or a pull-request merge. It is not a direct write to main — the
+// proposal is — so it is not refused (zay, 2026-11-20: "the default fde mode
+// should be able to do whatever it wants on a branch and raise the proposal and
+// merge the proposal, just nothing direct against main or master"). Yolo runs
+// one with no ask; every other mode follows the ladder, where the manifest's
+// operator_approval marks ask. A release tag is not here: it asks outside yolo.
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'global-branch deploy', 'repository pull-request merge'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
@@ -220,6 +225,8 @@ export type GateClassification = {
   operatorApproval?: string
   /** True when operator_approval_scope proves the write lands on one global work branch: yolo skips the ask. */
   operatorApprovalOnWorkBranch?: true
+  /** True for a promotion into main through a proposal (merge, accept, approve, deploy, pull-request merge): not a direct write to main, so yolo runs it with no ask. */
+  promotion?: true
   error?: string
 }
 
@@ -688,7 +695,8 @@ const branchCore = (value: string) =>
     .replace(/^(\.\/)+/, '')
     .replace(/^(refs\/)?heads\//, '')
     .replace(/[/.]+$/, '')
-const isProtectedValue = (value: string) => PROTECTED_BRANCHES.includes(branchCore(value)) || branchCore(value) === 'head'
+/** True when the value names main, master or HEAD, however it is spelled (`refs/heads/main`, `+master`, `:HEAD`, `./main/`). */
+export const isProtectedValue = (value: string) => PROTECTED_BRANCHES.includes(branchCore(value)) || branchCore(value) === 'head'
 
 export function branchIsWorking(branch: string | null | undefined): boolean {
   return typeof branch === 'string' && branch.trim() !== '' && !isProtectedValue(branch)
@@ -805,9 +813,6 @@ const positionals = (args: readonly string[]) => {
 export function branchRuleReason(command: string, args: readonly string[]): string | null {
   if (MAIN_ONLY_WRITES.has(command)) {
     return `'${command}' writes live data on the main ontology branch and cannot take --branch. Agents do not run it: use 'ontology action-apply --branch <global branch RID>' or hand it to the operator.`
-  }
-  if (PROMOTIONS.has(command)) {
-    return `'${command}' promotes work (a merge, an approval or a release). The operator does it; the agent does not.`
   }
   if (argsNameFlag(args, ['--allow-default-branch'])) {
     return `'${command} --allow-default-branch' writes the default branch. Use a work branch (and, for code, a pull request).`
@@ -984,6 +989,7 @@ function orthancClassification(
       ...(release !== null ? release : {}),
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
+      ...(PROMOTIONS.has(command) ? { promotion: true as const } : {}),
       ...(refused ? { error: refused } : {}),
     }
   }
@@ -1155,11 +1161,15 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 // Absent: the next command runs after this one (`&&`, `;`, a newline).
 export type ShellJoin = 'fail' | 'arm' | 'pipe' | 'bg'
 
-export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin }
+// continues: the segment is the argument continuation of a command the parser
+// split at a substitution's `)`, so it starts no program of its own.
+export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin; continues?: boolean }
 
 // Code that can start another process, per interpreter.
 const SPAWNS: [RegExp, RegExp][] = [
-  [/^python/, /subprocess|\bpty\b|ctypes|pexpect|plumbum|importlib|__import__|\brunpy\b|\bgetattr\b|\bbuiltins\b|\b(exec|eval|compile)\s*\(|\b(import|from)\s+(sh|commands)\b|\bos\s*\.\s*(system|popen|exec|spawn|posix_spawn|fork)|\b(system|popen[234]?|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?|forkpty)\s*\(|\bfrom\s+os\s+import\b[^\n;]*\b(system|popen|exec|spawn|posix_spawn|fork)/],
+  // A call on a bare name (`exec(code)`, `system("…")`) can start a process; one on an
+  // attribute (`re.compile(…)`, `json.eval…`) is that module's own function, not a process.
+  [/^python/, /subprocess|\bpty\b|ctypes|pexpect|plumbum|importlib|__import__|\brunpy\b|\bgetattr\b|\bbuiltins\b|(?<![\w.])(exec|eval|compile)\s*\(|\b(import|from)\s+(sh|commands)\b|\bos\s*\.\s*(system|popen|exec|spawn|posix_spawn|fork)|\b(system|popen[234]?|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?|forkpty)\s*\(|\bfrom\s+os\s+import\b[^\n;]*\b(system|popen|exec|spawn|posix_spawn|fork)/],
   [/^(node|deno|bun)$/, /child_process|\bexec(Sync|File|FileSync)?\s*\(|\bspawn|\bfork\s*\(|Deno\s*\.\s*(Command|run)|Bun\s*\.\s*(spawn|\$)|\$\s*`|\beval\s*\(|\bFunction\s*\(|\bimport\s*\(|\brequire\s*\(\s*[^'"\s]|\bexeca\b|\bzx\b|process\s*\.\s*binding/],
   [/^ruby$/, /\bsystem\b|\bexec\b|\bspawn\b|`|%x|\bpopen|Open3|\beval\b|\bfork\b|\bsyscall\b|\bPTY\b|\bsend\s*\(|\b(instance|class|module)_eval\b|\bKernel\b/],
   [/^perl$/, /\bsystem\b|\bexec\b|`|\bqx\b|\bopen\b[^;]*\||\beval\b|\bfork\b|\bsyscall\b|IPC::|\bpipe\b/],
@@ -1191,6 +1201,8 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
   let quote: string | null = null
   let quoted = false
   let target: 'file' | 'herestring' | 'heredoc' | 'heredoc-tabs' | null = null
+  // Words after a substitution's `)` continue the command before it as arguments.
+  let continues = false
   const endWord = () => {
     if (word !== '' || quoted) {
       if (target === 'heredoc' || target === 'heredoc-tabs') {
@@ -1218,8 +1230,11 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     const join: ShellJoin | undefined =
       operator === '||' ? 'fail' : operator === ';;' || arm ? 'arm' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
     armPattern = operator === ';;' ? true : operator === ')' ? false : words.length > 0 ? false : armPattern
-    if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join })
+    if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join, continues })
     words = []
+    // Words right after a substitution's `)` continue the command before it as
+    // arguments; a `case` arm's `)` opens a command of its own.
+    continues = operator === ')' && !arm
   }
   // At a newline: skip the bodies of the heredocs opened on the line that ends here.
   const skipHeredocs = (newline: number): number => {
@@ -1315,8 +1330,9 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
 }
 
 const SHELLS = /^(sh|bash|zsh|dash|ksh|mksh|ash|fish|busybox)$/
-// Heads whose following words are one command line the shell runs (eval, ssh host …).
-const LINE_RUNNERS = new Set(['eval', 'ssh', 'watch', 'tmux', 'screen', 'parallel'])
+// Heads whose following words are one command line the shell runs (eval, watch …).
+// ssh runs its command on another host: sshCommandStart resolves it instead.
+const LINE_RUNNERS = new Set(['eval', 'watch', 'tmux', 'screen', 'parallel'])
 const CODE_FLAG = /^-[A-Za-z]*[cS]$/
 const NESTING_LIMIT = 3
 // Words after which a later word is the program that runs (`docker exec -i c sh`).
@@ -1325,11 +1341,12 @@ const LAUNCHERS = new Set([
   'unshare', 'nsenter', 'flock', 'time', 'command', 'caffeinate',
 ])
 // A segment hidesOrthanc refuses whenever the line names orthanc.
-const UNREADABLE: Segment = { words: ['$'], fed: false, split: false }
+const UNREADABLE: Segment = { words: ['$'], fed: false, split: false, continues: false }
 
 /** The words of a segment that the shell runs as code: the value after -c
- * (sh -c, bash -lc, su -c, npx -c), env -S, and everything after eval or ssh.
- * Free-text heads (git, echo, grep, …) run none of their words. */
+ * (sh -c, bash -lc, su -c, npx -c), env -S, and everything after eval, watch
+ * or tmux. ssh runs its command on another host (sshCommandStart); free-text
+ * heads (git, echo, grep, …) run none of their words. */
 function codeWords(words: readonly string[]): string[] {
   let head = 0
   while (head < words.length && ASSIGNMENT.test(words[head]!)) head += 1
@@ -1366,8 +1383,26 @@ const NAMES_ORTHANC = /(?<![\w.-])orthanc(?![\w./-])|ORTHANC_BIN/i
 const isOrthancWord = (word: string) => basename(word).toLowerCase() === 'orthanc' || /\$\{?ORTHANC_BIN\}?/.test(word)
 const WRAPPERS = new Set([
   'env', 'command', 'exec', 'time', 'nohup', 'sudo', 'doas', 'xargs', 'nice', 'timeout', 'caffeinate',
-  'builtin', 'stdbuf', 'then', 'do', 'else', '!', '{',
+  'builtin', 'stdbuf', 'then', 'do', 'else', '!', '{', 'setsid', 'npx',
+  // Shell keywords whose next word is a command: `if orthanc …; then`, `while orthanc …`.
+  'if', 'elif', 'while', 'until', 'coproc', '(',
 ])
+// Flags of the wrappers that take the next word as their value (`sudo -u tester`,
+// `xargs -I {}`, `nice -n 10`). A glued value (`-I{}`, `--signal=KILL`) is part
+// of the flag word already; an unlisted flag takes no separate value.
+const WRAPPER_VALUE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  sudo: ['-C', '-D', '-R', '-T', '-g', '-p', '-r', '-u', '--chdir', '--close-from', '--group', '--other-user', '--prompt', '--role', '--type', '--user'],
+  doas: ['-g', '-u', '--group', '--user'],
+  env: ['-S', '-u', '--split-string', '--unset'],
+  timeout: ['-k', '-s', '--kill-after', '--signal'],
+  xargs: ['-E', '-I', '-J', '-L', '-P', '-R', '-S', '-d', '-j', '-l', '-n', '-s'],
+  nice: ['-n', '--adjustment'],
+  stdbuf: ['-e', '-i', '-o', '--error', '--input', '--output'],
+  exec: ['-a', '-l'],
+  time: ['-a', '-f', '-o', '--append', '--format', '--output'],
+  caffeinate: ['-u', '-w'],
+  npx: ['-c', '-p', '--call', '--package'],
+}
 const INDIRECT = new Set(['eval', 'source', '.'])
 const CODE_RUNNERS = /^(python[0-9.]*|node|deno|bun|ruby|perl|osascript|awk)$/
 
@@ -1378,14 +1413,75 @@ const NON_EXECUTING = new Set([
   'nano', 'brew', 'mkdir', 'rm', 'cp', 'mv', 'touch', 'tree', 'du', 'diff', 'cargo', 'sed', 'awk',
 ])
 
-/** The index of the first word past the wrapper prefix: assignments, wrappers,
- * their flags and the numbers they take (`timeout 5`, `nice -n 10`). */
-function commandHead(words: readonly string[]): number {
+/** The index of a segment's command word: past assignments (`X=… cmd`), wrapper
+ * words, and the flags, flag values and durations those wrappers take
+ * (`env`, `sudo -u tester orthanc …`, `timeout 60 orthanc …`); `find … -exec CMD`
+ * resolves to CMD. -1 when the segment starts no program of its own: a flag
+ * before any word is the argument continuation of a command the parser split at
+ * a substitution, and a segment of only assignments runs nothing. */
+function commandWord(words: readonly string[]): number {
   let index = 0
-  while (index < words.length && (ASSIGNMENT.test(words[index]!) || WRAPPERS.has(basename(words[index])) || words[index]!.startsWith('-') || /^[0-9.]+[smhd]?$/.test(words[index]!))) {
-    index += 1
+  let wrapper = ''
+  while (index < words.length) {
+    const word = words[index]!
+    if (ASSIGNMENT.test(word)) {
+      index += 1
+      continue
+    }
+    // `!` negates a command's exit status: the command word follows it.
+    if (word === '!') {
+      index += 1
+      continue
+    }
+    const name = basename(word)
+    if (name === 'find') {
+      // find -exec CMD … ; runs CMD: the word after -exec/-execdir is the command word.
+      const exec = words.findIndex((found, at) => at >= index && (found === '-exec' || found === '-execdir'))
+      return exec >= 0 && exec + 1 < words.length ? exec + 1 : -1
+    }
+    if (WRAPPERS.has(name)) {
+      wrapper = name
+      index += 1
+      continue
+    }
+    if (word.startsWith('-')) {
+      if (wrapper === '') return -1
+      index += (WRAPPER_VALUE_FLAGS[wrapper] ?? []).includes(word) ? 2 : 1
+      continue
+    }
+    // A duration in its own word: `timeout 60`, `timeout 5m`, `nice 10`.
+    if (wrapper !== '' && /^[0-9.]+[smhd]?$/i.test(word)) {
+      index += 1
+      continue
+    }
+    return index
   }
-  return index
+  return -1
+}
+
+// ssh's flags that take the next word as their value; the destination follows them.
+const SSH_VALUE_FLAGS = ['-b', '-e', '-F', '-i', '-J', '-l', '-o', '-p', '-w', '-W']
+
+/** Where a segment's ssh command for the remote host starts: past `ssh`, its
+ * flags and the destination. -1 when the segment runs no ssh, or an ssh with no
+ * command (it opens a remote shell). */
+function sshCommandStart(segment: Segment): number {
+  const index = commandWord(segment.words)
+  if (index < 0 || basename(segment.words[index]!) !== 'ssh') return -1
+  let at = index + 1
+  while (at < segment.words.length) {
+    const word = segment.words[at]!
+    if (SSH_VALUE_FLAGS.includes(word)) {
+      at += 2
+      continue
+    }
+    if (word.startsWith('-')) {
+      at += 1
+      continue
+    }
+    break
+  }
+  return at + 1 < segment.words.length ? at + 1 : -1
 }
 
 // A path under a variable (`$X/orthanc-old`, `${X}/out`): an argument, not a command.
@@ -1419,28 +1515,35 @@ function printsAndExits(runner: string, flags: readonly string[]): boolean {
   )
 }
 
-/** Where Orthanc starts in a segment: the command word, or the first orthanc
- * word after a head that can run another program (env, sudo, xargs, find
- * -exec, npx, ssh, a wrapper script, …) when a call follows it. -1 when the
- * segment does not run Orthanc: `--bin target/debug/orthanc` is an argument. */
+/** Where a segment starts a real Orthanc call: at its command word (assignments
+ * and wrappers resolved), when that word is Orthanc itself — `orthanc`, a path
+ * to it (`/opt/bin/orthanc`, `target/debug/orthanc`) or `$ORTHANC_BIN`. -1
+ * otherwise: a word orthanc anywhere past the command word is an argument (a
+ * repo named zaycruz/orthanc, a `--bin` value), not a call. */
 function orthancStart(segment: Segment, groups: ReadonlySet<string>): number {
+  if (segment.continues) return -1
   const { words } = segment
-  const head = commandHead(words)
-  if (head >= words.length) return -1
-  if (isOrthancWord(words[head]!)) return head
-  if (NON_EXECUTING.has(basename(words[head]))) return -1
-  for (let position = head + 1; position < words.length; position += 1) {
+  const index = commandWord(words)
+  if (index < 0) return -1
+  if (isOrthancWord(words[index]!)) return index
+  // A launcher runs a later word as its program (`flock LOCK orthanc …`,
+  // `nsenter -t 1 orthanc …`, `docker exec c orthanc …`): an orthanc word after
+  // one that starts a call is a real call. Only after a launcher, so an argument
+  // of any other command (a repo named zaycruz/orthanc) stays data.
+  for (let position = index + 1; position < words.length; position += 1) {
     if (!isOrthancWord(words[position]!)) continue
-    // The segment ended at a substitution: the call continues in it.
-    if (startsCall(words, position, groups) || (segment.split && position === words.length - 1)) return position
+    if (!words.slice(index, position).some(earlier => LAUNCHERS.has(basename(earlier)))) continue
+    if (startsCall(words, position, groups)) return position
   }
   return -1
 }
 
-/** True when a segment runs Orthanc in a form the parser cannot read: an
- * assignment of the binary, a variable that may run it, eval, or interpreter
+/** True when a segment runs Orthanc in a form the parser cannot read: a
+ * variable in command position that may hold the binary, eval, or interpreter
  * code that can start a process. `command` is the whole shell line;
- * `assignments` holds every value the line gives each variable. */
+ * `assignments` holds every value the line gives each variable. A segment
+ * whose command word is Orthanc itself is readable (orthancStart) and a
+ * concrete other command word runs no Orthanc, whatever its arguments name. */
 function hidesOrthanc(
   segment: Segment,
   command: string,
@@ -1453,9 +1556,11 @@ function hidesOrthanc(
   if (words.every(word => ASSIGNMENT.test(word))) {
     return words.some(word => isOrthancWord(unquote(word.replace(ASSIGNMENT, '')).split(/\s+/)[0] ?? ''))
   }
-  const index = commandHead(words)
-  const head = words[index]
-  if (head === undefined) return false
+  if (segment.continues) return false
+  const index = commandWord(words)
+  if (index < 0) return false
+  const head = words[index]!
+  if (isOrthancWord(head)) return false
   if (head.startsWith('$')) {
     // A variable run as a command: refused when it may hold the binary, or is run with an Orthanc command.
     if (NAMES_ORTHANC.test(head)) return true
@@ -1467,7 +1572,7 @@ function hidesOrthanc(
     return startsCall(words, index, groups)
   }
   const rest = words.slice(index + 1)
-  if (INDIRECT.has(head)) return rest.some(word => NAMES_ORTHANC.test(word))
+  if (INDIRECT.has(basename(head))) return rest.some(word => NAMES_ORTHANC.test(word))
   // A shell or interpreter in command position (the head, after `--`, or after
   // a launcher such as `kubectl exec -i p -- bash`, `docker exec -i c sh`).
   const runner = words.findIndex(
@@ -1592,8 +1697,8 @@ function loopCounts(segments: readonly Segment[]): number[] {
 }
 
 /** The Orthanc calls a Bash command runs, unreadable ones marked where they sit. */
-function shellCalls(command: string, manifest: readonly ManifestCommand[]): ShellCall[] {
-  const segments = commandSegments(command)
+function shellCalls(command: string, manifest: readonly ManifestCommand[], depth = 0): ShellCall[] {
+  const segments = commandSegments(command, depth)
   // The first words of the manifest paths: what can follow `orthanc` as a call.
   const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
   // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
@@ -1611,7 +1716,12 @@ function shellCalls(command: string, manifest: readonly ManifestCommand[]): Shel
       return
     }
     const start = orthancStart(segment, groups)
-    if (start < 0) return
+    if (start < 0) {
+      // ssh runs a command on another host: what it runs there is read like a line of its own.
+      const at = sshCommandStart(segment)
+      if (at > 0 && depth < NESTING_LIMIT) calls.push(...shellCalls(segment.words.slice(at).join(' '), manifest, depth + 1))
+      return
+    }
     const call = orthancShellCall(words, start, manifest)
     calls.push({
       hides: false,
@@ -1642,6 +1752,12 @@ export function shellOrthancCalls(command: string, manifest: readonly ManifestCo
 
 // Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
 // where the branch rule and the ladder see its arguments as data, not shell.
+// The guard decides "this runs orthanc" from the command word of each simple
+// command (assignments and wrappers resolved), never from a substring anywhere
+// in the line: the word in an argument, a repo name, a path, a flag value, a
+// heredoc body or a JSON payload is data. It refuses a command word that is
+// Orthanc, and a form it cannot read: eval, a variable as the command word,
+// code fed to a shell or interpreter, or the remote command of an ssh.
 function shellClassification(
   command: string,
   manifest: readonly ManifestCommand[],
@@ -1903,13 +2019,15 @@ export function ladderDecision(
   // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
   // necessary for anything on the branch, only main." A release tag or a write
   // the manifest marks operator_approval asks in every mode; yolo skips it only
-  // when the call is shown to land on one global work branch. These come before
-  // yolo's early run, so nothing that lands on main runs unasked.
+  // when the call is shown to land on one global work branch. A promotion
+  // (zay, 2026-11-20: "raise the proposal and merge the proposal") asks in
+  // every mode but yolo too. These come before yolo's early run, so nothing
+  // that lands on main runs unasked.
   const yolo = mode === 'yolo'
   if (classification.release && !(yolo && classification.releaseOnWorkBranch)) {
     return { outcome: 'ask', reason: classification.release }
   }
-  if (classification.operatorApproval && !(yolo && classification.operatorApprovalOnWorkBranch)) {
+  if (classification.operatorApproval && !(yolo && (classification.operatorApprovalOnWorkBranch || classification.promotion))) {
     return { outcome: 'ask', reason: classification.operatorApproval }
   }
   if (classification.kind === 'branch-creation') {
@@ -1965,16 +2083,19 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Branch rule: agent work happens on branches, never on a production main. Every ontology write ' +
     'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>; `ontology scenario create` spells its branch --base-branch); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
-    'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
+    'Writes without a branch and default-branch pushes are blocked in every mode. ' +
+    'Promotions — merging, accepting or approving a proposal, global-branch deploy, repository pull-request merge — ' +
+    'are allowed (they land through a proposal, never directly on main). ' +
     'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +
     (mode === 'yolo'
       ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
-        'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
+        'and the loop guard is off. A promotion runs with no ask. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
         'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
-      : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
+      : 'Promotions follow the ladder like any other write. ' +
+        'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
         'when a value a flag takes names such an act, either among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`) or spelled in caps the way Orthanc spells an enumerated value, ' +
         'or when it is given --force. ' +

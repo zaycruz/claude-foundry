@@ -111,10 +111,17 @@ test('F4: flags keep their = and quoted forms', async () => {
   expect(flagValue(['--branch', '--apply'], '--branch')).toBe('')
 })
 
-test('F6 F8 F11: unbranchable ontology writes, merges and Palantir MCP writes block everywhere', async () => {
+test('F6 F8 F11: unbranchable ontology writes and Palantir MCP writes block everywhere; a merge follows the ladder', async () => {
   expect(blockedEverywhere(classifyCall(CLI, { command: 'ontology object-upsert', args: ['T'] }, MANIFEST, 'agent/x'))).toBe(true)
-  expect(blockedEverywhere(classifyCall(CLI, { command: 'proposal merge', args: ['p'] }, MANIFEST, 'agent/x'))).toBe(true)
   expect(blockedEverywhere(classifyCall('mcp__palantir-mcp__create_object_type', { name: 'x' }, MANIFEST, 'agent/x'))).toBe(true)
+  // zay, 2026-11-20: "raise the proposal and merge the proposal, just nothing
+  // direct against main or master". A merge lands through a proposal, so it is
+  // not blocked in any mode; yolo runs it (yolo.test.ts Y19) and the other
+  // modes ask as the ladder says.
+  const merged = classifyCall(CLI, { command: 'proposal merge', args: ['p'] }, MANIFEST, 'agent/x')
+  expect(merged?.error).toBe(undefined)
+  expect(ladderDecision('yolo', merged!, approve).outcome).toBe('run')
+  expect(ladderDecision('ask-always', merged!, approve).outcome).toBe('ask')
 })
 
 test('F7: repository push to the default branch blocks; a work branch passes the rule', async () => {
@@ -151,7 +158,12 @@ test('F16: orthanc_cli resolves case and trailing words the way the executor run
   expect(resolveOrthancCommand('Ontology Object-Type-Upsert T', ['--apply'], MANIFEST)).toEqual({ path: 'ontology object-type-upsert', args: ['T', '--apply'] })
   expect(blockedEverywhere(classifyCall(CLI, { command: 'Ontology Object-Type-Upsert' }, MANIFEST, null))).toBe(true)
   expect(blockedEverywhere(classifyCall(CLI, { command: 'ontology object-type-upsert T --apply' }, MANIFEST, null))).toBe(true)
-  expect(blockedEverywhere(classifyCall(CLI, { command: '  PROPOSAL   merge ' }, MANIFEST, null))).toBe(true)
+  // A merge is a promotion, not a branch rule refusal (zay, 2026-11-20): it
+  // resolves and follows the ladder — yolo runs it, ask-always asks.
+  const promoted = classifyCall(CLI, { command: '  PROPOSAL   merge ' }, MANIFEST, null)
+  expect(promoted?.command).toBe('proposal merge')
+  expect(ladderDecision('yolo', promoted!, approve).outcome).toBe('run')
+  expect(ladderDecision('ask-always', promoted!, approve).outcome).toBe('ask')
 })
 
 test('F17: Orthanc writes in Bash block in every mode, however the shell hides them; plain reads pass', async () => {
