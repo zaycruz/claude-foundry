@@ -1187,23 +1187,25 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
   return foundryMcpTool(tool) !== null
 }
 
-// The verbs that change something in Foundry. This plugin already treats approvals,
-// merges, promotions and unprotects as writes that need the operator
-// (`DENIED_COMMANDS`, `destructiveFromWords`), so an MCP tool naming one is a write
-// too. Without these words a name like `view_branch_and_revoke_protection` hit only
-// its read verb and ran with no ladder (reviewed at e01f1dd, where it ran too).
-// The verbs this plugin already treats as writes somewhere (`DENIED_COMMANDS`,
-// `MAIN_ONLY_WRITES`: object-type-upsert, stream reset, transactions start, pull-request
-// accept), so an MCP tool naming one is a write too. The list is a vocabulary and will
-// never be complete; that is why an unreadable name fails closed instead of running.
+// The verbs this plugin already treats as writes elsewhere (`DENIED_COMMANDS`,
+// `MAIN_ONLY_WRITES`: object-type upsert, stream reset, transaction start, pull-request
+// accept), so an MCP tool naming one is a write too. Without them a name like
+// `view_branch_and_revoke_protection` hits only its read verb and runs with no ladder.
+// The list is a vocabulary and will never be complete; that is why an unreadable name
+// fails closed instead of running.
 const WRITE_WORDS = new Set(['accept', 'add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'reset', 'restart', 'revert', 'revise', 'revoke', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'truncate', 'unprotect', 'update', 'upload', 'upsert', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
 
 /** Words in a tool name: split on separators and on letter case, so `deleteObjects`,
 `delete_objects` and `DeleteObjects` all give `delete` and `objects`. */
-export function mcpWords(name: string): string[] {
+function mcpWords(name: string): string[] {
   return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).map(word => word.toLowerCase()).filter(word => word !== '')
+}
+
+/** Every word either splitter can find in a tool name. */
+function mcpAllWords(inner: string): string[] {
+  return [...inner.toLowerCase().split(/[^a-z]+/), ...mcpWords(inner)]
 }
 
 /**
@@ -1227,7 +1229,7 @@ export function mcpWords(name: string): string[] {
  */
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   const coarse = inner.toLowerCase().split(/[^a-z]+/)
-  const words = [...coarse, ...mcpWords(inner)]
+  const words = mcpAllWords(inner)
   if (words.some(word => WRITE_WORDS.has(word))) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
   if (coarse.some(word => READ_WORDS.has(word))) return 'read'
@@ -1237,7 +1239,7 @@ export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
 /** What the guard says about a blocked Foundry MCP tool: only what the name shows. */
 function mcpIntentError(tool: string, intent: 'read' | 'write' | 'unknown'): string {
   if (intent === 'write') return `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`
-  return `${tool} is a Foundry call the guard cannot read, so nothing runs. If this tool only reads, give it a name the guard can read (list_objects). To write, use orthanc_cli with --branch.`
+  return `${tool} is a Foundry call the guard cannot read, so nothing runs. A name with plain separated words (list_objects) reads; a camelCase name does not. The operator can allow this tool by hand, and Orthanc covers writes (orthanc_cli --branch).`
 }
 
 /** A Foundry call the guard cannot read: blocked in every mode, so it never runs blind. */
@@ -1301,7 +1303,7 @@ export function classifyCall(
       isBranchScoped: false,
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
-      isDestructive: mcpWords(inner).includes('delete'),
+      isDestructive: mcpAllWords(inner).includes('delete'),
       error: mcpIntentError(tool, classifyMcpIntent(inner)),
     }
   }

@@ -45,10 +45,11 @@ says so instead of falling back to REST.
   a pull request. Branchless writes, `--allow-default-branch`, proposal
   merges and approvals, `global-branch deploy`, `repository pull-request
   merge`, default-branch pushes, raw `git push` to a Foundry
-  repository and Foundry writes outside Orthanc are blocked. A MCP tool from a
-  server named for Palantir or Foundry counts as such a write in any case or
-  spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
-  `mcp__palantirFoundry__…`), not only the exact name `mcp__palantir__`. A tool
+  repository and Foundry writes outside Orthanc are blocked. A MCP tool counts as
+  such a write when its server name or its tool name says Palantir or Foundry, in any
+  case or spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
+  `mcp__palantirFoundry__…`, `mcp__tools__foundry_delete_object`), not only the exact
+  name `mcp__palantir__`. A tool
   whose name reads with plain separated words (`list_objects`, `get-object`,
   `search data`) still runs; a camelCase read (`listObjects`) is refused, because
   the same shape hides a second verb. A name carrying both

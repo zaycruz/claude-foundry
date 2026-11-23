@@ -171,7 +171,7 @@ test('MS10: the refusal says only what the name tells it', async () => {
 })
 
 test('MS7: the delete word still marks the call destructive', async () => {
-  for (const tool of ['mcp__Palantir__delete_object', 'mcp__foundry_tools__delete_object', 'mcp__palantir__delete_object']) {
+  for (const tool of ['mcp__Palantir__delete_object', 'mcp__foundry_tools__delete_object', 'mcp__palantir__delete_object', 'mcp__palantir__delete2objects', 'mcp__palantir__deleteObjects']) {
     expect({ tool, destructive: classifyCall(tool, {}, MANIFEST, null)?.isDestructive }).toEqual({ tool, destructive: true })
   }
   expect(classifyCall('mcp__Palantir__write_object', {}, MANIFEST, null)?.isDestructive).toBe(false)
@@ -291,6 +291,9 @@ test('MS8: the gate answers for every spelling, and never wider than the trace',
   // `ontology`, which name no Foundry product and are pinned NOT gated on purpose, so
   // widening stays a decision and not a slip.
   const EXPECTED: [string, boolean][] = [
+    // ['mcp__palantir', true] is the shape a gate must not miss: the name starts `mcp__`
+    // and stops there, so the whole rest is the server name. The loop below checks the
+    // trace answer against this column too, so the frozen table pins both sides.
     ['mcp__palantir__write_object', true],
     ['mcp__palantir-mcp__write_object', true],
     ['mcp__palantir_mcp__write_object', true],
@@ -301,13 +304,14 @@ test('MS8: the gate answers for every spelling, and never wider than the trace',
     ['mcp__tools__foundry_delete_object', true],
     ['mcp__refoundry__list', true],
     ['mcp__palantir__list_objects', true],
+    ['mcp__palantir', true],
     ['mcp__github__create_issue', false],
     ['mcp__filesystem__write_file', false],
     ['mcp__osdk__write_object', false],
     ['mcp__ontology__delete_object', false],
   ]
   for (const [tool, gated] of EXPECTED) {
-    expect({ tool, gated: foundryMcpTool(tool) !== null }).toEqual({ tool, gated })
+    expect({ tool, gated: foundryMcpTool(tool) !== null, traced: touchesFoundryTool(tool, {}) }).toEqual({ tool, gated, traced: gated })
   }
 })
 
