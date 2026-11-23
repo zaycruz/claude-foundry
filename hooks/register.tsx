@@ -1679,8 +1679,10 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (classification) {
     note.foundry = true
     note.command = classification.command ?? undefined
+    // A call that already carries a refusal needs no second opinion: the ladder blocks
+    // on `error` before it looks at the model, so the call would only cost a round trip.
     const verdict =
-      mode === 'auto' && classification.kind === 'mutation'
+      mode === 'auto' && classification.kind === 'mutation' && !classification.error
         ? await guardVerdict($, tool, input, classification).catch(() => null)
         : undefined
     const decision = ladderDecision(mode, classification, verdict)

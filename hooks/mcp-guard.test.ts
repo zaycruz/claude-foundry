@@ -292,8 +292,10 @@ test('MS8: the gate answers for every spelling, and never wider than the trace',
   // widening stays a decision and not a slip.
   const EXPECTED: [string, boolean][] = [
     // ['mcp__palantir', true] is the shape a gate must not miss: the name starts `mcp__`
-    // and stops there, so the whole rest is the server name. The loop below checks the
-    // trace answer against this column too, so the frozen table pins both sides.
+    // and stops there, so the whole rest is the server name. While the guard and the trace
+    // call this one predicate the two columns cannot disagree, so this table's work is to
+    // pin the answers. If someone splits the predicate again, this loop is where a gate
+    // that runs narrower than the trace starts failing.
     ['mcp__palantir__write_object', true],
     ['mcp__palantir-mcp__write_object', true],
     ['mcp__palantir_mcp__write_object', true],

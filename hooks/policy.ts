@@ -1187,9 +1187,10 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
   return foundryMcpTool(tool) !== null
 }
 
-// The verbs this plugin already treats as writes elsewhere (`DENIED_COMMANDS`,
-// `MAIN_ONLY_WRITES`: object-type upsert, stream reset, transaction start, pull-request
-// accept), so an MCP tool naming one is a write too. Without them a name like
+// The verbs this plugin already treats as writes elsewhere. `MAIN_ONLY_WRITES` holds
+// `ontology object-upsert` and `dataset transactions start`, the denied set the stream
+// and auth commands, `PROMOTIONS` `proposal accept`. An MCP tool naming one of those
+// verbs is a write too. Without them a name like
 // `view_branch_and_revoke_protection` hits only its read verb and runs with no ladder.
 // The list is a vocabulary and will never be complete; that is why an unreadable name
 // fails closed instead of running.
@@ -1220,7 +1221,8 @@ function mcpAllWords(inner: string): string[] {
  * case for the read answer turned `listAndUpsertRows` into a plain `list` and the
  * guard ran a write it used to refuse (found in review of this change, and the reason
  * the two answers are not symmetric). A camelCase read such as `listObjects` is
- * refused with a reason; the operator can allow it by hand.
+ * refused with a reason. Nothing in this plugin lets an operator allow one by hand:
+ * the block holds in every mode.
  *
  * The write answer is the UNION of both splits, and it has to be. The separator split
  * cuts on digits and the case split does not, so `list_and_delete2objects` shows the
@@ -1239,7 +1241,7 @@ export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
 /** What the guard says about a blocked Foundry MCP tool: only what the name shows. */
 function mcpIntentError(tool: string, intent: 'read' | 'write' | 'unknown'): string {
   if (intent === 'write') return `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`
-  return `${tool} is a Foundry call the guard cannot read, so nothing runs. A name with plain separated words (list_objects) reads; a camelCase name does not. The operator can allow this tool by hand, and Orthanc covers writes (orthanc_cli --branch).`
+  return `${tool} is a Foundry call the guard cannot read, so nothing runs. A name with plain separated words (list_objects) reads; a camelCase name does not. Orthanc is the write path: orthanc_cli with --branch.`
 }
 
 /** A Foundry call the guard cannot read: blocked in every mode, so it never runs blind. */
@@ -1296,7 +1298,8 @@ export function classifyCall(
   const foundryMcp = foundryMcpTool(tool)
   if (foundryMcp !== null) {
     const inner = foundryMcp.inner
-    if (classifyMcpIntent(inner) === 'read') return null
+    const intent = classifyMcpIntent(inner)
+    if (intent === 'read') return null
     return {
       command: null,
       kind: 'mutation',
@@ -1304,7 +1307,7 @@ export function classifyCall(
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
       isDestructive: mcpAllWords(inner).includes('delete'),
-      error: mcpIntentError(tool, classifyMcpIntent(inner)),
+      error: mcpIntentError(tool, intent),
     }
   }
   return null
