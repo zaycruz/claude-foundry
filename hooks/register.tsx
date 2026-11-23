@@ -897,7 +897,7 @@ async function fdeGate(
   return { input: { ...input, command: resolved.path, args: bound.args }, ran: isMutation ? resolved.path : null }
 }
 
-// A /fde from one of these is the person's own typing: the terminal and Remote
+// A /fde end, /fde resume or /approval yolo from one of these is the person's own typing: the terminal and Remote
 // Control. An SDK turn (`claude -p`, the Agent SDK), peers, relays, channels,
 // triggers and plugins are not (zay, 2026-10-21: "Not you").
 const PERSON_ORIGINS = new Set(['composer', 'bridge'])
@@ -1604,6 +1604,14 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
       }
       const mode = parseApprovalMode(wanted)
       if (mode === null) return `Unknown mode '${wanted}'. Modes: ${APPROVAL_MODES.join(', ')}.`
+      // yolo is where destructive writes and promotions run with no ask, and the
+      // mode persists: only the person's own typing turns it on. An SDK turn, a
+      // peer or a relay can still pick a stricter mode.
+      if (mode === 'yolo' && !isPerson(origin)) {
+        return `Only you can turn on yolo: type /approval yolo yourself. This one came from ${
+          origin?.kind || 'an unknown source'
+        }, so the approval mode stays ${await approvalMode($)}.`
+      }
       await $.store.set('approvalMode', mode)
       return `Foundry approval mode: ${mode}.`
     }

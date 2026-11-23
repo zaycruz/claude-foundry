@@ -290,7 +290,10 @@ Approve writes in the Sandbox project on agent/ branches.
 Ask before any change to the Person or Organization object types.
 ```
 
-`/approval rules` shows what the guard reads. The rules steer the guard only:
+Only you can turn on `yolo`: `/approval yolo` from the terminal or Remote
+Control works; from an SDK turn (`claude -p`), a peer, a relay, a channel or a
+trigger it is refused and the mode stays as it was. Those origins can still pick
+a stricter mode. `/approval rules` shows what the guard reads. The rules steer the guard only:
 the branch rule and the destructive rule run first and cannot be loosened.
 
 Claude Code's own auto-mode classifier judges tool calls before the mod sees
