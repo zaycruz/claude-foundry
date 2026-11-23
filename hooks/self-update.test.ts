@@ -76,19 +76,22 @@
 //  U9 The read list drifts from the shipped surface: a local command orthanc
 //     reads is refused as a write, or one it writes is read.
 //
-// What this file cannot pin, and what pins it instead: the surface below is
-// every `kind: local` entry of the released 0.7.11, captured from the binary and
-// checked line by line against hooks/orthanc-snapshot.json (the plugin's pin),
-// which is where `update` is `kind: mutation`. A test cannot open that file —
-// the kit refuses any import but the module under test and "claude-code" — so
-// the capture, not the JSON, is what these assertions read, and a future
-// orthanc moves it by hand. hooks/orthanc-tie.ts in pull request #18 is the
-// durable form of the same pin.
+// Where the surface comes from: every `kind: local` entry of the orthanc this
+// plugin is tied to, read out of hooks/orthanc-manifest.snapshot.ts — the pin
+// `node scripts/orthanc-tie.mjs refresh` writes and `check` watches. `update` is
+// `kind: mutation` there. This used to be a list typed beside the test, because
+// a test cannot open hooks/orthanc-snapshot.json (the kit refuses any import but
+// the module under test and "claude-code"). The `.ts` pin holds the same `kind`
+// for every command, so the surface is derived now: a tie that adds, renames or
+// re-kinds a local command moves these cases with it. v0.7.13 is the case the
+// typed list missed — it added `auth mint`, and the list stayed at 29 while the
+// pin moved to 30.
 //
 // Synthetic stack only.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
-import { LOCAL_COMMANDS, UPDATE_ENTRY, UPDATE_MUTATION_RISK } from './orthanc-local-surface'
+import { SNAPSHOT } from './orthanc-manifest.snapshot'
+import { UPDATE_ENTRY, UPDATE_MUTATION_RISK } from './orthanc-local-surface'
 import { classifyOrthancCommand, LOCAL_READS, type ManifestCommand, requiresBranch, resolveOrthancCommand } from './policy'
 import { failure, manifestFrom, notRunFailure, renderCommand, renderListing } from './orthanc'
 
@@ -100,11 +103,11 @@ type Mode = (typeof MODES)[number]
 const envelope = (data: unknown) =>
   JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors: [], meta: {}, warnings: [], artifacts: [], pagination: null })
 
-// Every `kind: local` command of the orthanc this plugin is tied to, read off
-// hooks/orthanc-snapshot.json through hooks/orthanc-local-surface.ts (a test
-// cannot open the JSON). Pinning the two artifacts against each other is what
-// makes the drift cases below bite: a tie that moves without this list moving,
-// or a read name the shipped orthanc no longer has, fails here.
+const LOCAL_COMMANDS: readonly string[] = SNAPSHOT.commands.filter(entry => entry.kind === 'local').map(entry => entry.path)
+
+// The local surface as the pin ships it. Pinning the pin against the guard's read
+// list is what makes the drift cases below bite: a tie that moves without the
+// guard moving, or a read name the tied orthanc no longer has, fails here.
 const LOCAL_SURFACE: ManifestCommand[] = LOCAL_COMMANDS.map(path => ({ path, kind: 'local' }))
 
 // The rest of the surface these tests touch, as 0.7.11 and the pin write them,
@@ -305,11 +308,12 @@ for (const mode of MODES) {
 // The 11 local commands that only read, as orthanc's own help describes them
 // (`version`/`hello`/`agent-manifest`/`capabilities` print, `completion show`
 // prints, `configure list`/`alias list|show|resolve|export` read stored
-// configuration, `smoke schedule` reports a job's state). The other 18 local
-// commands write: alias add/clear/edit/import/remove, auth store/auth delete,
-// completion install, configure configure/delete/use/set-default/profile
-// create/profile set, shell/shell start/shell interactive, and onboarding.
-// (`update` is not one of the 29: the manifest marks it a `mutation`.)
+// configuration, `smoke schedule` reports a job's state). Every other local
+// command writes: alias add/clear/edit/import/remove, auth store/auth delete/
+// auth mint, completion install, configure configure/delete/use/set-default/
+// profile create/profile set, shell/shell start/shell interactive, onboarding.
+// (`update` is not a local command at all: the manifest marks it a `mutation`.)
+// U8 checks this list against the pin, not against a count.
 const LOCAL_READ_OF_THE_PIN = [
   'agent-manifest', 'alias export', 'alias list', 'alias resolve', 'alias show', 'capabilities',
   'completion show', 'configure list', 'hello', 'smoke schedule', 'version',

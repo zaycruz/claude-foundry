@@ -1,50 +1,12 @@
-// The `kind: local` commands of the orthanc this plugin is tied to, as a module.
+// Two binary captures the plugin's own pin cannot hold, for the self-update
+// guard's tests.
 //
-// Generated from hooks/orthanc-snapshot.json — the plugin's pinned record of
-// 0.7.11 (541 commands, 29 of them `local`). A test cannot open
-// that JSON: a hooks module imports only its own files and "claude-code". So the
-// pin's local surface is read out of it once, into this file, and the guard's
-// read list is checked against what the plugin actually pins rather than against
-// a list typed beside the test. Regenerate after an orthanc tie lands:
-//
-//   python3 -c "import json;d=json.load(open('hooks/orthanc-snapshot.json'));\
-//     print('\n'.join(\"  '%s',\" % c['path'] for c in sorted(d['commands'],key=lambda c:c['path']) if c.get('kind')=='local'))"
-//
-// Pull request #18 adds hooks/orthanc-manifest.snapshot.ts — the whole surface of
-// the checked orthanc, with `check` watching it — and replaces this file.
-
-/** Every `kind: local` command of 0.7.11: 29 of them. */
-export const LOCAL_COMMANDS: readonly string[] = [
-  'agent-manifest',
-  'alias add',
-  'alias clear',
-  'alias edit',
-  'alias export',
-  'alias import',
-  'alias list',
-  'alias remove',
-  'alias resolve',
-  'alias show',
-  'auth delete',
-  'auth store',
-  'capabilities',
-  'completion install',
-  'completion show',
-  'configure configure',
-  'configure delete',
-  'configure list',
-  'configure profile create',
-  'configure profile set',
-  'configure set-default',
-  'configure use',
-  'hello',
-  'onboarding',
-  'shell',
-  'shell interactive',
-  'shell start',
-  'smoke schedule',
-  'version',
-]
+// The `kind: local` surface used to live here as a hand-copied list of the pin's
+// local commands. It moved to hooks/self-update.test.ts, which now derives it
+// from hooks/orthanc-manifest.snapshot.ts (the pin `refresh` writes and `check`
+// watches), so a tie carries its local surface with it. An orthanc tie left the
+// typed list behind once: v0.7.13 added `auth mint` and the list stayed at 29
+// while the pin moved to 30.
 
 /** What the live binary's `agent-manifest` says `update` does, captured from
  * orthanc 0.7.11 (orthanc-x86_64-unknown-linux-gnu.tar.gz, sha256
