@@ -38,7 +38,11 @@
 //      names orthanc.
 //  S8  A local command that only lists or shows (`ai-fde tools list`,
 //      `smoke schedule`) is refused as a write.
-//  S9  The word in an argument is read as a call (the 2026-11-23 session): a
+//  S9  A credential command in Bash is told to "run it with orthanc_cli", which
+//      refuses it too, so the agent works around a call nothing may run. Bash is
+//      the one lane that can feed a secret on stdin, so the check sits ahead of
+//      the read short-circuit: an entry Orthanc declares a read is still refused.
+//  S10 The word in an argument is read as a call (the 2026-11-23 session): a
 //      board --goal that mentions the orthanc CLI, a project named Orthanc,
 //      a repo (zaycruz/orthanc) or a path (orthanc-source) as an argument —
 //      also one a substitution leaves at a segment's head, as in
@@ -76,6 +80,14 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'ai-fde tools list', kind: 'local' },
   { path: 'smoke schedule', kind: 'local' },
   { path: 'alias add', kind: 'local' },
+  // Orthanc 0.7.10 marks: `input` for a typed secret, `credential_store` for the
+  // store a command writes (`configure configure`) or clears (`auth delete`).
+  { path: 'auth store', kind: 'local', input: 'token-on-stdin' },
+  { path: 'configure configure', kind: 'local', credentialStore: 'secret-service-or-file', flags: [{ flag: '--token-stdin', takesValue: false }] },
+  { path: 'auth delete', kind: 'local', credentialStore: 'secret-service-or-file' },
+  // A store-marked entry Orthanc might one day call a read: Bash has no second
+  // gate behind the read short-circuit, so it must not reach one.
+  { path: 'credential show', kind: 'read-only', credentialStore: 'secret-service-or-file' },
 ]
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 const approve = { action: 'approve', reason: 'ok' } as const
@@ -110,25 +122,25 @@ const PASSES: [string, string][] = [
   ['S7', 'which orthanc && python3 -V && perl -v | head -2'],
   ['S8', "orthanc --agent ai-fde tools list 2>/dev/null | grep -i -E 'log|build_history' | head"],
   ['S8', 'orthanc smoke schedule'],
-  // S9: only a real invocation counts, not the word (the 2026-11-23 session).
-  ['S9', 'H=/opt/herdr/bin/herdr-projects; $H add claude-foundry/2 --goal "wire the orthanc CLI into the guard" --kind agent'],
-  ['S9', '/opt/herdr/bin/herdr-projects add claude-foundry/2 --goal "Guard: only a real orthanc invocation counts" --desc "the Bash guard reads the command word, not the line"'],
-  ['S9', 'cd /home/tester/projects/Orthanc && cargo build --release 2>&1 | tail -5'],
-  ['S9', 'ls -la /home/tester/projects/Orthanc && grep -rn TODO /home/tester/projects/Orthanc/src | head -20'],
-  ['S9', 'gh release view v0.7.12 --repo zaycruz/orthanc --json isDraft,assets'],
-  ['S9', 'gh release view $(cat VERSION) --repo zaycruz/orthanc --json isDraft,assets'],
-  ['S9', 'gh repo view zaycruz/orthanc --json name,owner'],
-  ['S9', `grep -rn "waits" /home/tester/src/orthanc-source/src | head -20`],
-  ['S9', `cd /home/tester/src/orthanc-source && grep -n "wait" src/cli.rs | head -5`],
-  ['S9', `python3 - <<'EOF'\nimport json\nsnap = json.load(open('hooks/orthanc-snapshot.json'))\nprint(len(snap['commands']), 'orthanc commands')\nEOF`],
-  ['S9', `python3 - <<'EOF'\nimport json, re\nsnap = json.load(open('out/release.json'))\nstart = re.compile(r'^([a-z-]+) ')\ngroups = sorted({m.group(1) for c in snap['commands'] if (m := start.match(c['path']))})\nprint('orthanc', len(snap['commands']), 'commands in', len(groups), 'groups')\nEOF`],
-  ['S9', `jq -r '.commands[0].path' hooks/orthanc-snapshot.json`],
-  ['S9', `curl -sS --json '{"note":"orthanc dataset create green"}' https://hooks.example.test/x`],
+  // S10: only a real invocation counts, not the word (the 2026-11-23 session).
+  ['S10', 'H=/opt/herdr/bin/herdr-projects; $H add claude-foundry/2 --goal "wire the orthanc CLI into the guard" --kind agent'],
+  ['S10', '/opt/herdr/bin/herdr-projects add claude-foundry/2 --goal "Guard: only a real orthanc invocation counts" --desc "the Bash guard reads the command word, not the line"'],
+  ['S10', 'cd /home/tester/projects/Orthanc && cargo build --release 2>&1 | tail -5'],
+  ['S10', 'ls -la /home/tester/projects/Orthanc && grep -rn TODO /home/tester/projects/Orthanc/src | head -20'],
+  ['S10', 'gh release view v0.7.12 --repo zaycruz/orthanc --json isDraft,assets'],
+  ['S10', 'gh release view $(cat VERSION) --repo zaycruz/orthanc --json isDraft,assets'],
+  ['S10', 'gh repo view zaycruz/orthanc --json name,owner'],
+  ['S10', `grep -rn "waits" /home/tester/src/orthanc-source/src | head -20`],
+  ['S10', `cd /home/tester/src/orthanc-source && grep -n "wait" src/cli.rs | head -5`],
+  ['S10', `python3 - <<'EOF'\nimport json\nsnap = json.load(open('hooks/orthanc-snapshot.json'))\nprint(len(snap['commands']), 'orthanc commands')\nEOF`],
+  ['S10', `python3 - <<'EOF'\nimport json, re\nsnap = json.load(open('out/release.json'))\nstart = re.compile(r'^([a-z-]+) ')\ngroups = sorted({m.group(1) for c in snap['commands'] if (m := start.match(c['path']))})\nprint('orthanc', len(snap['commands']), 'commands in', len(groups), 'groups')\nEOF`],
+  ['S10', `jq -r '.commands[0].path' hooks/orthanc-snapshot.json`],
+  ['S10', `curl -sS --json '{"note":"orthanc dataset create green"}' https://hooks.example.test/x`],
   // The binary's path as an argument to a wrapper script: an argument, not the command word.
-  ['S9', 'scripts/e2e/keychain-env.sh tester target/release/orthanc --profile tester dataset create x --apply'],
-  ['S9', './run.sh /opt/bin/orthanc proposal merge p'],
-  ['S9', './run.sh /opt/bin/orthanc $CMD'],
-  ['S9', './run.sh /opt/bin/orthanc "$(cat /tmp/tester/cmd)"'],
+  ['S10', 'scripts/e2e/keychain-env.sh tester target/release/orthanc --profile tester dataset create x --apply'],
+  ['S10', './run.sh /opt/bin/orthanc proposal merge p'],
+  ['S10', './run.sh /opt/bin/orthanc $CMD'],
+  ['S10', './run.sh /opt/bin/orthanc "$(cat /tmp/tester/cmd)"'],
 ]
 
 const REFUSED: [string, string][] = [
@@ -192,7 +204,7 @@ for (const [id, command] of REFUSED) {
 // passes; every way to spell a real invocation (the command word itself, a
 // path to it, $ORTHANC_BIN, wrappers with their flag values resolved, a
 // pipeline, a substitution, bash -c, ssh) refuses.
-test('S10: a bounded enumeration of command shapes: only the command word refuses', async () => {
+test('S11: a bounded enumeration of command shapes: only the command word refuses', async () => {
   const heads = ['gh', 'grep', 'ls', 'cd', 'cargo', 'tar', 'cp', 'chmod', 'curl', 'jq', 'git', 'python3', 'docker', 'kubectl', 'sed', 'make']
   // Every way a line can name orthanc without running it.
   const names = [
@@ -242,4 +254,20 @@ test('S1 E2E: a Python heredoc that edits text naming orthanc runs through the g
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   const ran = (await $.tool.call({ tool: 'Bash', command: PASSES[0]![1] } as never)) as { deny?: string }
   expect(ran.deny).toBe(undefined)
+})
+
+test('S9: a credential command in Bash is sent to the operator, not to orthanc_cli', () => {
+  for (const line of [
+    'orthanc auth store tester',
+    'orthanc configure configure --host https://x.example.palantirfoundry.com --auth-type token --token-stdin --force',
+  ]) {
+    const error = classifyCall('Bash', { command: line }, MANIFEST, null)?.error ?? ''
+    expect(error).toContain('needs a credential the operator types')
+    expect(error).toContain('/auth lists the credential commands')
+    expect(error).not.toContain('with orthanc_cli')
+  }
+  // Clearing a stored credential types no secret: that call keeps the write routing.
+  expect(classifyCall('Bash', { command: 'orthanc auth delete tester' }, MANIFEST, null)?.error).toContain("Run 'auth delete' with orthanc_cli")
+  // A read verb is not enough: the store mark still refuses, ahead of the short-circuit.
+  expect(classifyCall('Bash', { command: 'orthanc credential show' }, MANIFEST, null)?.error).toContain('needs a credential the operator types')
 })
