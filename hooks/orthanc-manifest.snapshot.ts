@@ -7,7 +7,7 @@
 // manifest had, so a new field shows up here.
 // prettier-ignore
 export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
-  "orthanc_version": "0.7.11",
+  "orthanc_version": "0.7.12",
   "schema_version": "foundry-agent-v1",
   "entry_keys": ["args","auth","credential_store","description","effect","example","failure_state","help","hidden","input","kind","local_effect","mutation_risk","operator_approval","operator_approval_scope","path","requires"],
   "arg_keys": ["default","flag","help","hidden","kind","name","repeatable","required","short","takes_value","values"],
@@ -335,6 +335,8 @@ export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
     {"auth":"bearer-token","kind":"mutation","path":"ontology action-apply-with-overrides"},
     {"auth":"bearer-token","kind":"read-only","path":"ontology action-outcomes"},
     {"auth":"bearer-token","kind":"mutation","path":"ontology action-type-delete"},
+    {"args":[{"flag":"--branch","takes_value":true},{"flag":"--apply","takes_value":false}],"auth":"bearer-token","kind":"mutation","operator_approval":{"when_all_flags":["--apply"]},"operator_approval_scope":"work-branch","path":"ontology action-type-disable"},
+    {"args":[{"flag":"--branch","takes_value":true},{"flag":"--apply","takes_value":false}],"auth":"bearer-token","kind":"mutation","operator_approval":{"when_all_flags":["--apply"]},"operator_approval_scope":"work-branch","path":"ontology action-type-enable"},
     {"auth":"bearer-token","kind":"read-only","path":"ontology action-type-get"},
     {"auth":"bearer-token","kind":"read-only","path":"ontology action-type-list"},
     {"auth":"bearer-token","kind":"mutation","path":"ontology action-type-set-function-version"},

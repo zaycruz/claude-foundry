@@ -144,17 +144,17 @@ in that step.
 0.7.0 releases `main` as it was after v0.6.0: yolo asks only on main (#10), and
 the guard reads `operator_approval` by branch (#12). It sets `min_orthanc` to
 0.7.8, the first orthanc whose manifest carries `operator_approval_scope`. It
-sets `orthanc_checked` to 0.7.11, built from the v0.7.11 tag. The snapshot
-holds 541 commands and 56 approval markers. They match, marker for marker,
+sets `orthanc_checked` to 0.7.12, built from the v0.7.12 tag. The snapshot
+holds 543 commands and 58 approval markers. They match, marker for marker,
 `hooks/orthanc-snapshot.json`, which main took from the orthanc release job.
-That file's `min_orthanc` (0.7.11) is the job's own value. The plugin's
+That file's `min_orthanc` (0.7.12) is the job's own value. The plugin's
 `min_orthanc` is the one in `plugin.json`.
 
 To make the snapshot again from a binary:
 
 ```
 orthanc --agent --non-interactive agent-manifest > manifest.json
-node scripts/orthanc-tie.mjs refresh --manifest manifest.json --orthanc-version 0.7.11
+node scripts/orthanc-tie.mjs refresh --manifest manifest.json --orthanc-version 0.7.12
 ```
 
 A run on the same manifest makes the same bytes, so `git diff` shows nothing.
