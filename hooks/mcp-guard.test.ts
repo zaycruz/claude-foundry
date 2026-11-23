@@ -7,12 +7,13 @@
 // measured on origin/main (e01f1dd), `mcp__Palantir__delete_object`,
 // `mcp__foundry_tools__delete_object` and `mcp__palantirFoundry__delete_object`
 // all ran, unclassified, in ask-always, allow-edits, auto and yolo. The plugin's own
-// tracer already reads the wider shape (`register.tsx` touchesFoundry:
+// tracer already read the wider shape (a private regex in base `register.tsx`,
 // /^mcp__.*(palantir|foundry)/i), so the trace knew about a call the guard had
 // let through. zay, initial commit and standing instructions: "Orthanc is the
 // only write path."
 //
-// Ways this can fail, written before the code:
+// Ways this can fail, written before the code. MS = measured scenario, in the order
+// they were found:
 //  MS1 A Foundry-named MCP write runs in some mode because its server is
 //      capitalised, underscored, or says foundry instead of palantir.
 //  MS2 A Foundry-named MCP read is blocked: the guard fires on the server name
@@ -26,8 +27,8 @@
 //      filesystem or a docs search is refused with Foundry advice.
 //  MS6 The refusal reaches the real hook: asked-for in place of blocked, or an
 //      ask that runs when no one answers.
-//  MS7 The delete word is lost when the server name moves out of the way, so
-//      the trace and every other reader see a plain mutation.
+//  MS7 The delete word is lost when the server name moves out of the way. The guard
+//      refuses these calls first, so MS7 pins what the guard records about the call.
 //  MS9 The widening lets through a call the old gate refused — the one failure this
 //      rule can cause. Found in review of the first fix, twice: camelCase splitting
 //      for the read answer made `listAndUpsertRows` read as `list`, and a verb glued
@@ -171,6 +172,8 @@ test('MS10: the refusal says only what the name tells it', async () => {
 })
 
 test('MS7: the delete word still marks the call destructive', async () => {
+  // What the guard records. On this lane the refusal comes first, so nothing reads the
+  // flag today. It is pinned so a rename cannot quietly lose the word.
   for (const tool of ['mcp__Palantir__delete_object', 'mcp__foundry_tools__delete_object', 'mcp__palantir__delete_object', 'mcp__palantir__delete2objects', 'mcp__palantir__deleteObjects']) {
     expect({ tool, destructive: classifyCall(tool, {}, MANIFEST, null)?.isDestructive }).toEqual({ tool, destructive: true })
   }
