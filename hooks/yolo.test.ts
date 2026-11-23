@@ -486,7 +486,9 @@ test('Y7: in auto mode the loop guard still refuses a third identical call', asy
 test('Y8: -f is not --force: in allow-edits mode ai-fde run -f json and folder create -f run without asking; --force asks', async ($, on) => {
   const h = harness(on, 'allow-edits')
   h.answer = 'Decline'
-  expect((await write($, 'ai-fde run', ['List the object types', '-f', 'json', '--apply'])).deny).toBe(undefined)
+  // A plan: since FND-24 an applied ai-fde run asks outside yolo, whatever its flags.
+  // The destructive rule reads -f on a plan too, so a misread would still ask here.
+  expect((await write($, 'ai-fde run', ['List the object types', '-f', 'json'])).deny).toBe(undefined)
   expect((await write($, 'folder create', ['Scratch', '-f', FOLDER, '--apply'])).deny).toBe(undefined)
   expect(h.asked).toEqual([])
   expect(typeof (await write($, 'orchestration builds create', [TARGET, '--branch', 'agent-rebuild', '--force', '--apply'])).deny).toBe('string')

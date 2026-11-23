@@ -133,6 +133,30 @@ const POSITIONAL_BRANCH_WRITES = new Set([
 // merge the proposal, just nothing direct against main or master"). Yolo runs
 // one with no ask; every other mode follows the ladder, where the manifest's
 // operator_approval marks ask. A release tag is not here: it asks outside yolo.
+// `ai-fde run --apply` starts Foundry's AI FDE worker with its own tools for the
+// whole run (with --approve-all, or its alias --yes, it clicks Allow on every
+// tool that asks), so one call is many writes the guard never reads, and the
+// command takes no --branch. zay, 2026-11-20: in yolo the agent does "everything
+// and anything it wants on a branch", and outside yolo the ladder asks. So it
+// asks in every mode but yolo, like a destructive write: allow-edits does not
+// run it unasked, and auto's guard model does not stand in for the operator.
+// The other ai-fde writes (threads send, settings update) keep the ordinary
+// ladder, and a plan (no --apply) starts no worker. FND-24.
+const AGENT_RUNS = new Set(['ai-fde run'])
+
+/** True for an applied AI FDE run, read from the resolved path and the args
+ * together. Orthanc 0.7.11 lists no ai-fde command unless ORTHANC_ENABLE_AI_FDE
+ * is set, so a call spelled `command: 'ai-fde', args: ['run', …]` resolves only
+ * to `ai-fde`: then any `run` word counts, which over-asks rather than letting a
+ * run through unasked (review of #38). */
+function isAgentRun(path: string, args: readonly string[]): boolean {
+  if (!argsNameFlag(args, ['--apply'])) return false
+  const lowered = path.trim().toLowerCase()
+  if (AGENT_RUNS.has(lowered)) return true
+  if (lowered !== 'ai-fde') return false
+  return args.some(arg => unquote(arg).trim().toLowerCase() === 'run')
+}
+
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'global-branch deploy', 'repository pull-request merge'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
@@ -387,6 +411,9 @@ export type GateClassification = {
   localWrite?: string
   /** True for a promotion into main through a proposal (merge, accept, approve, deploy, pull-request merge): not a direct write to main, so yolo runs it with no ask. */
   promotion?: true
+  /** An `ai-fde run --apply`: a worker that writes with its own tools for the
+   * whole run. It asks in every mode but yolo (AGENT_RUNS). */
+  agentRun?: true
   error?: string
 }
 
@@ -1335,6 +1362,7 @@ function orthancClassification(
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
       ...(PROMOTIONS.has(command) ? { promotion: true as const } : {}),
+      ...(isAgentRun(command, args) ? { agentRun: true as const } : {}),
       ...(refused ? { error: refused } : {}),
     }
   }
@@ -2592,6 +2620,13 @@ export function ladderDecision(
         ? `yolo mode: nothing else asks; this write is destructive (${classification.destructiveWhy}) and runs with no ask`
         : 'yolo mode: nothing else asks; work stays on branches that are not main') + local,
     }
+  if (classification.agentRun) {
+    const also = classification.isDestructive ? ` It is also destructive (${classification.destructiveWhy}).` : ''
+    return {
+      outcome: 'ask',
+      reason: `'${command}' starts an AI FDE worker that writes with its own tools for the whole run, which this guard does not see call by call; it asks in every mode but yolo.${also}${note}${local}`,
+    }
+  }
   if (classification.isDestructive) {
     // Both claims are kept: outside yolo a write that is destructive *and* names
     // main asks once, and the operator reads why it cannot be waved through.
@@ -2622,12 +2657,13 @@ export function modeGuidance(mode: ApprovalMode): string {
     'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +
     (mode === 'yolo'
       ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
-        'and the loop guard is off. A promotion runs with no ask. A write that names main or master as its branch asks the operator; ' +
+        'and the loop guard is off. A promotion runs with no ask, and so does an AI FDE run (ai-fde run --apply). A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
         'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Promotions follow the ladder like any other write. ' +
+        'An AI FDE run (ai-fde run --apply) asks the operator in every mode but yolo: its worker writes with its own tools for the whole run. ' +
         'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
         'when a value a flag takes names such an act, either among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`) or spelled in caps the way Orthanc spells an enumerated value, ' +

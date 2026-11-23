@@ -37,7 +37,7 @@ Code repositories are cloned locally through Orthanc, never through raw git smar
 
 When Orthanc fail-closes a required operation, stop and report it: the command you needed and the error envelope. Do not substitute another tool.
 
-Do not run `orthanc ai-fde` from an agent. Report AI FDE-loop work to the operator.
+`orthanc ai-fde run --apply` starts an AI FDE worker that writes with its own tools for the whole run, and the guard does not see those writes one by one. Through `orthanc_cli` it asks the operator in every mode but `yolo`, where it runs with no ask; in Bash it is refused like every Orthanc write. A plan (no `--apply`) and the other `ai-fde` commands follow the ordinary ladder. Prefer reporting AI FDE-loop work (Notepad create/update, UI-only workspace actions) to the operator unless they asked for a run.
 
 Parse the `foundry-agent-v1` JSON envelope. Treat a nonempty `errors` field as failure, even when the process exit code is zero. Follow pagination until the required result is complete.
 
