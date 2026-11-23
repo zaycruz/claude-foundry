@@ -71,6 +71,7 @@ const COMMANDS: [string, string][] = [
   ['dataset create', 'mutation'],
   ['proposal merge', 'mutation'],
   ['ontology object-type-create', 'mutation'],
+  ['repository clone', 'read-only'],
 ]
 const MANIFEST = envelope({ commands: COMMANDS.map(([path, kind]) => ({ path, kind, args: [] })) })
 
@@ -296,4 +297,35 @@ test('H8: while bound, /namespace stays locked until /fde end', async ($, on) =>
   expect(await prompt($)).toContain('The namespace in scope is Acme Dev (/Acme Dev)')
   expect(await say($, 'fde', 'end')).toContain('FDE handoff')
   expect(await say($, 'namespace', 'clear')).toContain('Cleared namespace selection.')
+})
+
+// H9: a Code Repository pull stays a pull while FDE mode is bound.
+//  H9a `repository clone <rid> <dir> --branch main` names a Code Repository
+//      branch, not the global branch, so the mode neither binds it to the
+//      session's branch nor refuses it as a write aimed at main (yolo refuses a
+//      write naming main outright).
+//  H9b `--force` deletes the target folder, which is a write: it is not bound to
+//      the session's branch either, and it lands in `applied`, the record
+//      /fde end hands to the operator (hooks/local-write.test.ts LW1, LW11).
+const CODE_REPO = 'ri.code.main.repo.c0000000-0000-4000-8000-0000000000c4'
+const clone = ($: Engine, args: string[]) => write($, args, 'repository clone')
+const applied = (h: Harness) => ((h.store.get('fdeOpen') as FdeSession | undefined)?.applied ?? []).length
+
+test('H9a: while bound, a clone of the repository main is not bound and not refused', async ($, on) => {
+  const h = harness(on)
+  await bind($)
+  expect(applied(h)).toBe(0)
+  const pulled = await clone($, [CODE_REPO, './repo', '--branch', 'main'])
+  expect(pulled.deny).toBe(undefined)
+  expect(ran(h, `repository clone ${CODE_REPO} ./repo --branch main`)).toBe(true)
+  expect(applied(h)).toBe(0)
+})
+
+test('H9b: while bound, a --force clone is not bound to the branch and is one of the session writes', async ($, on) => {
+  const h = harness(on)
+  await bind($)
+  const forced = await clone($, [CODE_REPO, './repo', '--branch', 'main', '--force'])
+  expect(forced.deny).toBe(undefined)
+  expect(ran(h, `repository clone ${CODE_REPO} ./repo --branch main --force`)).toBe(true)
+  expect(applied(h)).toBe(1)
 })

@@ -887,8 +887,9 @@ async function fdeGate(
   const isMutation = resolved.path !== '' && classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'mutation'
   // A clone pull stays out of the *binding*: its --branch is a Code Repository
   // branch, so pinning it to the session's global branch, or reading
-  // `--branch main` as a write aimed at main, would refuse a pull. Its --force
-  // form is still recorded as the write the ladder judged (local-write LW11).
+  // `--branch main` as a write aimed at main, would refuse a pull
+  // (hooks/fde-hold.test.ts H9a). The --force form is still the write the ladder
+  // judged, and it is still recorded: hooks/local-write.test.ts LW1, H9b.
   const bindable = isMutation && !isLocalPull(resolved.path)
   const bound = fdeBind(fde, resolved.path, resolved.args, bindable)
   if ('deny' in bound) return bound
