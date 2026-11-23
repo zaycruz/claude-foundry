@@ -1734,13 +1734,15 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
   return foundryMcpTool(tool) !== null
 }
 
-// The verbs this plugin already treats as writes elsewhere. `MAIN_ONLY_WRITES` holds
-// `ontology object-upsert` and `dataset transactions start`, the denied set the stream
-// and auth commands, `PROMOTIONS` `proposal accept`. An MCP tool naming one of those
-// verbs is a write too. Without them a name like
-// `view_branch_and_revoke_protection` hits only its read verb and runs with no ladder.
-// The list is a vocabulary and will never be complete; that is why an unreadable name
-// fails closed instead of running.
+// The guard's own write vocabulary. Three sets elsewhere in this file already gate
+// these verbs on the Orthanc side: `BRANCH_REQUIRED_PATHS` (`dataset files upload`,
+// `dataset transactions start`, `streams stream reset`), `MAIN_ONLY_WRITES`
+// (`ontology object-upsert`) and `PROMOTIONS` (`proposal accept`, `proposal merge`).
+// An MCP tool naming one of them is the same write, so it is a write here too. Without
+// them a name like `view_branch_and_revoke_protection` hits only its read verb and runs
+// with no ladder. `DESTRUCTIVE_WORDS` covers the acts that leave something gone, and
+// `destructiveTermIn` reads the whole name for them. This list is a vocabulary and will
+// never be complete: that is why an unreadable name fails closed.
 const WRITE_WORDS = new Set(['accept', 'add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'reset', 'restart', 'revert', 'revise', 'revoke', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'truncate', 'unprotect', 'update', 'upload', 'upsert', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
