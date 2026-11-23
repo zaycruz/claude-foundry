@@ -961,15 +961,14 @@ export function approvalOnWorkBranch(path: string, args: readonly string[], mani
   const reading = readCall(args, entry)
   const slot = repositoryBranchSlot(entry)
   if (slot !== null) {
+    // The `branch` positional is among those checked for main.
     const declared = entry.positionals ?? []
-    const branch = reading.positionals[slot] ?? ''
     return (
       reading.known &&
       !declared.some(positional => positional.repeatable) &&
       reading.positionals.length === declared.length &&
       !reading.positionals.some(positional => isProtectedValue(unquote(positional))) &&
-      BRANCH_VALUE.test(branch) &&
-      !isProtectedValue(branch)
+      BRANCH_VALUE.test(reading.positionals[slot] ?? '')
     )
   }
   return reading.mentions.some(word => WORK_BRANCH_RID.test(word)) && !reading.mentions.some(word => isProtectedValue(unquote(word)))

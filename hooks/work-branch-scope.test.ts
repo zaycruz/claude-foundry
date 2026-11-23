@@ -360,7 +360,7 @@ test('WB9: the positional rule holds only for a positional the manifest names br
     args: (entry.args as Record<string, unknown>[]).map(arg => (arg.name === 'branch' ? { ...arg, name: 'target' } : arg)),
   }))
   const dropped = withEntry(UPDATE, entry => ({ ...entry, args: (entry.args as Record<string, unknown>[]).filter(arg => arg.kind !== 'positional') }))
-  const twice = withEntry(UPDATE, entry => ({ ...entry, args: [...(entry.args as Record<string, unknown>[]), { kind: 'positional', name: 'branch', takes_value: true }] }))
+  const twice = withEntry(UPDATE, entry => ({ ...entry, args: [...(entry.args as Record<string, unknown>[]), { kind: 'positional', name: 'branch', repeatable: false, takes_value: true }] }))
   const repeatable = withEntry(UPDATE, entry => ({
     ...entry,
     args: (entry.args as Record<string, unknown>[]).map(arg => (arg.name === 'repository' ? { ...arg, repeatable: true } : arg)),
@@ -368,6 +368,8 @@ test('WB9: the positional rule holds only for a positional the manifest names br
   for (const [why, manifest] of [['renamed', renamed], ['dropped', dropped], ['twice', twice], ['repeatable', repeatable]] as [string, ManifestCommand[]][]) {
     expect({ why, outcome: outcome(UPDATE, [REPO, 'agent-branch', '--apply'], manifest) }).toEqual({ why, outcome: 'ask' })
   }
+  // Two positionals named branch: which one the write lands on is unclear, even when the count matches.
+  expect(outcome(UPDATE, [REPO, 'agent-branch', 'other-branch', '--apply'], twice)).toBe('ask')
 })
 
 for (const mode of OTHER_MODES) {
