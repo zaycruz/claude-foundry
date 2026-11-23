@@ -1850,18 +1850,20 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
   return foundryMcpTool(tool) !== null
 }
 
-// The guard's own write vocabulary. Sets elsewhere in this file gate some of these verbs
-// on the Orthanc side — the members below are samples, not the whole set:
-// `BRANCH_REQUIRED_PATHS` (`dataset files upload`, `dataset transactions start`,
-// `streams stream reset`), `MAIN_ONLY_WRITES` (`ontology object-upsert`), `PROMOTIONS`
-// (`proposal accept`, `proposal merge`), and `MAIN_WRITES`, `BASE_BRANCH_WRITES` and
-// `POSITIONAL_BRANCH_WRITES` besides. An MCP tool naming one of those verbs is the same
-// write, so it is a write here too. This list also carries the acts nothing else here
-// names, and it overlaps the ones that do: `DESTRUCTIVE_WORDS` covers what leaves
+// The guard's own write vocabulary. Sets elsewhere in this file already treat these verbs
+// as protected writes on the Orthanc side, each in its own way. A work branch is required
+// by `BRANCH_REQUIRED_PATHS` (`dataset files upload`, `dataset transactions start`,
+// `streams stream reset`, and about fifty more). Agents never run `MAIN_ONLY_WRITES`
+// (`ontology object-upsert` and two others), and `MAIN_WRITES`, `BASE_BRANCH_WRITES` and
+// `POSITIONAL_BRANCH_WRITES` ask in every mode. `PROMOTIONS` (`proposal accept`,
+// `proposal merge` and three others) asks, and runs in `yolo`, because a merge lands
+// through a proposal rather than on main. An MCP tool naming one of those verbs is the
+// same kind of write, so it is a write here too. This list also carries acts nothing else
+// here names, and it overlaps the ones that do: `DESTRUCTIVE_WORDS` covers what leaves
 // something gone and `destructiveTermIn` reads the whole name for those, so
 // `view_branch_and_revoke_protection` is a write with or without this list, while
-// `describe_branch_and_upsert_object` is a write only because `upsert` is in it.
-// Measured both ways, and MS11 in `mcp-guard.test.ts` keeps that true: drop `upsert` and
+// `describe_branch_and_upsert_object` is a write only because `upsert` is in it. Measured
+// both ways, and `MS11` and `MS12` in `mcp-guard.test.ts` keep that true: drop `upsert` and
 // that name answers 'read' and runs. The list will never be complete, which is why an
 // unreadable name fails closed instead of running.
 const WRITE_WORDS = new Set(['accept', 'add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'reset', 'restart', 'revert', 'revise', 'revoke', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'truncate', 'unprotect', 'update', 'upload', 'upsert', 'write'])

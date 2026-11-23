@@ -41,11 +41,18 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { classifyCall, classifyMcpIntent, DESTRUCTIVE_WORDS, foundryMcpTool, ladderDecision, type ManifestCommand, touchesFoundryTool } from './policy'
+import { branchRuleReason, classifyCall, classifyMcpIntent, DESTRUCTIVE_WORDS, foundryMcpTool, ladderDecision, type ManifestCommand, touchesFoundryTool } from './policy'
 
 const MANIFEST: ManifestCommand[] = [
   { path: 'ontology list', kind: 'read-only' },
   { path: 'dataset create', kind: 'mutation' },
+  // The paths the verb comment above WRITE_WORDS cites, so MS12 can read them through the
+  // same readers the ladder uses.
+  { path: 'dataset files upload', kind: 'mutation' },
+  { path: 'dataset transactions start', kind: 'mutation' },
+  { path: 'streams stream reset', kind: 'mutation' },
+  { path: 'ontology object-upsert', kind: 'mutation' },
+  { path: 'proposal accept', kind: 'mutation' },
 ]
 const CLI = 'mcp__foundry__orthanc_cli'
 const HELP = 'mcp__foundry__orthanc_help'
@@ -172,6 +179,28 @@ test('MS10: the refusal says only what the name tells it', async () => {
   expect({ namesTool: unknown.includes('mcp__palantir__do_the_thing'), pointsAtOrthanc: unknown.includes('orthanc_cli') }).toEqual({ namesTool: true, pointsAtOrthanc: true })
   // A name the guard cannot read is never called a write.
   expect({ unknownCallsWrite: unknown.includes('writes to Foundry') }).toEqual({ unknownCallsWrite: false })
+})
+
+test('MS12: the sets the verb comment names do what the comment says they do', async () => {
+  // The comment above WRITE_WORDS sends a reader to four other sets and says what each
+  // does. It was wrong once already, in a commit that claimed to fix it, so the claims are
+  // read back through the guards that act on them rather than trusted.
+  const DATASET = 'ri.dataset.abc'
+  for (const path of ['dataset files upload', 'dataset transactions start', 'streams stream reset']) {
+    // A work branch is required: a reason with no branch, none with one.
+    expect({ path, reason: branchRuleReason(path, [DATASET]) !== null }).toEqual({ path, reason: true })
+    expect(branchRuleReason(path, [DATASET, '--branch', 'agent-x'])).toBe(null)
+  }
+  // Agents do not run the main-only write, and it says so when handed a branch it cannot use.
+  const mainOnly = classifyCall(CLI, { command: 'ontology object-upsert', args: ['T', '--branch', 'agent-x'] }, MANIFEST, 'agent/x')
+  expect(mainOnly?.error ?? '').toContain('cannot take --branch')
+  expect(blockedEverywhere(mainOnly)).toBe(true)
+  // A promotion is not a direct write on main: it asks, and `yolo` runs it. The comment says
+  // asks, not blocks, and this is where that distinction would go stale.
+  const promotion = classifyCall(CLI, { command: 'proposal accept', args: ['p'] }, MANIFEST, 'agent/x')
+  expect(promotion?.error).toBe(undefined)
+  expect(ladderDecision('ask-always', promotion!, approve).outcome).toBe('ask')
+  expect(ladderDecision('yolo', promotion!, approve).outcome).toBe('run')
 })
 
 test('MS11: a verb only the write list carries is still a write next to a read verb', async () => {
