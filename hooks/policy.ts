@@ -2953,12 +2953,25 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
   const config = configHome.trim() === '' ? `${home}/.config` : configHome.trim()
   const segments = commandSegments(command)
   const assigned = new Map<string, string>()
+  const homeText = home === '' ? '~' : home
   for (const segment of segments)
     for (const word of segment.words) {
       const assign = ASSIGNMENT_WORD.exec(word)
       if (assign !== null && assign[1] !== undefined) assigned.set(assign[1], assign[2] ?? '')
     }
-  const homeText = home === '' ? '~' : home
+  // `printf -v NAME FORMAT ARGS…` assigns too: the format with each `%s`-like
+  // conversion filled from the arguments (`printf -v d '%s/.config/foundry' ~`).
+  for (const segment of segments) {
+    const words = segment.words
+    const at = words.indexOf('printf')
+    if (at < 0) continue
+    const flag = words[at + 1] ?? ''
+    const name = flag === '-v' ? words[at + 2] : flag.startsWith('-v') ? flag.slice(2) : undefined
+    if (name === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue
+    const rest = words.slice(at + (flag === '-v' ? 3 : 2))
+    const args = rest.slice(1).map(arg => arg.replace(/^~(?=\/|$)/, homeText))
+    assigned.set(name, (rest[0] ?? '').replace(/%%|%[-+ #0-9.]*[a-zA-Z]/g, conversion => (conversion === '%%' ? '%' : (args.shift() ?? ''))))
+  }
   // Where `~+` and `~-` can point: the session's directory, home, and every directory
   // the line moves into.
   const visited = new Set<string>([cwd])
@@ -2998,13 +3011,14 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
   const braced = (word: string) =>
     word
       .replace(/\$\(\s*pwd\s*\)|`\s*pwd\s*`/g, '${PWD}')
-      .replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_whole, name: string) => `\${${name}}`)
+      .replace(/\$([A-Za-z_][A-Za-z0-9_]*|[1-9@*])/g, (_whole, name: string) => `\${${name}}`)
   // `${NAME op word}`, nested ones too. A known name gives its value, with bash's
   // operator applied (`:+` gives the word, a trim gives the trimmed value and the
-  // value). An unknown name with a default (`${NOPE:-x}`, `${NOPE=x}`) gives the
-  // default, and the word as written, since the guard does not know whether it is
-  // set; `${NOPE:+x}` gives the word or nothing. Anything else unknown stays as
-  // written.
+  // value). `${!NAME}` gives the value of the name NAME holds. An unknown name with a
+  // default (`${NOPE:-x}`, `${NOPE=x}`) gives the default; `${NOPE:+x}` gives the word.
+  // Anything unknown (a name, a positional parameter, an array element) inside a
+  // longer word can hold any text there, the empty text included, so it also gives `*`
+  // (`foundr${NOPE}y` is `foundry` in bash when NOPE is unset).
   const PARAMETER_LIMIT = 64
   const parameters = (word: string): string[] => {
     const start = word.indexOf('${')
@@ -3023,18 +3037,26 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     if (end < 0) return [word]
     const head = word.slice(0, start)
     const whole = word.slice(start, end + 1)
+    // An unknown expansion inside a longer word can be any text there; one that is the
+    // whole word is left as written (`rm -rf "$f"`: a variable the line does not set).
+    const any = word.length > whole.length ? '*' : ''
     const tails = parameters(word.slice(end + 1))
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])?([\s\S]*)$/.exec(word.slice(start + 2, end))
+    const inner = word.slice(start + 2, end)
+    const indirect = /^!([A-Za-z_][A-Za-z0-9_]*)$/.exec(inner)
+    const pointed = indirect === null ? undefined : assigned.get(indirect[1]!)
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])?([\s\S]*)$/.exec(
+      pointed !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(pointed) ? pointed : inner,
+    )
     const known = match === null ? undefined : values(match[1]!)
     const op = match?.[2] ?? ''
     const operand = match?.[3] ?? ''
     const choices: { text: string; open: boolean }[] = []
     if (match === null || (known === undefined && !['', ':-', '-', ':=', '=', ':+', '+'].includes(op))) {
-      choices.push({ text: whole, open: false })
+      choices.push({ text: whole, open: false }, { text: any, open: false })
     } else if (known === undefined) {
-      if (op === '') choices.push({ text: whole, open: false })
+      if (op === '') choices.push({ text: whole, open: false }, { text: any, open: false })
       else if (op === ':+' || op === '+') choices.push({ text: operand, open: true }, { text: '', open: false })
-      else choices.push({ text: operand, open: true }, { text: whole, open: false })
+      else choices.push({ text: operand, open: true }, { text: whole, open: false }, { text: any, open: false })
     } else {
       for (const value of known) {
         if (op === ':+' || op === '+') choices.push({ text: operand, open: true })
@@ -3166,7 +3188,7 @@ function namesStore(token: string, cwd: string, home: string, dir: string, menti
 /** The path-shaped pieces inside a word: what a shell would pass to `open` when the
  * word is a call around a string, rather than a bare path. */
 function pathPieces(word: string): string[] {
-  return [...word.matchAll(/(?:~|\/)[^\s"'`;:()|&<>]*/g)].map(match => match[0]!)
+  return [...word.matchAll(/(?<=^|[\s"'`;:()|&<>=,])(?:~|\/)[^\s"'`;:()|&<>]*/g)].map(match => match[0]!)
 }
 
 export const PROFILE_STORE_WRITE_REASON =
@@ -3216,6 +3238,97 @@ export function profileStoreWriteReason(
   const paths = [input.file_path, input.notebook_path, input.path].filter((value): value is string => typeof value === 'string')
   if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
   if (tool !== 'Bash' || typeof input.command !== 'string') return null
+  // The line as written, and the lines bash can make of it before it splits words: a
+  // backslash-newline joined (`foun\<newline>dry`), and a command substitution
+  // replaced by the output it plainly gives (`foundr$(:)y`, `$(echo ~/.config)`). Each
+  // form can only add a refusal, so the line runs only when every form would.
+  for (const line of storeLineForms(input.command, home))
+    if (storeLineWriteReason(line, cwd, home, configHome, dir) !== null) return PROFILE_STORE_WRITE_REASON
+  return null
+}
+
+/** The forms of a line bash reads the same way: as written, with each
+ * backslash-newline outside single quotes removed, and with each command
+ * substitution outside single quotes replaced by its output: what `echo` or `printf`
+ * prints, `${PWD}` for `pwd`, nothing for `:` or `true`, and `*` (any text) for
+ * anything else. */
+function storeLineForms(command: string, home: string): string[] {
+  const joined = (text: string) => {
+    let out = ''
+    let single = false
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index]!
+      if (single) {
+        out += char
+        if (char === "'") single = false
+      } else if (char === "'") {
+        single = true
+        out += char
+      } else if (char === '\\' && text[index + 1] === '\n') index += 1
+      else if (char === '\\') {
+        out += char + (text[index + 1] ?? '')
+        index += 1
+      } else out += char
+    }
+    return out
+  }
+  const output = (body: string, inside: boolean): string => {
+    const words = commandSegments(body)[0]?.words ?? []
+    const atHome = (word: string) => word.replace(/^~(?=\/|$)/, home === '' ? '~' : home)
+    if (words[0] === 'pwd') return '${PWD}'
+    if (words[0] === 'echo') return words.slice(1).filter(word => !/^-[neE]+$/.test(word)).map(atHome).join(' ')
+    if (words[0] === 'printf') return (words.length > 2 ? words.slice(2) : [words[1] ?? '']).map(atHome).join(' ')
+    if (words.length === 0 || [':', 'true', 'false'].includes(words[0]!)) return ''
+    // Output the guard cannot know can be any text inside a word; a substitution that
+    // is the whole word is left to the line as written.
+    return inside ? '*' : ''
+  }
+  const substituted = (text: string) => {
+    let out = ''
+    let single = false
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index]!
+      if (single) {
+        out += char
+        if (char === "'") single = false
+        continue
+      }
+      if (char === "'") {
+        single = true
+        out += char
+        continue
+      }
+      if (char === '\\') {
+        out += char + (text[index + 1] ?? '')
+        index += 1
+        continue
+      }
+      const substitution = text[index + 2] === '(' ? null : substitutionAt(text, index)
+      if (substitution === null) {
+        out += char
+        continue
+      }
+      const edge = /^$|[\s;|&(<>"]$/
+      const inside = !edge.test(out.slice(-1)) || !edge.test(text[substitution.end + 1] ?? '') && text[substitution.end + 1] !== ')'
+      out += output(substitution.body, inside)
+      index = substitution.end
+    }
+    return out
+  }
+  const forms = new Set([command])
+  let current = command
+  for (let round = 0; round < 3; round += 1) {
+    const next = substituted(joined(current))
+    if (next === current) break
+    forms.add(joined(current))
+    forms.add(next)
+    current = next
+  }
+  return [...forms]
+}
+
+function storeLineWriteReason(command: string, cwd: string, home: string, configHome: string, dir: string): string | null {
+  const input = { command }
   const segments = runWords(input.command, home, configHome, cwd)
   const raw = commandSegments(input.command)
   const every = (segment: { words: string[]; targets: string[]; stdin: string[] }) => [...segment.words, ...segment.targets, ...segment.stdin]

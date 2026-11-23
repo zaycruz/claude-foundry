@@ -847,6 +847,22 @@ test('Q20: a command that is not known to only read cannot meet the store', asyn
     // `!(…)` at command position is a negated subshell, not a pattern.
     '!(rm -rf ~/.config/foundry)',
     "cd ~/.config && rm -rf !(x)",
+    // Round 9: spellings bash turns into the store that the guard read as other paths.
+    'h=HOME; rm -rf ${!h}/.config/foundry',
+    "printf -v d '%s/.config/foundry' ~; rm -rf \"$d\"",
+    "printf -v d '%s/.config/foundry' \"$HOME\"; rm -rf \"$d\"",
+    'rm -rf ${HOME}${NOPE}/.config/foundry',
+    'rm -rf ~/.config/foundr${NOPE}y',
+    'rm -rf ~/.config/foundr$1y',
+    'rm -rf ~/.config/foundr${a[0]}y',
+    'rm -rf ~/.config/foundr$(:)y',
+    'rm -rf ~/.config/foundr`true`y',
+    'rm -rf ~/.config/foundr$(echo y)',
+    'rm -rf "$(echo ~/.config)/foundry"',
+    'rm -rf ~/.config/foun\\\ndry',
+    'rm -rf ~/.con\\\nfig/foundry',
+    'rm -rf ~/.config/foundr$(tr a y <<< a)',
+    'rm -rf ~/.config/$(basename /x/foundry)',
   ]) {
     const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
     if (deny === '') denied.push(command)
@@ -876,6 +892,12 @@ test('Q20: a command that is not known to only read cannot meet the store', asyn
     'ls ~ | wc -l',
     "find ~/projects -name '*.pyc' | xargs rm -f",
     'for f in src/*.ts; do rm -f "$f.bak"; done',
+    'rm -rf "build/$(date +%s)"',
+    'rm -rf build/*',
+    'rm -rf "$f"',
+    'echo one \\\n  two',
+    "printf -v n '%s' 3; echo $n",
+    'cat ~/.config/foun\\\ndry/profile-settings.json',
     `cat > notes.md <<'EOF'\nthe mark lives in ${mark}\nEOF`,
   ])
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })

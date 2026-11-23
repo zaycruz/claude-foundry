@@ -252,22 +252,31 @@ has the same rule when a pipe, a command substitution or a loop's words carry it
 (`echo ~/.config | xargs rm -rf`, `for d in ~; do rm -rf "$d/.config"; done`).
 Elsewhere on the line it does not, so `cd ~ && npm test` runs. A redirect to a
 path the guard cannot read (`: > "$f"`) counts as a write. The
-guard spells each word the way bash would. It expands globs on any part of the
+guard spells each word as bash would, in these ways. It expands globs on any part of the
 path, with bash's whole bracket grammar (`[!F]`, `[[:alpha:]]`, `[=f=]`, a leading
 `]`), matched case by case and also case-free for macOS. It reads extglob groups
 (`+(f)oundry`, `!(x)`) as any text. It expands every brace sequence bash expands,
 in any direction, step or padding (`foundr{a..z}`, `foundr{z..a..2}`, `{01..10}`).
 It joins quoted pieces (`fo""undry`, `foundr$'y'`, `foundr$"y"`), drops backslashes,
-and expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
+joins a word across a backslash-newline (`foun\<newline>dry`) as bash does, and
+expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
 `$XDG_CONFIG_HOME`, `$PWD`, `$OLDPWD`, `$(pwd)` and the variables the line sets,
-also with bash's operators (`${HOME:-x}`, `${HOME%/}`). The default of an unknown
-variable (`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. It resolves relative names after a `cd`, and reads the
+also with bash's operators (`${HOME:-x}`, `${HOME%/}`), indirect ones (`${!h}` with
+`h=HOME`), and a variable that `printf -v` builds. The default of an unknown variable
+(`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. An unknown
+variable, a positional parameter or a command substitution inside a longer word
+counts as any text there, the empty text included, so `foundr${NOPE}y`,
+`foundr$1y`, `foundr$(:)y` and `foundr$(tr a y <<< a)` all name the store. A
+substitution that runs `echo`, `printf` or `pwd` counts as what it prints. It resolves relative names after a `cd`, and reads the
 path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
-mark (`find ~ -name "profile-*.png" -delete`) still runs. The limits are these: the
-guard reads the command line, not a running shell. A path built at run time inside
-a script (`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`) is not
-caught, and neither is a variable the guard cannot see (one set in an earlier
-command). The rule also refuses more than it must: a command that is not a reader
+mark (`find ~ -name "profile-*.png" -delete`) still runs. The guard reads the
+command line, not a running shell, so it has these limits. It does not catch a path
+built at run time inside a script
+(`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`). It does not catch
+a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`)
+or a command substitution whose output only the run shows (`rm -rf $(cat list)`).
+It also does not catch a path that a file the line reads supplies
+(`xargs rm -rf < list`, `source script.sh`). The rule also refuses more than it must: a command that is not a reader
 and only mentions the store (`npm run x -- --note ~/.config/foundry`) is refused,
 and so is a `cp` of the store out. A brace
 list past 4096 names is read as a shape rather than enumerated, so a command that
