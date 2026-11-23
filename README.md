@@ -134,7 +134,11 @@ How a release moves these fields: [docs/RELEASE.md](docs/RELEASE.md).
 The mod runs `orthanc` from `PATH` (or `ORTHANC_BIN`). Add more stacks with
 `orthanc configure profile create`. Tokens stay in the macOS Keychain and never
 pass through Claude: `/auth` prints the command for you to run in your own
-terminal.
+terminal. Two commands are `read-only` in Orthanc's agent manifest and the mod
+still refuses them in every mode, because their job is to hand you a value:
+`orthanc repository git-credential get` prints the active profile's token
+(`password=…`), and `orthanc compute env get` writes one environment variable's
+value to a new file or to the clipboard. Run those in your own terminal.
 
 ### 2. The mod
 

@@ -161,6 +161,36 @@ export const CREDENTIAL_HINT = 'The operator runs it in their own terminal; /aut
 const PROFILE_FLAG = /^--profile(=|$)/
 // Local commands that change which stack orthanc runs on when none is named.
 const STACK_COMMANDS = new Set(['configure use', 'configure set-default'])
+// Two commands hand a value to whoever runs them, and through a tool the agent is
+// whoever runs them. `repository git-credential get` answers with the active
+// profile's token (`password=…`, under --agent too: measured on the v0.7.11 binary,
+// hooks/operator-handoff.test.ts); `compute env get` writes one environment
+// variable's value to a new 0600 file or to the clipboard, and a file the agent
+// names is a file the agent reads back. Orthanc marks both `kind: read-only`, so
+// the read short-circuit below would run either one in every mode with no question,
+// and README's promise that a token never passes through Claude would be false.
+// They are refused, not asked: an approval would not make the value safe for the
+// agent to hold, and the operator has a terminal. A name Orthanc renames simply
+// stops matching; hooks/orthanc-snapshot.json holds the entries these names and
+// kinds came from.
+const OPERATOR_ONLY_COMMANDS: Readonly<Record<string, string>> = {
+  'repository git-credential':
+    "answers with the active profile's token (`password=…`), which git uses to fetch, push and pull; a token never passes through Claude",
+  'compute env get':
+    'writes the value of one environment variable of a compute module to a new file or to the clipboard, which is how the operator gets a value the command never prints',
+}
+
+/** Why this command is the operator's to run, or null. One sentence the agent can act on. */
+export function operatorOnlyReason(path: string): string | null {
+  // hasOwnProperty, not a plain read: `path` can be any text the agent typed
+  // (`command` is free-form in orthanc_cli's schema, and a name the manifest
+  // does not know reaches here unresolved), so 'constructor' or '__proto__'
+  // would otherwise read an inherited Object.prototype member and print it back
+  // as the reason. hooks/operator-handoff.test.ts Q9.
+  if (!Object.prototype.hasOwnProperty.call(OPERATOR_ONLY_COMMANDS, path)) return null
+  const why = OPERATOR_ONLY_COMMANDS[path]
+  return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
+}
 // Orthanc `local` commands that only read local state.
 const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
@@ -1641,6 +1671,11 @@ function shellClassification(
     // the one lane where a secret could still be piped in.
     if (call.entry !== null && isCredentialCommand(call.entry))
       return refuse(call.path, `'orthanc ${call.path}' needs a credential the operator types, so neither Bash nor orthanc_cli runs it. ${CREDENTIAL_HINT}`)
+    // The other direction, and Bash prints what a command prints straight back to
+    // the agent: the two operator-only commands answer with a value, so they are
+    // refused here too, ahead of the same read short-circuit.
+    const operatorOnly = operatorOnlyReason(call.path)
+    if (operatorOnly !== null) return refuse(call.path, operatorOnly)
     // The manifest entry this call names, read once: the wait timer below
     // (shellOrthancCalls) judges the same entry the ladder judged here.
     if (classifyOrthancCommand(call.path, manifest) === 'read' && call.entry?.operatorApproval === undefined) continue
@@ -1664,7 +1699,9 @@ export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   return 'unknown'
 }
 
-/** A Foundry call the guard cannot read: blocked in every mode, so it never runs blind. */
+/** A Foundry call the guard will not run and asks no one about: one it cannot
+ * read, or one that belongs to the operator. Blocked in every mode; `error` is
+ * what the agent sees, so it names the call and where it does run. */
 function unreadableCall(input: unknown, workingBranch: string | null, error: string): GateClassification {
   return {
     command: null,
@@ -1699,6 +1736,10 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
+    // Before the read short-circuit: these two are `read-only` in the manifest,
+    // and what they print or write is the whole point of the call.
+    const operatorOnly = operatorOnlyReason(resolved.path)
+    if (operatorOnly !== null) return unreadableCall(input, workingBranch, operatorOnly)
     // A read whose entry also asks for the operator is not let through as a read.
     if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
     // orthanc reads the last --profile it is given, so one in the args would move
