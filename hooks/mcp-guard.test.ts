@@ -103,7 +103,21 @@ test('MS4: the plugin owns mcp__foundry__, and its two tools keep their own path
 })
 
 test('MS5: a server with no Foundry name is left alone', async () => {
-  for (const tool of ['mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__context7__search_docs', 'Read', 'Write']) {
+  // The last six are the server names on the operator's own Claude config, so a
+  // real setup is what this test protects.
+  for (const tool of [
+    'mcp__github__create_issue',
+    'mcp__filesystem__write_file',
+    'mcp__context7__search_docs',
+    'mcp__rbe__run_build',
+    'mcp__clerk__create_user',
+    'mcp__supabase__run_query',
+    'mcp__reasoning-bank__write_note',
+    'mcp__linear-raava__create_issue',
+    'mcp__linear-qwalo__update_issue',
+    'Read',
+    'Write',
+  ]) {
     expect({ tool, classified: classifyCall(tool, { path: 'a' }, MANIFEST, null) }).toEqual({ tool, classified: null })
   }
 })
