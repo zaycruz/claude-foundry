@@ -30,10 +30,17 @@
 //      across command and args, the args inside the command string, or --apply
 //      spelled --APPLY or --apply=true. Each must ask.
 //  G7  A dry run (no --apply) asks or is refused, though it only prints a plan.
-//  G8  Promotion loosens: proposal merge, accept or approve runs or asks.
+//  G8  Promotion is refused in yolo, or asks there. Since 2026-11-20 (zay:
+//      "raise the proposal and merge the proposal, just nothing direct against
+//      main or master") a promotion runs in yolo with no ask, and follows the
+//      ladder outside it (the manifest's operator_approval asks:
+//      yolo-approval.test.ts O12).
 //  G9  The prompt still calls tags the operator's, or does not say they ask
 //      outside yolo.
-//  G10 In FDE mode a tag links to another branch, or applies with no dry run.
+//  G10 In FDE mode a tag is refused for linking to another branch, or its
+//      --apply is held to a dry run. Since 2026-11-20 neither hold exists: any
+//      global branch links, and an apply runs like any other write (only a tag
+//      with no branch, a release on main, still asks: Y2/O7).
 //  G11 orthanc repository tag create in Bash runs, or asks.
 //
 // Synthetic stack only.
@@ -222,54 +229,51 @@ test('G7: a dry run prints its plan without asking', async ($, on) => {
   expect(tagged(h)).toEqual([`repository tag create ${tagArgs().join(' ')}`])
 })
 
-for (const mode of MODES) {
-  test(`G8: in ${mode} mode merges, accepts and approvals stay refused and ask no one`, async ($, on) => {
-    const h = harness(on, mode)
-    for (const command of ['proposal merge', 'proposal accept', 'proposal approve']) {
-      const wrote = await write($, command, ['ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply'])
-      expect({ command, denied: typeof wrote.deny === 'string' }).toEqual({ command, denied: true })
-    }
-    expect(h.asked).toEqual([])
-    expect(h.calls.some(call => call.startsWith('proposal '))).toBe(false)
-  })
-}
+test('G8: in yolo merges, accepts and approvals run with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, extra] of [
+    ['proposal merge', ['--apply', '--yes']],
+    ['proposal accept', ['--apply', '--yes']],
+    ['proposal approve', ['--apply']],
+  ] as [string, string[]][]) {
+    const args = ['ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', ...extra]
+    expect({ command, deny: (await write($, command, args)).deny }).toEqual({ command, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
+  expect(h.calls.filter(call => call.startsWith('proposal ')).length).toBe(3)
+})
 
-test('G9: the prompt says tags ask the operator outside yolo and merges stay blocked', async ($, on) => {
+test('G8: outside yolo a promotion follows the ladder', async ($, on) => {
+  const h = harness(on, 'ask-always')
+  h.answer = 'Decline'
+  const wrote = await write($, 'proposal merge', ['ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply', '--yes'])
+  expect(typeof wrote.deny).toBe('string')
+  expect(h.asked.length).toBe(1)
+  expect(h.calls.some(call => call.startsWith('proposal '))).toBe(false)
+})
+
+test('G9: the prompt says tags ask the operator outside yolo, and promotions follow the ladder', async ($, on) => {
   harness(on, 'allow-edits')
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   const text = await prompt($)
   expect(text).toContain('Release tags (repository tag create --apply) ask the operator in every mode except yolo')
-  expect(text).toContain('merges and default-branch pushes are blocked in every mode')
+  expect(text).toContain('Writes without a branch and default-branch pushes are blocked in every mode')
+  expect(text).toContain('Promotions follow the ladder like any other write')
 })
 
-test('G10: in FDE mode under yolo a tag links only to the session branch, and applies only after its dry run, with no dialog', async ($, on) => {
+test('G10: in FDE mode under yolo a tag applies with no dry run, whatever global branch it links to', async ($, on) => {
   const h = harness(on)
+  h.answer = 'throw'
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
   expect(await say($, 'fde', 'on')).toContain('FDE mode on')
-  expect(typeof (await write($, 'repository tag create', tagArgs('--foundry-branch-rid', OTHER))).deny).toBe('string')
-  expect(typeof (await write($, 'repository tag create', tagArgs('--foundry-branch-rid', MADE, '--apply'))).deny).toBe('string')
+  // The session's branch, another global branch and the alias all run, --apply included.
+  for (const extra of [['--foundry-branch-rid', MADE, '--apply'], ['--foundry-branch-rid', OTHER, '--apply'], ['--branch', MADE, '--apply'], [`--branch=${OTHER}`]]) {
+    expect({ extra, deny: (await write($, 'repository tag create', tagArgs(...extra))).deny }).toEqual({ extra, deny: undefined })
+  }
   expect(h.asked).toEqual([])
-  expect((await write($, 'repository tag create', tagArgs('--foundry-branch-rid', MADE))).deny).toBe(undefined)
-  expect((await write($, 'repository tag create', tagArgs('--foundry-branch-rid', MADE, '--apply'))).deny).toBe(undefined)
-  expect(h.asked).toEqual([])
-  expect(tagged(h).filter(call => call.includes('--apply'))).toEqual([
-    `repository tag create ${tagArgs('--foundry-branch-rid', MADE, '--apply').join(' ')}`,
-  ])
-})
-
-test('G10: in FDE mode the pin holds for --branch as for its alias', async ($, on) => {
-  const h = harness(on)
-  expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
-  expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
-  expect(await say($, 'fde', 'on')).toContain('FDE mode on')
-  expect(typeof (await write($, 'repository tag create', tagArgs('--branch', OTHER, '--apply'))).deny).toBe('string')
-  expect(typeof (await write($, 'repository tag create', tagArgs(`--branch=${OTHER}`))).deny).toBe('string')
-  expect(typeof (await write($, 'repository tag create', tagArgs('--branch', MADE, '--apply'))).deny).toBe('string')
-  expect((await write($, 'repository tag create', tagArgs('--branch', MADE))).deny).toBe(undefined)
-  expect((await write($, 'repository tag create', tagArgs('--branch', MADE, '--apply'))).deny).toBe(undefined)
-  expect(h.asked).toEqual([])
-  expect(tagged(h).filter(call => call.includes('--apply'))).toEqual([`repository tag create ${tagArgs('--branch', MADE, '--apply').join(' ')}`])
+  expect(tagged(h).filter(call => call.includes('--apply')).length).toBe(3)
 })
 
 test('G11: orthanc repository tag create in Bash is refused and asks no one', async ($, on) => {

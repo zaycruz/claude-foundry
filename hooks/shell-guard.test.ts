@@ -274,7 +274,7 @@ test('S9: a credential command in Bash is sent to the operator, not to orthanc_c
 
 // Review of #33: a launcher in command position runs a later word as its program,
 // so an Orthanc write after flock, nsenter, unshare or docker exec is still a call.
-test('S-launcher: an Orthanc write after a launcher is still caught', () => {
+test('S-launcher: an Orthanc write after a launcher or a shell keyword is still caught', () => {
   const manifest = [
     { path: 'ontology object-delete', kind: 'mutation', flags: [{ flag: '--apply', takesValue: false }, { flag: '--branch', takesValue: true }] },
   ] as never
@@ -285,6 +285,9 @@ test('S-launcher: an Orthanc write after a launcher is still caught', () => {
     `unshare -r orthanc ${write}`,
     `docker exec c orthanc ${write}`,
     `chroot /srv orthanc ${write}`,
+    `if orthanc ${write}; then echo ok; fi`,
+    `while orthanc ${write}; do sleep 1; done`,
+    `until orthanc ${write}; do sleep 1; done`,
   ]) {
     expect({ line, caught: classifyCall('Bash', { command: line }, manifest, null, [] as never) !== null }).toEqual({ line, caught: true })
   }

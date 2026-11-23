@@ -4,12 +4,14 @@
 set -eu
 O=${ORTHANC_BIN:-orthanc}
 # Your stack: FOUNDRY_E2E_PROFILE, FOUNDRY_E2E_PROJECT (a project RID), FOUNDRY_E2E_ONTOLOGY (an ontology RID),
-# FOUNDRY_E2E_SPACE (the RID of the namespace that holds the project).
+# FOUNDRY_E2E_SPACE (the RID of the namespace that holds the project), and optionally
+# FOUNDRY_E2E_BRANCH (an OPEN global branch RID on that ontology, the branch FDE mode reads).
 P=${FOUNDRY_E2E_PROFILE:?set FOUNDRY_E2E_PROFILE}
 SHARED=${FOUNDRY_E2E_PROJECT:?set FOUNDRY_E2E_PROJECT}
 ONT=${FOUNDRY_E2E_ONTOLOGY:?set FOUNDRY_E2E_ONTOLOGY}
 SPACE=${FOUNDRY_E2E_SPACE:?set FOUNDRY_E2E_SPACE}
 SEARCH=${FOUNDRY_E2E_SEARCH:-a}
+BRANCH=${FOUNDRY_E2E_BRANCH:-}
 out=${0:A:h}/../hooks/fixtures.local.ts
 SPACE_PATH=$($O --agent --non-interactive --profile $P space list | jq -r --arg rid $SPACE '.data.spaces[] | select(.rid == $rid) | .path')
 [[ -n $SPACE_PATH ]] || { print -u2 "no space $SPACE on $P"; exit 1 }
@@ -22,6 +24,10 @@ calls=(
   "--profile $P project list"
   "--profile $P resource list --type FOUNDRY_DATASET --folder-rid $SHARED"
   "--profile $P ontology action-type-list $ONT"
+  "--profile $P ontology link-type-list $ONT"
+  "--profile $P ontology interface-list $ONT"
+  "--profile $P automate list --folder-rid $SHARED"
+  "--profile $P automate list --folder-rid $SHARED --name $SEARCH"
   "--profile $P search $SEARCH --limit 100"
   "--profile $P resource-role list $SHARED"
   "--profile $P space list"
@@ -30,6 +36,10 @@ calls=(
 for project in $SPACE_PROJECTS; do
   [[ $project == $SHARED ]] || calls+=("--profile $P resource list --type FOUNDRY_DATASET --folder-rid $project")
 done
+# What FDE mode sends for a link type or interface: the same two listings, branch-qualified.
+if [[ -n $BRANCH ]]; then
+  calls+=("--profile $P ontology link-type-list $ONT --branch $BRANCH" "--profile $P ontology interface-list $ONT --branch $BRANCH")
+fi
 record() {
   local argv=(--agent --non-interactive "$@")
   local stdout=$($O $argv)
