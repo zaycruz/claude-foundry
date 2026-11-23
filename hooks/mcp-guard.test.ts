@@ -41,7 +41,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { classifyCall, classifyMcpIntent, foundryMcpTool, ladderDecision, type ManifestCommand, touchesFoundryTool } from './policy'
+import { classifyCall, classifyMcpIntent, DESTRUCTIVE_WORDS, foundryMcpTool, ladderDecision, type ManifestCommand, touchesFoundryTool } from './policy'
 
 const MANIFEST: ManifestCommand[] = [
   { path: 'ontology list', kind: 'read-only' },
@@ -102,8 +102,11 @@ test('MS2b: a camelCase verb finds a write, and never lets a call through', asyn
 })
 
 test('MS3b: a read verb does not excuse a write verb in the same name', async () => {
-  // 'view' and 'get' are reads; the write word must still win, or a name that says it
-  // revokes protection runs with no ladder and no ask.
+  // 'view' and 'get' are reads, and the write word has to win anyway. `grant` and
+  // `approve` are the verbs that prove it: they live in the guard's own list and nowhere
+  // else. `revoke` rides along for coverage, and note it would be refused without that
+  // list too, because `DESTRUCTIVE_WORDS` carries it and `destructiveTermIn` reads the
+  // whole name.
   for (const tool of [
     'mcp__palantir__view_branch_and_revoke_protection',
     'mcp__palantir__get_object_and_grant_access',
@@ -169,6 +172,31 @@ test('MS10: the refusal says only what the name tells it', async () => {
   expect({ namesTool: unknown.includes('mcp__palantir__do_the_thing'), pointsAtOrthanc: unknown.includes('orthanc_cli') }).toEqual({ namesTool: true, pointsAtOrthanc: true })
   // A name the guard cannot read is never called a write.
   expect({ unknownCallsWrite: unknown.includes('writes to Foundry') }).toEqual({ unknownCallsWrite: false })
+})
+
+test('MS11: a verb only the write list carries is still a write next to a read verb', async () => {
+  // The gap this pins is silent. The write vocabulary is module-private, so dropping a
+  // verb from it is no compile error, and a name whose read verb answers first never
+  // reaches the ladder, so nothing else notices either. Each verb below is one the guard's
+  // other write reader does not carry: `DESTRUCTIVE_WORDS` covers the acts that leave
+  // something gone (`revoke`, `reset`, `truncate` and kin, already pinned by MS3b and by
+  // destructive.test.ts D10), and these are the rest. They are written out here rather
+  // than read from the list, because the list is private and a test that reads the
+  // implementation back at itself proves nothing. Measured both ways: with `upsert`
+  // removed from the vocabulary, `describe_branch_and_upsert_object` answers 'read'.
+  const verbsOnlyTheListCarries = [
+    'accept', 'add', 'apply', 'approve', 'archive', 'build', 'cancel', 'close', 'create', 'decline', 'deploy', 'drop',
+    'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'put', 'reject', 'rename', 'restart',
+    'revise', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'update', 'upload', 'upsert',
+    'write',
+  ]
+  // The claim in the comment this pins: none of these verbs is one the destructive reader
+  // already carries. Drop it and the comment above WRITE_WORDS goes stale again.
+  const destructive = new Set<string>(DESTRUCTIVE_WORDS.map(([term]) => term))
+  expect(verbsOnlyTheListCarries.filter(verb => destructive.has(verb))).toEqual([])
+  for (const verb of verbsOnlyTheListCarries) {
+    expect({ verb, intent: classifyMcpIntent(`describe_branch_and_${verb}_object`) }).toEqual({ verb, intent: 'write' })
+  }
 })
 
 test('MS7: the delete word still marks the call destructive', async () => {
