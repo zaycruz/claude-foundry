@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag } from './policy'
+import { BINARY_RISK, CREDENTIAL_HINT, localWriteNote, type ManifestCommand, type ManifestFlag, isCredentialCommand, operatorOnlyReason, replacesBinary } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -41,6 +41,16 @@ export const failure = (type: string, message: string, operation: string, extra:
   warnings: [],
 })
 
+// A manifest entry can name a secret the operator types (`input`) or the store
+// it writes (`credential_store`) in a shape this file cannot read. A marker the
+// guard cannot read is kept as 'unreadable', so the command is refused: an
+// unreadable credential field is not an absent one. Same convention as
+// `operator_approval` below, which policy.ts reads raw and fails closed on.
+function credentialMarker(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  return typeof value === 'string' ? value : 'unreadable'
+}
+
 export function manifestFrom(envelope: Envelope): ManifestCommand[] {
   const commands = isRecord(envelope.data) && Array.isArray(envelope.data.commands) ? envelope.data.commands : []
   return commands.filter(isRecord).flatMap(entry =>
@@ -49,11 +59,15 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           path: entry.path,
           kind: typeof entry.kind === 'string' ? entry.kind : undefined,
           auth: typeof entry.auth === 'string' ? entry.auth : undefined,
-          input: typeof entry.input === 'string' ? entry.input : undefined,
+          input: credentialMarker(entry.input),
+          credentialStore: credentialMarker(entry.credential_store),
           flags: flagsFrom(entry.args),
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
+          // Kept raw: policy.ts reads the one value it knows and reads anything
+          // else as no risk line.
+          ...('mutation_risk' in entry ? { mutationRisk: entry.mutation_risk } : {}),
         }]
       : [],
   )
@@ -74,6 +88,9 @@ function flagsFrom(args: unknown): ManifestFlag[] {
               : typeof arg.default === 'number' && Number.isFinite(arg.default)
                 ? { default: String(arg.default) }
                 : {},
+            // An enumerated option lists the values it accepts, which is how the
+            // guard tells `--transaction-type DELETE` from a branch someone named.
+            ...(Array.isArray(arg.values) ? { values: arg.values.filter((value: unknown): value is string => typeof value === 'string') } : {}),
           },
         ]
       : [],
@@ -192,8 +209,17 @@ function flagArgument(args: readonly string[], flag: string): string | undefined
 }
 
 export type CliWait = {
+  /** The manifest path this wait belongs to ('' when no command was named). */
+  path: string
   timeoutMs: number
   neededMs: number
+  /**
+   * What the call's own flags ask for, margin included, in ms: 0 when nothing
+   * waits (--detach, --no-wait, a plan, a command with no wait flags). The
+   * Bash timer is held to this, not to `neededMs`: the 300 s floor is this
+   * mod's floor for an ordinary call, not a wait a shell command must hold.
+   */
+  waitMs: number
   /** The cap for this command: the general cap, or what its own defaults need when that is more. */
   capMs: number
   overCap: boolean
@@ -204,6 +230,16 @@ export type CliWait = {
   maxValueS?: number
   /** The flags the call passed that put it over the cap, --timeout when one smaller would fit. */
   overFlags?: string[]
+  /**
+   * The wait flags the call passed with a value Orthanc would reject (a
+   * variable, `$((…))`, `abc`). The timer above falls back to the manifest
+   * default, which is never short for orthanc_cli; the Bash lane will not
+   * refuse on a number the command never asked for (hooks/process.ts).
+   */
+  unreadFlags?: string[]
+  /** What the wait costs besides --timeout (other flags, Orthanc's own time around
+   * the wait, one poll interval, the margin), in ms. 0 when nothing waits. */
+  fixedMs: number
 }
 
 const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
@@ -215,6 +251,7 @@ const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
  * flags to make smaller.
  */
 export function cliWait(command: ManifestCommand | undefined, args: readonly string[]): CliWait {
+  const path = command?.path ?? ''
   const flags = command?.flags ?? []
   const extra = command ? WAIT_EXTRAS[command.path] : undefined
   const declares = (flag: string) => flags.some(entry => entry.flag === flag)
@@ -264,8 +301,14 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
   }
   const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
   const totalS = waits ? totalOf(seconds) : 0
-  if (totalS === 0) return { timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, capMs, overCap: false }
+  // A flag that was passed but does not read as a number: the wait is the
+  // default, and the caller who set the timer is the only one who can say
+  // whether that is a safe number to act on.
+  const unreadFlags = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => given(flag) && parse(flagArgument(args, flag)) === undefined)
+  const withUnread = <T extends object>(wait: T): T & { unreadFlags?: string[] } => (unreadFlags.length === 0 ? wait : { ...wait, unreadFlags })
+  if (totalS === 0) return withUnread({ path, timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, waitMs: 0, capMs, overCap: false, fixedMs: 0 })
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
+  const fixedMs = (totalS - seconds('--timeout')) * 1000
   // Refuse only when the caller can act on the answer: some flag it passed must
   // have a value that brings the call under the cap. Where nothing it passed can
   // (a per-request ceiling, or Orthanc's own fixed wait), run to the cap, which
@@ -275,18 +318,22 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     .map(flag => ({ flag, room: Math.floor(capMs / 1000 - (totalS - seconds(flag))) }))
     .filter(entry => entry.room > 0)
   const overCap = neededMs > capMs && fits.length > 0
-  if (!overCap) return { timeoutMs: Math.min(neededMs, capMs), neededMs, capMs, overCap }
+  if (!overCap)
+    return withUnread({ path, timeoutMs: Math.min(neededMs, capMs), neededMs, waitMs: totalS * 1000, capMs, overCap, fixedMs })
   const chosen = fits.find(entry => entry.flag === '--timeout') ?? fits[0]!
-  return {
+  return withUnread({
+    path,
     timeoutMs: capMs,
     neededMs,
+    waitMs: totalS * 1000,
     capMs,
     overCap,
+    fixedMs,
     maxFlag: chosen.flag,
     maxValueS: chosen.room,
     ...(chosen.flag === '--timeout' ? { maxTimeoutS: chosen.room } : {}),
     overFlags: fits.map(entry => entry.flag),
-  }
+  })
 }
 
 /** How long orthanc_cli lets `command` run with `args`, in ms. */
@@ -311,8 +358,17 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
   )
 }
 
+/** The refusal of a call that fills the operator's own credential store. */
+export function credentialFailure(command: ManifestCommand): Envelope {
+  return failure(
+    'credential-command-denied',
+    `Orthanc command '${command.path}' needs a credential the operator types, so orthanc_cli will not run it. ${CREDENTIAL_HINT}`,
+    command.path,
+  )
+}
+
 // Refusals orthanc_cli makes itself, before orthanc starts.
-const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'self-update-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
 
 /** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
 export function notRunFailure(envelope: Envelope): boolean {
@@ -347,15 +403,25 @@ export const normalizeCommand = (command: string) => command.trim().replace(/\s+
 
 const groupOf = (path: string) => path.split(' ')[0] ?? path
 
+/** One listing line for a command, with the marker an agent cannot miss whether
+ * it picked the command from a group, a search, or the command itself. */
 function commandLine(command: ManifestCommand): string {
-  const traits = [command.kind, command.auth && `auth: ${command.auth}`, command.input && `input: ${command.input}`]
+  const traits = [
+    command.kind,
+    command.auth && `auth: ${command.auth}`,
+    command.input && `input: ${command.input}`,
+    isCredentialCommand(command) && 'operator-only',
+  ]
     .filter(Boolean)
     .join(', ')
-  return `${command.path}${traits ? ` — ${traits}` : ''}`
+  // Both hard refusals show here, not only on the command page: a group listing
+  // or a search hit is where an agent picks the command.
+  const marks = [
+    replacesBinary(command) ? 'orthanc_cli never runs this; the operator installs it in their own terminal' : '',
+    isCredentialCommand(command) ? 'orthanc_cli never runs this; the operator enters the credential in a terminal' : '',
+  ].filter(Boolean)
+  return `${command.path}${traits ? ` — ${traits}` : ''}${marks.length ? ` — ${marks.join('; ')}` : ''}`
 }
-
-export const isCredentialCommand = (command: ManifestCommand) =>
-  DENIED_COMMANDS.has(command.path) || command.input === 'token-on-stdin'
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
   const lines = [commandLine(command)]
@@ -369,6 +435,21 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
   if (isCredentialCommand(command)) {
     lines.push('This credential-input command is not executable through orthanc_cli; the operator runs it in a terminal.')
   }
+  if (replacesBinary(command)) {
+    lines.push(
+      command.path === 'update'
+        ? 'This command replaces the orthanc binary (and with --plugin this plugin), so orthanc_cli never runs it; the operator updates orthanc in their own terminal.'
+        : `Orthanc's agent manifest marks this command '${BINARY_RISK}', so orthanc_cli never runs it; the operator installs it in their own terminal.`,
+    )
+  }
+  // Named on the page the agent is reading, so it does not spend a call finding
+  // out that the refusal was coming.
+  const operatorOnly = operatorOnlyReason(command.path)
+  if (operatorOnly !== null) lines.push(`Refused through orthanc_cli and Bash: ${operatorOnly}`)
+  // Same for the two reads that write this machine: the page says so before the
+  // agent adds --force or --target to a call it came here to plan.
+  const localWrite = localWriteNote(command.path)
+  if (localWrite !== null) lines.push(localWrite)
   return lines.join('\n')
 }
 

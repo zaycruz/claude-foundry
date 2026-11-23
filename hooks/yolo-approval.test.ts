@@ -45,8 +45,12 @@
 //      orthanc_cli.
 //  O11 The yolo prompt says release tags run at once, or does not say which
 //      marked writes still ask.
-//  O12 A global-branch deploy (scope "always") runs or asks: it stays refused
-//      in every mode, as a promotion into main.
+//  O12 A global-branch deploy, a proposal merge or a proposal accept (scope
+//      "always") is a promotion into main through a proposal: not a direct
+//      write to main, so since 2026-11-20 (zay: "raise the proposal and merge
+//      the proposal") it runs in yolo with no ask and asks in every other
+//      mode, the way its operator_approval mark says. Outside yolo it must not
+//      run unasked.
 //
 // Synthetic stack only. The manifest entries are those of orthanc PR #118.
 import type { On } from 'claude-code'
@@ -70,6 +74,8 @@ const always = (path: string, flags: string[]) => ({ path, kind: 'mutation', aut
 const ENTRIES = [
   { path: 'configure list', kind: 'local' },
   always('global-branch deploy', ['--apply', '--yes']),
+  always('proposal merge', ['--apply', '--yes']),
+  always('proposal accept', ['--apply', '--yes']),
   { path: 'global-branch roles set', kind: 'mutation', auth: 'bearer-token', operator_approval: { when_all_flags: ['--apply'] }, operator_approval_scope: 'work-branch' },
   { path: 'global-branch remove-resources', kind: 'mutation', auth: 'bearer-token', operator_approval: { when_all_flags: ['--apply', '--yes'] }, operator_approval_scope: 'work-branch' },
   { path: 'global-branch remove-repo', kind: 'mutation', auth: 'bearer-token', operator_approval: { when_all_flags: ['--apply', '--yes'] }, operator_approval_scope: 'work-branch' },
@@ -359,11 +365,59 @@ test('O11: the yolo prompt says a release tag with no branch and marked writes o
   expect(text).toContain('operator_approval')
 })
 
-for (const mode of MODES) {
-  test(`O12: in ${mode} mode global-branch deploy stays refused and asks no one`, async ($, on) => {
+// A promotion into main through a proposal: runs in yolo with no ask, asks
+// (the manifest's operator_approval, "governance control") in every other mode,
+// auto — the default — included.
+const PROMOTIONS: [string, string[]][] = [
+  ['global-branch deploy', [RID, '--apply', '--yes']],
+  ['proposal merge', ['ri.branch..proposal.b0000000-0000-4000-8000-0000000000f5', '--apply', '--yes']],
+  ['proposal accept', ['ri.branch..proposal.b0000000-0000-4000-8000-0000000000f5', '--apply', '--yes']],
+]
+
+test('O12: in yolo each promotion runs with no ask, even with no one to ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, args] of PROMOTIONS) {
+    expect({ command, deny: (await write($, command, args)).deny }).toEqual({ command, deny: undefined })
+    expect(ran(h, command)).toEqual([`${command} ${args.join(' ')}`])
+  }
+  expect(h.asked).toEqual([])
+})
+
+for (const mode of OTHER_MODES) {
+  test(`O12: in ${mode} mode each promotion asks once; declined, it never reaches orthanc`, async ($, on) => {
     const h = harness(on, mode)
-    expect(typeof (await write($, 'global-branch deploy', [RID, '--apply', '--yes'])).deny).toBe('string')
-    expect(h.asked).toEqual([])
-    expect(ran(h, 'global-branch deploy')).toEqual([])
+    h.answer = 'Decline'
+    for (const [command, args] of PROMOTIONS) {
+      const before = h.asked.length
+      expect({ command, denied: typeof (await write($, command, args)).deny }).toEqual({ command, denied: 'string' })
+      expect(h.asked.at(-1)).toContain(`'${command}'`)
+      expect(h.asked.at(-1)).toContain('governance control')
+      expect(h.asked.length).toBe(before + 1)
+      expect(ran(h, command)).toEqual([])
+    }
+  })
+}
+
+// FND-28: /approval yolo is the person's own typing, like /fde end. An SDK turn,
+// a peer, a relay, a channel or a trigger cannot turn it on; the mode persists
+// and is where destructive writes and promotions run with no ask.
+const asOrigin = async ($: Engine, kind: string | undefined, args: string) =>
+  (await $.command.run({ command: 'approval', args, origin: kind ? { kind } : undefined, presentation: { isFullscreen: false, columns: 120 } } as never)).text ?? ''
+
+for (const kind of ['sdk', 'peer', 'relay', 'channel', 'trigger', 'plugin', undefined]) {
+  test(`O13: /approval yolo from ${kind ?? 'no origin'} is refused and the mode stays; a stricter mode is allowed`, async ($, on) => {
+    harness(on, 'auto')
+    expect(await asOrigin($, kind, 'yolo')).toContain('Only you can turn on yolo')
+    expect(await say($, 'approval')).toContain('approval mode: auto.')
+    expect(await asOrigin($, kind, 'ask-always')).toBe('Foundry approval mode: ask-always.')
+  })
+}
+
+for (const kind of ['composer', 'bridge']) {
+  test(`O13: /approval yolo from ${kind} (the person) still turns it on`, async ($, on) => {
+    harness(on, 'auto')
+    expect(await asOrigin($, kind, 'yolo')).toBe('Foundry approval mode: yolo.')
+    expect(await say($, 'approval')).toContain('approval mode: yolo.')
   })
 }

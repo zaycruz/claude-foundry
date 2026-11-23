@@ -21,9 +21,12 @@ export type FoundryResourceKind =
   | 'languageModels'
   | 'permissions'
   | 'searchResults'
+  | 'linkTypes'
+  | 'interfaces'
+  | 'automations'
 
 /** One selected resource: its RID (or key), display name and a path or type hint. */
-export type FoundryResource = { rid: string; name: string; hint: string }
+export type FoundryResource = { rid: string; name: string; hint: string; branchRid?: string }
 
 export type FoundryScope = {
   profile: string
@@ -39,11 +42,21 @@ export type FoundryScope = {
 
 export type FoundryPickItem = { key: string; label: string; hint: string }
 
-export type FoundryPickerKind = 'profile' | 'ontology' | 'namespace' | 'project' | 'object-type' | 'action-type' | 'resource'
+export type FoundryPickerKind =
+  | 'profile'
+  | 'ontology'
+  | 'namespace'
+  | 'project'
+  | 'object-type'
+  | 'action-type'
+  | 'link-type'
+  | 'interface'
+  | 'automation'
+  | 'resource'
 
 export type FoundryPicker = {
   kind: FoundryPickerKind
-  /** The scope key a 'resource' picker writes. */
+  /** The scope key this picker writes: the 'resource', link-type, interface and automation pickers set it. */
   resourceKind?: FoundryResourceKind
   title: string
   isMulti: boolean
@@ -62,12 +75,11 @@ export type FdeSession = {
   branchRid: string
   branchName: string
   startedAt: string
-  /** Signatures of clean dry runs; an --apply must match one. */
-  plans: string[]
+  /** Writes this session ran while bound, newest last: what the handoff reports. */
   applied: { command: string; at: string }[]
-  /** The namespace in scope at /fde on: a write naming a resource outside it is refused. Null: no namespace check. */
+  /** The namespace in scope at /fde on: discovery stays in it and /namespace is locked until /fde end. */
   namespace: FoundryNamespace | null
-  /** The stack's namespaces at /fde on (empty without a namespace), to name them in refusals and to place Compass paths. */
+  /** The stack's namespaces at /fde on (empty without a namespace), to name them in the status and the handoff. */
   spaces: FoundryNamespace[]
 }
 
