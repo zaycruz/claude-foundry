@@ -53,6 +53,9 @@
 //      words as the orthanc lane.
 //  D11 The words the operator is told fall behind the words the guard reads, so
 //      a prompt that says "deletes ask" fires for a revoke and reads as a bug.
+//      Pinned for all four cues as well: the model is told the rule to predict
+//      what stops, and a cue left out of it predicts a run where the operator
+//      sees a dialog.
 //  D12 The ask, and the line the debug log keeps, do not say which of the four
 //      the guard read: a word in the command name, a flag that names what the
 //      write removes, an enum value that names it, or `--force`. After the
@@ -104,10 +107,22 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'data-health check replace', kind: 'mutation' },
   { path: 'data-health check-group update', kind: 'mutation' },
   { path: 'dataset branches create', kind: 'mutation' },
-  { path: 'dataset create', kind: 'mutation' },
+  { path: 'dataset create', kind: 'mutation', flags: [{ flag: '--parent-folder', takesValue: true }, { flag: '--apply', takesValue: false }] },
   { path: 'dataset files delete', kind: 'mutation' },
   { path: 'dataset schema set', kind: 'mutation' },
-  { path: 'dataset transactions start', kind: 'mutation' },
+  // The options and the accepted values Orthanc 0.7.11 declares for this command,
+  // measured from the release manifest (measured 2026-11-22): the value lane reads
+  // against them, so this fixture is the difference between a declared enum and a
+  // word the guard can only guess at.
+  {
+    path: 'dataset transactions start',
+    kind: 'mutation',
+    flags: [
+      { flag: '--branch', takesValue: true },
+      { flag: '--transaction-type', takesValue: true, values: ['APPEND', 'UPDATE', 'SNAPSHOT', 'DELETE'] },
+      { flag: '--apply', takesValue: false },
+    ],
+  },
   { path: 'dataset transactions abort', kind: 'mutation' },
   { path: 'dev-console scope remove', kind: 'mutation' },
   { path: 'devops draft abort', kind: 'mutation' },
@@ -387,7 +402,9 @@ test('D10: --force still asks, the ask reason names the command, and the MCP lan
   expect(ladderDecision('allow-edits', uninstalled!, approve).reason).toContain("destructive mutation 'marketplace installation uninstall'")
   // A Palantir MCP write is blocked either way; the words say whether it reads
   // as destructive too, and a name mixing a read verb with a destructive word
-  // is not let through as a read.
+  // is not let through as a read. At the base only `delete` and `remove` named a
+  // write here, so a tool named for any other act of the table answered 'read' and
+  // came back with no classification at all.
   const mcpDelete = classifyCall('mcp__palantir__delete_object', {}, MANIFEST, 'agent/x')
   const mcpUninstall = classifyCall('mcp__palantir__marketplace-uninstall', {}, MANIFEST, 'agent/x')
   expect([mcpDelete?.isDestructive, mcpUninstall?.isDestructive]).toEqual([true, true])
@@ -407,6 +424,10 @@ test('D11: the words the operator is told match the words the guard reads', asyn
   for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
     const guidance = modeGuidance(mode)
     for (const [, form] of DESTRUCTIVE_WORDS) expect({ mode, form, said: guidance.includes(form) }).toEqual({ mode, form, said: true })
+    // And all four cues, not three: the model reads this sentence to predict
+    // whether a call will stop, and a rule it is not told reads as a hang. The
+    // value cue went missing once the value lane was added, so it is pinned here.
+    for (const cue of ['name', 'flag', 'value', '--force']) expect({ mode, cue, said: guidance.includes(cue) }).toEqual({ mode, cue, said: true })
   }
 })
 
@@ -557,9 +578,11 @@ test('D12: the ask and the log name which of the four the guard read', async () 
   const both = classifyCall(CLI, { command: 'project remove-orgs', args: ['ri.compass.main.project.1', '--org', 'acme', '--force'] }, MANIFEST, 'agent/x')
   expect(both?.destructiveWhy).toBe('remove')
 
-  // A value that happens to start with a hyphen is read as a flag name: the guard
-  // cannot tell a value from a flag without Orthanc's argument shapes. The ask is
-  // the safe direction, and pinned here so the limit stays a known one.
+  // A value that happens to start with a hyphen is read as a flag name, and the
+  // shapes do not remove it: `--description` is no option of `dataset create`, so
+  // the guard has nothing to read the next word against, and Orthanc may take that
+  // word as the value or refuse it. The ask is the safe direction, pinned so the
+  // limit stays a known one, and D14 pins where a declared option changes it.
   const hyphenValue = classifyCall(CLI, { command: 'dataset create', args: ['people', '--description', '-remove the old rows'] }, MANIFEST, 'agent/x')
   expect(hyphenValue?.isDestructive).toBe(true)
 
@@ -581,14 +604,19 @@ test('D12: the ask and the log name which of the four the guard read', async () 
   expect(yoloMain.outcome).toBe('ask')
   expect(yoloMain.reason).toContain('It is also destructive (reset)')
 
-  // A value is read only where it names the act the way an enum is written. The
-  // same word lower case reads as a name and asks nothing (measured residual:
-  // Orthanc accepts `delete` too), and a word that is not one of the enum's
-  // values asks nothing either.
-  const lowerEnum = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--transaction-type', 'delete', '--apply'] }, MANIFEST, 'agent/x')
-  expect(lowerEnum?.isDestructive).toBe(false)
-  const appendEnum = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--transaction-type', 'APPEND', '--apply'] }, MANIFEST, 'agent/x')
-  expect(appendEnum?.isDestructive).toBe(false)
+  // A value the command declares is read whatever case it is written in, and a
+  // value outside the declaration is not: `--transaction-type` accepts APPEND,
+  // UPDATE, SNAPSHOT, DELETE, so both spellings of the erasing one ask and the
+  // default one does not.
+  for (const value of ['DELETE', 'delete', 'Delete']) {
+    const declared = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', value, '--apply'] }, MANIFEST, 'agent/x')
+    expect({ value, destructive: declared?.isDestructive }).toEqual({ value, destructive: true })
+    expect({ value, why: declared?.destructiveWhy }).toEqual({ value, why: '--transaction-type=DELETE' })
+  }
+  for (const value of ['APPEND', 'append', 'SNAPSHOT', 'keep-outputs']) {
+    const other = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', value] }, MANIFEST, 'agent/x')
+    expect({ value, destructive: other?.isDestructive }).toEqual({ value, destructive: false })
+  }
   // The cue names the flag and the value, both validated pieces, so the operator
   // can see which word asked and the log cannot be forged from the value.
   const enumAsk = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', 'DELETE'] }, MANIFEST, 'agent/x')

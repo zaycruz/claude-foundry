@@ -3,7 +3,7 @@
 // orthanc's own agent-manifest `kind`.
 
 /** One option of a manifest command, as Orthanc's agent-manifest lists it. */
-export type ManifestFlag = { flag: string; takesValue: boolean; default?: string }
+export type ManifestFlag = { flag: string; takesValue: boolean; default?: string; values?: string[] }
 export type ManifestCommand = {
   path: string
   kind?: string
@@ -211,10 +211,15 @@ export function classifyOrthancCommand(
  * except where it is an enum written in caps (`--transaction-type DELETE`), the
  * way Orthanc writes its enumerated values: `--mode keep-outputs`,
  * `--branch delete-me` and `alias remove delete` say nothing about what the
- * write erases. One limit: the guard cannot tell a value from a
- * flag without Orthanc's argument shapes, so an argument that starts with a
- * hyphen is read as a flag (`--description "-remove the old rows"` asks).
- * Reading too much costs a prompt; reading too little costs the ask.
+ * write erases, and an option value that names the act (destructiveValue). Orthanc
+ * declares the options of its writes in that manifest — 990 on 0.7.11, 573 of them
+ * with a value, 17 of them with the values they accept — so the value lane is read
+ * against the declaration where one exists. One over-read stays on purpose: a word
+ * that starts with a hyphen is read as an option even where the option before it
+ * takes a value (`--description "-remove the old rows"` asks). Orthanc may take that
+ * word as the value or refuse it, the guard cannot tell from argv alone, and the two
+ * answers cost different things: reading too much costs a prompt, reading too little
+ * costs the ask.
  *
  * `set`, `update`, `add`, `close`, `cancel`, `pause` and `restore` stay out:
  * they change or stop something that is still there, and the `auto` guard
@@ -301,71 +306,103 @@ function isDestructiveFlag(flag: string): boolean {
   return flag.startsWith('-') && !NON_DESTRUCTIVE_FLAGS.has(flag) && !flag.startsWith('--no-') && destructiveTermIn(flag) !== null
 }
 
-/** The flag whose name says what the write removes, or null: `--remove`,
- * `--remove-check`, `--remove-resource`, `--delete-project`,
- * `--delete-object-type`. */
-function destructiveFlag(args: readonly string[]): string | null {
-  return args.map(flagNameOf).find(isDestructiveFlag) ?? null
+/** What one option of this call claims, as Orthanc declared it: its flag name,
+ * the value it was given (null when it takes none), and the values it may take
+ * (empty when the manifest lists none). */
+type GivenFlag = { flag: string; value: string | null; values: readonly string[] }
+
+/** Every option the call gave, read against the shapes the manifest declares for
+ * this command. Orthanc's agent-manifest names the options of its writes — on
+ * v0.7.11, 990 of them, 573 with a value, 417 without, and 10 commands with no
+ * options at all — and `orthanc.ts` parses them into `ManifestCommand.flags`, so
+ * the guard does not have to guess whether a hyphen-led word is a flag or someone's
+ * value. `--flag=v` and `--flag v` are one call. Two readings survive as a guess,
+ * both on the safe side: an option the manifest does not name is still read as an
+ * option, and a word after a flag whose shape is unknown is read as its value, so a
+ * missing or stale pin asks more rather than less. */
+function givenFlags(args: readonly string[], shapes: ReadonlyMap<string, ManifestFlag>): GivenFlag[] {
+  const given: GivenFlag[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const text = unquote(args[index]!).trim()
+    if (!text.startsWith('-')) continue
+    const equals = text.indexOf('=')
+    const flag = flagNameOf(text)
+    const shape = shapes.get(flag)
+    let value: string | null = null
+    if (equals > 0) value = unquote(text.slice(equals + 1)).trim()
+    else if (shape ? shape.takesValue : args[index + 1] !== undefined && !unquote(args[index + 1]!).trim().startsWith('-')) {
+      value = unquote(args[index + 1] ?? '').trim()
+      // `-f` shortening swallows its value (`-fvalue`), and a flag with no shape
+      // and no next word owns nothing.
+      if (value.startsWith('-') || value === flag) value = ''
+      else index += 1
+    }
+    given.push({ flag, value, values: shape?.values ?? [] })
+  }
+  return given
 }
 
-/** An enum value that names the act. Orthanc spells its enumerated values in
- * caps, and one of them erases data on a command whose name says nothing:
- * `dataset transactions start --transaction-type DELETE` (possible values
- * APPEND, UPDATE, SNAPSHOT, DELETE, no `operator_approval` on the pinned entry)
- * deletes a dataset's rows with the word sitting one position past the flag the
- * old rule stopped reading. A value is read only where a flag owns it, only when
- * it is written in caps, and only when it equals a word of the table exactly —
- * that is how an enum is written and not how a name is written, so `--branch
- * abort-x`, `--job revert`, `--mode keep-outputs` and a dataset called `remove`
- * stay no claim. What is shown is built from the validated pieces, so no model
- * text reaches the dialog through this lane. Residual, measured: the same enum
- * written in lower case (`--transaction-type delete`) reads as a name and asks
- * nothing, and Orthanc accepts it. */
-function destructiveValue(args: readonly string[]): string | null {
-  for (const [flag, value] of ownedFlagValues(args)) {
-    if (/^[A-Z]+$/.test(value) && TERMS.has(value.toLowerCase())) return `${displayTrigger(flag)}=${value}`
+/** The flag whose name says what the write removes: `--remove`, `--remove-check`,
+ * `--remove-resource`, `--delete-project`, `--delete-object-type`. */
+function destructiveFlag(given: readonly GivenFlag[]): string | null {
+  return given.find(entry => isDestructiveFlag(entry.flag))?.flag ?? null
+}
+
+/** An option value that names the act. Two spellings count, and the pinned surface
+ * carries one of each.
+ *
+ * A value equal to one of the values the manifest lists for that option, when that
+ * value is a word of the table: `dataset transactions start --transaction-type
+ * DELETE` (its options are APPEND, UPDATE, SNAPSHOT, DELETE; the pinned entry is a
+ * plain `mutation` with no `operator_approval`), and the same enum written in lower
+ * case, which `marketplace installation uninstall --mode delete` really is — so
+ * case is not what decides here, the declaration is. Without it, the word could only
+ * be guessed from how a value looks, and a name is written every way there is.
+ *
+ * A value written in all caps that equals a word of the table, where the option
+ * declares no values of its own: that is how Orthanc spells an enumerated value, and
+ * it is not how anyone spells a name, so `--branch delete-me`, a build whose `--job`
+ * is called `revert`, and a dataset called `remove` stay no claim. A caps name a
+ * person chose (`--branch DELETE`) does ask, which is the safe side of that guess.
+ *
+ * The cue is built from the declared spelling and the flag, so no model-written text
+ * reaches the dialog through this lane. What is left unread: a word in a positional
+ * (a dataset RID, a schedule id) or in a value Orthanc does not enumerate, which is
+ * 973 of its 990 options. A caller who erases through such a value is judged by the
+ * command name, the `--force` rule, or the `auto` guard. */
+function destructiveValue(given: readonly GivenFlag[]): string | null {
+  for (const { flag, value, values } of given) {
+    if (value === null || value === '') continue
+    const word = value.toLowerCase()
+    if (!TERMS.has(word)) continue
+    const declared = values.some(allowed => allowed.toLowerCase() === word)
+    if (declared || /^[A-Z]+$/.test(value)) return `${displayTrigger(flag)}=${values.find(allowed => allowed.toLowerCase() === word) ?? value}`
   }
   return null
 }
 
-/** Each argument a flag owns, as `[flag, value]`: the value after a flag, or the
- * right side of `--flag=value`. An argument no flag owns (a positional, the first
- * word) carries nothing, because a bare word is what a caller names something.
- * Different from `flagValues`, which answers the same question for one known
- * list of flags. */
-function ownedFlagValues(args: readonly string[]): [string, string][] {
-  const pairs: [string, string][] = []
-  args.forEach((arg, index) => {
-    const text = unquote(arg).trim()
-    const equals = text.indexOf('=')
-    if (equals > 0 && text.startsWith('-')) {
-      // The value is unquoted on its own: `--flag='VALUE'` quotes the value, not
-      // the whole argument, and an unquote of the whole string leaves the quotes on.
-      pairs.push([text.slice(0, equals), unquote(text.slice(equals + 1))])
-      return
-    }
-    if (index > 0 && !text.startsWith('-')) {
-      const owner = unquote(args[index - 1]!).trim()
-      if (owner.startsWith('-') && !owner.includes('=')) pairs.push([owner, text])
-    }
-  })
-  return pairs
+/** The declared shapes of one command's options, by flag name. */
+function flagShapes(entry: ManifestCommand | undefined): Map<string, ManifestFlag> {
+  const shapes = new Map<string, ManifestFlag>()
+  for (const shape of entry?.flags ?? []) shapes.set(shape.flag.toLowerCase(), shape)
+  return shapes
 }
 
 /** Why a write reads as destructive, in the words the operator is told: a word
- * in the command name, a flag that names what the write removes, an enum value
+ * in the command name, a flag that names what the write removes, an option value
  * that names it, or `--force`. The answer goes into the approval dialog, the
  * debug log and the trace, and an argument is text a model wrote, so a flag is
  * shown as written only when it is spelled like a flag. Anything else is JSON
  * escaped and cut — the same contract `operatorApprovalQuestion` keeps, where a
  * newline in an arg would otherwise forge lines in the question a human
  * answers. */
-function destructiveTrigger(command: string, args: readonly string[]): string | null {
+function destructiveTrigger(command: string, args: readonly string[], entry: ManifestCommand | undefined): string | null {
   const word = destructiveTermIn(command)
   if (word !== null) return word
-  const flag = destructiveFlag(args)
+  const given = givenFlags(args, flagShapes(entry))
+  const flag = destructiveFlag(given)
   if (flag !== null) return displayTrigger(flag)
-  const value = destructiveValue(args)
+  const value = destructiveValue(given)
   if (value !== null) return value
   return argsHaveForce(command, args) ? '--force' : null
 }
@@ -793,7 +830,7 @@ function orthancClassification(
         : null
     const approval = operatorApprovalQuestion(command, args, manifest)
     const approvalOnBranch = approval !== null && approvalOnWorkBranch(command, args, manifest)
-    const trigger = destructiveTrigger(command, args)
+    const trigger = destructiveTrigger(command, args, manifest.find(entry => entry.path === command))
     return {
       ...base,
       kind: 'mutation',
@@ -1421,6 +1458,8 @@ export function classifyCall(
     const inner = tool.replace(PALANTIR_MCP, '')
     const mcpWord = destructiveTermIn(inner)
     if (classifyMcpIntent(inner) === 'read') return null
+    // No `destructiveWhy` here: this lane never asks, it refuses, and the refusal
+    // below is the whole answer the operator and the model get.
     return {
       command: null,
       kind: 'mutation',
@@ -1428,10 +1467,13 @@ export function classifyCall(
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
       // A Palantir MCP write is blocked either way (Orthanc is the only write
-      // path); the words say whether it also reads as destructive, in the same
-      // words the orthanc lane reads.
+      // path). The word is read here so a tool named for one of the 18 acts is
+      // judged as a write: at the base only `delete` and `remove` were, so
+      // `mcp__palantir__purge_resources` answered 'read' and was let through with
+      // no classification at all. The cost is the other direction — a read whose
+      // name carries such a word is refused and told to use orthanc_cli — which
+      // costs a turn, not a row, and is pinned in destructive.test.ts D10.
       isDestructive: mcpWord !== null,
-      ...(mcpWord === null ? {} : { destructiveWhy: mcpWord }),
       error: `${tool} writes to Foundry outside Orthanc, with no branch. Orthanc is the only write path: use orthanc_cli with --branch.`,
     }
   }
@@ -1510,13 +1552,14 @@ export function modeGuidance(mode: ApprovalMode): string {
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
     'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
     (mode === 'yolo'
-      ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()}) and a --force write run at once, ` +
+      ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
         'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
+        'when a value a flag takes names such an act among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`), ' +
         'or when it is given --force. ' +
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
