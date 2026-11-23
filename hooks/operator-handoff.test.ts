@@ -2,12 +2,10 @@
 // agent is whoever runs them.
 //
 // Measured on the sha-256-verified orthanc v0.7.11 binary (an isolated HOME, one
-// profile whose token is `synthetic-not-a-real-token-9f3b`, no network):
-//
-//   $ printf 'protocol=https\nhost=probe.example.palantirfoundry.com\n\n' \
-//       | orthanc --agent --non-interactive repository git-credential get
-//   username=orthanc
-//   password=synthetic-not-a-real-token-9f3b
+// profile whose token was a synthetic probe value, no network). Asked the way git
+// asks it, the command answered with two lines: `username=orthanc` and a
+// `password=` line holding the stored profile token in clear text. The probe value
+// is kept out of this file on purpose: a token does not belong in a test.
 //
 // `repository git-credential` is `kind: read-only` in the agent manifest, so the
 // guard let it through as a read: no ladder, no ask, in every approval mode, and
