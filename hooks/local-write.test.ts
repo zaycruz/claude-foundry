@@ -70,6 +70,8 @@
 //  LW17 modeGuidance, the sentence the model is told every turn, names the two
 //      commands in all four modes: a rule the model is not told reads as a hang
 //      (hooks/destructive.test.ts D11).
+//  LW19 A long argv is cut, and JSON escaping keeps an argument from starting a
+//      line of its own in the question the operator reads.
 //  LW18 The yolo ask for a `--branch main --force` clone does not tell the agent
 //      to pass a work branch: that flag is a Code Repository branch, and a
 //      branch changes nothing about what the call deletes.
@@ -224,6 +226,18 @@ test('LW15: the question names the call the operator is approving', () => {
   expect({ reason }).toEqual({ reason: expect.stringContaining('./some/deep/dir') })
   const installed = reasonOf(CLI, { command: 'dev-console sdk install', args: [APP, '--target', './app'] }, 'ask-always')
   expect({ installed }).toEqual({ installed: expect.stringContaining(APP) })
+})
+
+test('LW19: a long argv is cut, and an argument cannot forge a line of the question', () => {
+  const long = ['--definition', `x${'y'.repeat(700)}`, '--force']
+  const reason = reasonOf(CLI, { command: 'repository clone', args: [REPO, './repo', ...long] }, 'auto')
+  expect({ said: reason.includes('more characters)') }).toEqual({ said: true })
+  expect({ len: reason.length < 2000 }).toEqual({ len: true })
+  const forged = reasonOf(CLI, { command: 'repository clone', args: ['./repo', '--force', '--definition', 'a\nb: c runs in yolo'], }, 'auto')
+  // Newlines and quotes are JSON-escaped, so the argument cannot start a line of
+  // its own in the question the operator reads.
+  expect({ asked: forged.includes('\nb:') }).toEqual({ asked: false })
+  expect({ said: forged.includes('"\\nb:') || forged.includes('\\nb:') }).toEqual({ said: true })
 })
 
 test('LW17: every mode tells the model these two commands are judged as writes', () => {
