@@ -1039,7 +1039,16 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 }
 
 /** One simple command: its words; fed: a heredoc or here-string feeds its stdin; split: it ended at an unquoted $( or backquote. */
-export type Segment = { words: string[]; fed: boolean; split: boolean }
+// The operator that ended a segment: 'fail' for `||`, the next command runs only
+// when this one failed - which is what a wait that timed out does, so both are
+// still paid for; 'arm' for a `case` arm's `;;` and the pattern that opens the
+// next, the arms run instead of each other and only one is ever chosen; 'pipe'
+// for `|`, the next command runs alongside this one; 'bg' for `&`, this command
+// is left running and the line answers at once.
+// Absent: the next command runs after this one (`&&`, `;`, a newline).
+export type ShellJoin = 'fail' | 'arm' | 'pipe' | 'bg'
+
+export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin }
 
 // Code that can start another process, per interpreter.
 const SPAWNS: [RegExp, RegExp][] = [
@@ -1086,10 +1095,23 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     word = ''
     quoted = false
   }
-  const endSegment = (split = false) => {
+  // `split` marks a segment whose command continues inside a substitution, so
+  // its words are not the whole call; `join` says how the next command relates
+  // to this one ('alt' for ||, 'pipe' for |, 'bg' for a job left running).
+  // After `;;` the next words are the next `case` arm's pattern, up to its `)`:
+  // they run nothing, and the arm they name runs instead of the arm before it.
+  let armPattern = false
+  const endSegment = (operator: '\n' | '$(' | '`' | '<(' | '&&' | '||' | ';;' | '|' | '&' | '' = '') => {
     endWord()
     target = null
-    if (words.length > 0) segments.push({ words, fed: false, split })
+    // A `)` closing a `case` arm's pattern is the arm's own separator: the words
+    // before it name a match, they do not run, and the arm is an alternative to
+    // the arm before it.
+    const arm = operator === ')' && armPattern
+    const join: ShellJoin | undefined =
+      operator === '||' ? 'fail' : operator === ';;' || arm ? 'arm' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
+    armPattern = operator === ';;' ? true : operator === ')' ? false : words.length > 0 ? false : armPattern
+    if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join })
     words = []
   }
   // At a newline: skip the bodies of the heredocs opened on the line that ends here.
@@ -1133,11 +1155,11 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
       quoted = true
     } else if (char === '\\' && index + 1 < command.length) word += command[++index]
     else if (char === '\n') {
-      endSegment()
+      endSegment('\n')
       index = skipHeredocs(index)
     } else if (/\s/.test(char)) endWord()
     else if (char === '$' && command[index + 1] === '(') {
-      endSegment(true)
+      endSegment('$(')
       index += 1
     } else if (char === '<' || char === '>' || (char === '&' && command[index + 1] === '>')) {
       // A file descriptor glued to the redirect (`2>`, `0<<`) is not a word.
@@ -1157,7 +1179,16 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
         if (tabs) index += 1
         target = tabs ? 'heredoc-tabs' : 'heredoc'
       } else target = 'file'
-    } else if (SHELL_OPERATORS.includes(char)) endSegment(char === '`')
+    } else if (SHELL_OPERATORS.includes(char)) {
+      // `&&`, `||` and `;;` are one operator each: the first runs the two
+      // commands in sequence, the second runs the right one only when the left
+      // one failed (a timed-out wait does fail, so both are still paid for), and
+      // `;;` closes a `case` arm, so only one arm ever runs.
+      if ((char === '&' || char === '|' || char === ';') && command[index + 1] === char) {
+        index += 1
+        endSegment(char === '&' ? '&&' : char === '|' ? '||' : ';;')
+      } else endSegment(char === '`' || char === ')' || char === '|' || char === '&' ? char : '')
+    }
     else word += char
   }
   endSegment()
@@ -1381,6 +1412,127 @@ function orthancShellCall(
   return { path: leading.join(' ').toLowerCase(), known: false, help }
 }
 
+// One Orthanc call a shell line runs, in the order the shell runs them.
+type ShellCall =
+  // A segment that runs Orthanc where the guard cannot read it (a variable, eval
+  // or interpreter code): what it runs is unknown, so neither the ladder nor a
+  // timer has anything to judge.
+  | { hides: true }
+  | {
+      hides: false
+      /** The manifest entry the words name; null when they name none. */
+      entry: ManifestCommand | null
+      /** Every word after the binary: the positionals and the flags, what cliWait reads. */
+      args: string[]
+      path: string
+      known: boolean
+      help: boolean
+      /** The segment ended at a substitution: the call continues inside it. */
+      split: boolean
+      /** How many times the shell runs this command: over 1 inside a counted loop. */
+      times: number
+      /** How this command relates to the one before it, or 'unknown' when its
+       * arguments continue inside a substitution the guard cannot read. */
+      join: ShellCallJoin
+    }
+
+// Where a command sits against the one before it, for the timer that has to hold
+// them all (hooks/process.ts coverShellWaits): 'seq' and 'fail' both pay for the
+// wait, 'arm' and 'pipe' stand in for one another, 'bg' is not waited for, and
+// 'unknown' is a call whose arguments the guard could not read.
+export type ShellCallJoin = 'seq' | 'fail' | 'arm' | 'pipe' | 'bg' | 'unknown'
+
+// `if … then A; else B; fi` runs one arm: the segment that opens with `else` or
+// `elif` is an alternative to what came before it.
+function joinOf(segment: Segment, index: number, segments: readonly Segment[]): ShellCallJoin {
+  if (segment.split) return 'unknown'
+  if (segment.join === 'bg') return 'bg'
+  const before = index > 0 ? segments[index - 1]! : undefined
+  if (before?.split) return 'unknown'
+  return before?.join ?? 'seq'
+}
+
+const LOOP_HEADS = new Set(['for', 'while', 'until', 'select'])
+// A `for x in a b c` list the guard can count; `$(ls)`, `*.json` and `$@` it cannot.
+const PLAIN_WORD = /^[\w.@:+,-]+$/
+
+/**
+ * How many times each segment's command runs: 1 outside a loop, and inside a
+ * `for … in a b c` body, the count of its literal list (nested loops multiply).
+ * A `while`/`until` body, and a list built from a substitution or a glob, counts
+ * once: the guard cannot say how often it runs, and a wait that runs past the
+ * raised timeout is stopped by the host exactly as it was before this cover.
+ */
+function loopCounts(segments: readonly Segment[]): number[] {
+  const open: number[] = []
+  const counts: number[] = []
+  for (const { words } of segments) {
+    const head = words.find(word => !ASSIGNMENT.test(word)) ?? ''
+    if (LOOP_HEADS.has(basename(head))) {
+      const at = words.indexOf('in')
+      const list = at < 0 ? [] : words.slice(at + 1).filter(word => word !== 'do')
+      open.push(list.length > 0 && list.every(word => PLAIN_WORD.test(word)) ? list.length : 1)
+      counts.push(1)
+      continue
+    }
+    // Only a `done` in command position closes a body: `checks wait rid done` is
+    // an argument, and treating it as the terminator would drop the multiplier.
+    const closes = basename(words[0]) === 'done'
+    counts.push(closes ? 1 : open.reduce((product, count) => product * count, 1))
+    if (closes) open.splice(-1, 1)
+  }
+  return counts
+}
+
+/** The Orthanc calls a Bash command runs, unreadable ones marked where they sit. */
+function shellCalls(command: string, manifest: readonly ManifestCommand[]): ShellCall[] {
+  const segments = commandSegments(command)
+  // The first words of the manifest paths: what can follow `orthanc` as a call.
+  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
+  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
+  const assignments = new Map<string, string[]>()
+  for (const word of segments.flatMap(segment => segment.words)) {
+    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
+    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
+  }
+  const calls: ShellCall[] = []
+  const counts = loopCounts(segments)
+  segments.forEach((segment, index) => {
+    const { words } = segment
+    if (hidesOrthanc(segment, command, assignments, groups)) {
+      calls.push({ hides: true })
+      return
+    }
+    const start = orthancStart(segment, groups)
+    if (start < 0) return
+    const call = orthancShellCall(words, start, manifest)
+    calls.push({
+      hides: false,
+      entry: manifest.find(entry => entry.path === call.path) ?? null,
+      args: words.slice(start + 1),
+      ...call,
+      split: segment.split,
+      times: counts[index] ?? 1,
+      join: joinOf(segment, index, segments),
+    })
+  })
+  return calls
+}
+
+/**
+ * What the Orthanc calls a Bash command runs, as the manifest describes them,
+ * with the words after the binary and how often the shell runs each. The Bash
+ * tool holds its own timer over them;
+ * register.tsx turns these into waits and covers that timer (hooks/process.ts).
+ * A command with no readable Orthanc call, or one the guard cannot read, brings
+ * nothing: the guard answers those before the timer is read.
+ */
+export function shellOrthancCalls(command: string, manifest: readonly ManifestCommand[]): { command: ManifestCommand; args: string[]; times: number; join: ShellCallJoin }[] {
+  return shellCalls(command, manifest).flatMap(call =>
+    call.hides || !call.known || call.help || call.entry === null ? [] : [{ command: call.entry, args: call.args, times: call.times, join: call.join }],
+  )
+}
+
 // Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
 // where the branch rule and the ladder see its arguments as data, not shell.
 function shellClassification(
@@ -1397,24 +1549,11 @@ function shellClassification(
     isDestructive: false,
     error,
   })
-  const segments = commandSegments(command)
-  // The first words of the manifest paths: what can follow `orthanc` as a call.
-  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
-  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
-  const assignments = new Map<string, string[]>()
-  for (const word of segments.flatMap(segment => segment.words)) {
-    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
-    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
-  }
-  for (const segment of segments) {
-    const { words } = segment
-    if (hidesOrthanc(segment, command, assignments, groups)) {
+  for (const call of shellCalls(command, manifest)) {
+    if (call.hides) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    const start = orthancStart(segment, groups)
-    if (start < 0) continue
-    const call = orthancShellCall(words, start, manifest)
-    if (call.path === '' && !call.help && segment.split) {
+    if (call.path === '' && !call.help && call.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
     if (call.help || call.path === '' || call.path === 'repository clone') continue
@@ -1423,10 +1562,11 @@ function shellClassification(
     }
     // Before the read short-circuit, and with no second gate behind it: Bash is
     // the one lane where a secret could still be piped in.
-    if (manifest.some(entry => entry.path === call.path && isCredentialCommand(entry)))
+    if (call.entry !== null && isCredentialCommand(call.entry))
       return refuse(call.path, `'orthanc ${call.path}' needs a credential the operator types, so neither Bash nor orthanc_cli runs it. ${CREDENTIAL_HINT}`)
-    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
-    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
+    // The manifest entry this call names, read once: the wait timer below
+    // (shellOrthancCalls) judges the same entry the ladder judged here.
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && call.entry?.operatorApproval === undefined) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null

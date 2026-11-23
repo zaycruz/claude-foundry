@@ -15,7 +15,18 @@ says so instead of falling back to REST.
   it starts and before any approval prompt, with the largest `--timeout` that
   fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
   `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
-  says `reason: cancelled`; a stop by the timer says `reason: timeout`.
+  says `reason: cancelled`; a stop by the timer says `reason: timeout`. The same
+  wait typed into `Bash` gets that budget too: the call's `timeout` is raised to
+  what its own flags ask for — the waits of the Orthanc calls in one command,
+  added up when the shell can run them one after another (`a && b`, `;`, a counted
+  `for` loop, and `a || b`, because a wait that times out exits 1 and the retry
+  runs), the larger of the two only where they genuinely cannot both happen (a
+  pipeline, the arms of a `case`), nothing for a job left running by `&` — up to the
+  shell's own limits (`BASH_DEFAULT_TIMEOUT_MS` 120 s, `BASH_MAX_TIMEOUT_MS` 600 s
+  by default). A line that cannot fit is refused before it starts and given
+  `orthanc_cli`, a `--timeout` that fits, and `run_in_background: true`; a line
+  the guard cannot price (arguments inside a substitution, a `--timeout` holding a
+  variable) is left exactly as it came.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
@@ -131,17 +142,27 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/onboard`, `/mcp-status` | Check orthanc, profiles, stack, credentials, context |
 | `/auth [profile]` | How to store credentials, and whether they work |
 | `/profile`, `/ontology`, `/namespace`, `/project` | Choose the stack, ontology, namespace, projects |
-| `/object-type`, `/action-type` | Ontology types in scope |
-| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
+| `/object-type`, `/action-type`, `/link-type`, `/interface` | Ontology types in scope |
+| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` `/automation` | Compass resources and automations in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
 | `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt any open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
-filter, and `clear`. `/link-type`, `/interface`, `/egress-policy`,
-`/certificate` and `/automation` wait on Orthanc list commands and say so; the
-mod never falls back to Foundry REST.
+filter, and `clear`. `/egress-policy` and `/certificate` wait on Orthanc list
+commands and say so, naming the bead; the mod never falls back to Foundry REST.
+`/link-type` and `/interface` run `ontology link-type-list` and `ontology
+interface-list` on the ontology in scope. While FDE mode is bound to that
+ontology they read its branch (`--branch`, the way `ontology definition` reads a
+branch), so an FDE session picks the link types and interfaces of its own branch,
+and the listing names that branch; otherwise they read the main branch.
+The pick shows what each link joins and which object types implement each
+interface, and names the RID of every pick whose name another pick shares.
+`/automation` runs `automate list` under the selected projects, or under the
+namespace's, or every space when neither is picked, and passes its argument to
+`--name`. When one of those listings fails, the result says how many did, and a
+short walk is never picked from on its own.
 
 `/namespace` scopes the context to one Compass namespace (orthanc's space):
 `/project` and the Compass pickers list only its projects, `/search` stays under
@@ -215,7 +236,9 @@ RID, and an open proposal on it is named when it is adopted. While bound:
 leaves the branch open: merging or closing it is the operator's call. If a
 session ends while bound, the next one offers `/fde resume`. The mode only
 adds checks. The branch rule and the approval ladder (with its destructive
-rule, outside `yolo`) judge every bound call as before.
+rule, outside `yolo`) judge every bound call as before. It changes context in
+one place: the link types and interfaces picked while a binding was in scope go
+with it, when `/fde end` ends it or another binding replaces it.
 
 ## Operator rules and auto mode
 
@@ -298,8 +321,12 @@ against your own stack, record real Orthanc output and replay it:
 
 ```
 FOUNDRY_E2E_PROFILE=<profile> FOUNDRY_E2E_PROJECT=<project rid> \
-FOUNDRY_E2E_ONTOLOGY=<ontology rid> ./scripts/record.sh
+FOUNDRY_E2E_ONTOLOGY=<ontology rid> FOUNDRY_E2E_SPACE=<namespace rid> \
+FOUNDRY_E2E_BRANCH=<open global branch rid on that ontology> ./scripts/record.sh
 ```
+
+`FOUNDRY_E2E_SPACE` is required; `FOUNDRY_E2E_BRANCH` is optional and records the
+branch-qualified link-type and interface reads FDE mode sends.
 
 That writes `hooks/fixtures.local.ts`, which `hooks/e2e.local.test.ts` replays.
 Both stay out of git: they hold your stack's data.
