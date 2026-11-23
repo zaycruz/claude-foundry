@@ -152,6 +152,11 @@ function harness(on: On, mode: (typeof MODES)[number] = 'yolo', commands: readon
 type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 const call = ($: Engine, command: string, args: string[] = []) =>
   $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string; result?: unknown }>
+// zay, 2026-11-20: "the default fde mode should be able to do whatever it wants on a
+// branch and raise the proposal and merge the proposal, just nothing direct against
+// main or master". A promotion lands through a proposal, so in yolo it runs with no
+// ask (yolo.test.ts Y19); only a direct write to main or master is held.
+const PROMOTION_PATHS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'global-branch deploy', 'repository pull-request merge'])
 const refusedAsPromotion = (reply: { deny?: string }, asked: number) => asked === 0 && /promotes work .*The operator does it/.test(reply.deny ?? '')
 // The guard's own refusals before any question: no branch where one is needed,
 // or a release tag whose call does not show what the operator would approve.
@@ -186,6 +191,10 @@ test('S4: in yolo, every `always` marker of the release snapshot asks (or is ref
       const before = h.asked.length
       const reply = await call($, entry.path, markedCall(entry, branch))
       const asked = h.asked.length - before
+      if (PROMOTION_PATHS.has(entry.path)) {
+        expect({ path: entry.path, branch, asked, denied: typeof reply.deny === 'string' }).toEqual({ path: entry.path, branch, asked: 0, denied: false })
+        continue
+      }
       // Asked once, naming the command; or refused before any question as a
       // promotion the operator does (Y19): both keep the write from orthanc.
       const outcome = asked === 1 && h.asked.at(-1)!.includes(`'${entry.path}'`) ? 'asked' : refusedAsPromotion(reply, asked) ? 'refused' : `asked ${asked}`
@@ -198,6 +207,7 @@ test('S4: in yolo, every `always` marker of the release snapshot asks (or is ref
       outcomes.push(outcome)
       expect(ran(h, entry.path)).toEqual([])
     }
+    if (PROMOTION_PATHS.has(entry.path)) expect(ran(h, entry.path).length).toBe(2)
   }
   // Most ask; a refusal is the exception, not the way the markers pass.
   expect(outcomes.filter(outcome => outcome === 'asked').length > outcomes.length / 2).toBe(true)
@@ -211,21 +221,26 @@ test('S4: in yolo, a work-branch marker of the release snapshot runs on a work b
   for (const entry of scoped) {
     const before = h.asked.length
     const work = await call($, entry.path, markedCall(entry, 'work'))
-    // A promotion (proposal approve, …) is the operator's even on a work branch (Y19).
-    const promotion = refusedAsPromotion(work, h.asked.length - before)
-    expect({ path: entry.path, deny: promotion ? undefined : work.deny, asked: h.asked.length - before }).toEqual({ path: entry.path, deny: undefined, asked: 0 })
+    // A promotion (proposal approve, …) runs in yolo with no ask, on a work branch or not (Y19).
+    const promotion = PROMOTION_PATHS.has(entry.path)
+    expect({ path: entry.path, deny: work.deny, asked: h.asked.length - before }).toEqual({ path: entry.path, deny: undefined, asked: 0 })
     h.answer = 'Decline'
     // Aimed at main: by name it asks (declined here); with no --branch at all,
     // a write the guard knows needs a branch is refused before any question.
-    for (const target of readApprovalScope(entry.operator_approval_scope)?.kind === 'flag' ? (['main', 'none'] as const) : (['main'] as const)) {
+    const targets = readApprovalScope(entry.operator_approval_scope)?.kind === 'flag' ? (['main', 'none'] as const) : (['main'] as const)
+    for (const target of targets) {
       const asked = h.asked.length
       const main = await call($, entry.path, markedCall(entry, target))
-      const outcome = promotion ? 'promotion' : h.asked.length - asked === 1 ? 'asked' : refusedBeforeAsking(main, h.asked.length - asked) ? 'refused' : 'neither'
+      if (promotion) {
+        expect({ path: entry.path, target, denied: typeof main.deny === 'string', asked: h.asked.length - asked }).toEqual({ path: entry.path, target, denied: false, asked: 0 })
+        continue
+      }
+      const outcome = h.asked.length - asked === 1 ? 'asked' : refusedBeforeAsking(main, h.asked.length - asked) ? 'refused' : 'neither'
       expect({ path: entry.path, target, denied: typeof main.deny === 'string', stopped: outcome !== 'neither' }).toEqual({ path: entry.path, target, denied: true, stopped: true })
       outcomes.push(outcome)
     }
     h.answer = 'Approve'
-    expect(ran(h, entry.path).length).toBe(promotion ? 0 : 1)
+    expect(ran(h, entry.path).length).toBe(promotion ? 1 + targets.length : 1)
   }
   // Most writes aimed at main ask; a refusal is the exception, not the way they pass.
   expect(outcomes.filter(outcome => outcome === 'asked').length > outcomes.length / 2).toBe(true)
