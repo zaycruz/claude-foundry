@@ -89,7 +89,7 @@ import {
   withStoppedHint,
 } from './orthanc'
 import { type BinaryIdentity, binaryIdentity, type LoadedManifest, ManifestCache, named } from './manifest'
-import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
+import { PROCESS_RUN_MAX_MS, coverShellWaits, type ProcessOutput, readToExit, shellTimer, shellWaitDenial } from './process'
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -112,6 +112,7 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
+  shellOrthancCalls,
   branchesIn,
   STORED_BRANCH_RUNS,
   storedBranchReads,
@@ -1849,8 +1850,45 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
     if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
   }
+  // The wait budget above belongs to orthanc_cli. Bash holds a timer of its own
+  // over whatever Orthanc it runs, and the host moves a command that passes it
+  // to the background, where nobody reads its answer: give the call the time its
+  // own flags ask for (every Orthanc call in the line, one after another), and
+  // where no Bash timeout holds that long, refuse while the answer can still
+  // name the tool that fits (claude-foundry #19).
+  let call: Args<'tool.call'> = e
+  let raisedTo: number | null = null
+  if (tool === 'Bash' && typeof input.command === 'string' && input.run_in_background !== true) {
+    const timer = shellTimer(input.timeout, await $.env.get('BASH_DEFAULT_TIMEOUT_MS'), await $.env.get('BASH_MAX_TIMEOUT_MS'))
+    const waits = shellOrthancCalls(input.command, manifest).map(entry => ({ wait: cliWait(entry.command, entry.args), times: entry.times, join: entry.join }))
+    const cover = coverShellWaits(waits, timer)
+    if (cover.kind === 'over') {
+      note.foundry = true
+      note.outcome = 'block'
+      note.reason = 'bash-wait-over-timer'
+      note.command = cover.total.longest.path
+      return { deny: shellWaitDenial(cover.total, cover.timer) }
+    }
+    if (cover.kind === 'raise') {
+      note.foundry = true
+      note.outcome = 'allow'
+      note.reason = 'bash-wait-raised'
+      note.command = cover.total.longest.path
+      raisedTo = cover.timeoutMs
+      call = { ...e, timeout: cover.timeoutMs }
+    }
+  }
   executed = true
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
+  const ran =
+    tool === ORTHANC_CLI || tool === ORTHANC_HELP
+      ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out))
+      : await next(call)
+  // A timeout the model did not ask for is said, not slipped in quietly: the
+  // result it reads carries the number the plugin handed the host.
+  const out =
+    raisedTo === null
+      ? ran
+      : { ...ran, context: [...(Array.isArray(ran.context) ? ran.context : []), `foundry: this Bash call ran with a ${raisedTo / 1000} s timeout, the wait its Orthanc calls ask for.`] }
   if (plan !== null && !failed) {
     const done = plan
     let latest: FdeSession | null = null
@@ -1862,7 +1900,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     const rid = /ri\.branch\.[^"\s,}]+/.exec(text)?.[0]
     if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, rid ?? classification.proposedName ?? null)
   }
-  return ran
+  return out
   } finally {
     if (plan?.isApply && (!executed || notRun)) {
       const signature = plan.signature

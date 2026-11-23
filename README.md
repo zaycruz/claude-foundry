@@ -15,7 +15,18 @@ says so instead of falling back to REST.
   it starts and before any approval prompt, with the largest `--timeout` that
   fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
   `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
-  says `reason: cancelled`; a stop by the timer says `reason: timeout`.
+  says `reason: cancelled`; a stop by the timer says `reason: timeout`. The same
+  wait typed into `Bash` gets that budget too: the call's `timeout` is raised to
+  what its own flags ask for — the waits of the Orthanc calls in one command,
+  added up when the shell can run them one after another (`a && b`, `;`, a counted
+  `for` loop, and `a || b`, because a wait that times out exits 1 and the retry
+  runs), the larger of the two only where they genuinely cannot both happen (a
+  pipeline, the arms of a `case`), nothing for a job left running by `&` — up to the
+  shell's own limits (`BASH_DEFAULT_TIMEOUT_MS` 120 s, `BASH_MAX_TIMEOUT_MS` 600 s
+  by default). A line that cannot fit is refused before it starts and given
+  `orthanc_cli`, a `--timeout` that fits, and `run_in_background: true`; a line
+  the guard cannot price (arguments inside a substitution, a `--timeout` holding a
+  variable) is left exactly as it came.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
