@@ -409,7 +409,7 @@ export type GateClassification = {
   releaseOnWorkBranch?: true
   /** The question to put to the operator for a write the manifest marks operator_approval. */
   operatorApproval?: string
-  /** True when operator_approval_scope proves the write lands on one global work branch: yolo skips the ask. */
+  /** True when operator_approval_scope proves the write lands on one work branch, never main: yolo skips the ask. */
   operatorApprovalOnWorkBranch?: true
   /** Set when the manifest calls the command a read and it is not one: what the
    * call does to this machine, in the sentence the operator and the agent read. */
@@ -2744,7 +2744,7 @@ export function modeGuidance(mode: ApprovalMode): string {
       ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
         'and the loop guard is off. A promotion runs with no ask, and so does an AI FDE run (ai-fde run --apply). A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
-        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
+        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on a work branch (a global branch RID, or a code-repository branch that is not main), ' +
         'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Promotions follow the ladder like any other write. ' +
