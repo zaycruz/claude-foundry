@@ -17,6 +17,9 @@ import {
   type CompassKind,
   contextLines,
   emptyScope,
+  entityRows,
+  ENTITY_KINDS,
+  type EntityKind,
   foundryTree,
   hasFocus,
   mergeSelections,
@@ -25,49 +28,41 @@ import {
   OBJECT_QUERY_BEAD,
   objectsQuery,
   ontologyChanged,
+  pickedText,
+  PICKER_RESOURCES,
   RESOURCE_LABELS,
   resourceArgs,
   resourceRows,
 } from './catalog'
 import {
   adoptable,
-  batchGetArgs,
   branchCreateArgs,
-  COMPASS_FOLDER_RID,
-  foreignRids,
-  goalLabel,
-  takePlan,
   branchRidFrom,
-  contentHash,
   fdeBind,
   fdeBranchName,
   fdeContext,
   fdeHandoff,
   fdeStatus,
-  fileCandidates,
-  hasApply,
+  goalLabel,
   isAgentBranch,
-  namespaceDeny,
-  namespaceScan,
   normalizeFde,
   openProposal,
   parseFdeArgs,
-  planGate,
-  planSignature,
   plainSpace,
-  recordApply,
-  recordPlan,
+  readBranch,
+  recordWrite,
   spacesOf,
 } from './fde'
 import {
   CLI_TIMEOUT_FLOOR_MS,
   cliWait,
+  credentialFailure,
   type Envelope,
   failure,
   guideEnvelope,
-  isCredentialCommand,
   isErrorEnvelope,
   isOversized,
+  isRecord,
   isUsageError,
   listItems,
   manifestFrom,
@@ -82,13 +77,15 @@ import {
   withStoppedHint,
 } from './orthanc'
 import { type BinaryIdentity, binaryIdentity, type LoadedManifest, ManifestCache, named } from './manifest'
-import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
+import { MIN_ORTHANC, ORTHANC_CHECKED, orthancVersionWarning, PLUGIN_VERSION } from './orthanc-tie'
+import { PROCESS_RUN_MAX_MS, coverShellWaits, type ProcessOutput, readToExit, shellTimer, shellWaitDenial } from './process'
 import {
   APPROVAL_MODES,
   type ApprovalMode,
   type ManifestCommand,
   classifyCall,
   classifyOrthancCommand,
+  isLocalPull,
   compassRootReason,
   DEFAULT_APPROVAL_MODE,
   type GateClassification,
@@ -96,6 +93,7 @@ import {
   FOUNDRY_GIT_PUSH_REASON,
   gitPushDirectories,
   gitPushNamesFoundry,
+  isCredentialCommand,
   ladderDecision,
   replacesBinary,
   loopStep,
@@ -105,6 +103,8 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
+  touchesFoundryTool,
+  shellOrthancCalls,
   branchesIn,
   STORED_BRANCH_RUNS,
   storedBranchReads,
@@ -238,12 +238,34 @@ async function readManifest($: EngineInterface, identity: BinaryIdentity): Promi
     runOrthanc($, ['agent-manifest'], undefined, 30_000, bin),
     runOrthanc($, ['version'], undefined, 15_000, bin),
   ])
+  const data = version.data as { version?: unknown } | null | undefined
+  const read = typeof data?.version === 'string' && data.version.trim() !== '' ? data.version.trim() : null
+  tieWarning($, orthancVersionWarning(read))
   const commands = manifestFrom(manifest)
   if (commands.length === 0) {
     throw new Error(isErrorEnvelope(manifest) ? `orthanc agent-manifest failed: ${errorsOf(manifest)}` : 'orthanc agent-manifest returned no commands')
   }
-  const data = version.data as { version?: unknown } | null | undefined
-  return { commands, version: typeof data?.version === 'string' && data.version.trim() !== '' ? data.version.trim() : null }
+  return { commands, version: read }
+}
+
+// The version warning of the last manifest read (orthanc-tie.ts V1-V5). Each
+// new text is shown once; the read at session start shows it in the session's
+// first lines. It never blocks a call.
+let orthancTieWarning: string | null = null
+const STARTUP_MANIFEST_WAIT_MS = 3_000
+const shownTieWarnings = new Set<string>()
+function tieWarning($: EngineInterface, warning: string | null) {
+  orthancTieWarning = warning
+  if (warning === null || shownTieWarnings.has(warning)) return
+  shownTieWarnings.add(warning)
+  // A warning never changes what a call does: a failed toast or log is dropped.
+  for (const show of [() => $.ui.log(warning), () => $.ui.toast(warning)]) {
+    try {
+      void Promise.resolve(show()).catch(() => undefined)
+    } catch {
+      // dropped
+    }
+  }
 }
 
 /** The manifest the cache holds, and the identity of the binary a call would start now. */
@@ -322,13 +344,7 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
   if (command === undefined) {
     return failure('unknown-command', `Unknown Orthanc command '${input.command}'. Call orthanc_help first.`, input.command)
   }
-  if (isCredentialCommand(command)) {
-    return failure(
-      'credential-command-denied',
-      `Orthanc command '${command.path}' requires credential input and is not available through orthanc_cli. The operator runs it in a terminal.`,
-      command.path,
-    )
-  }
+  if (isCredentialCommand(command)) return credentialFailure(command)
   if (replacesBinary(command)) {
     return failure(
       'self-update-denied',
@@ -713,12 +729,6 @@ async function exportTurn($: EngineInterface, key: string, answer: string, usage
   }
 }
 
-function touchesFoundry(tool: string, input: Record<string, unknown>, classified: boolean): boolean {
-  if (classified || tool === ORTHANC_CLI || tool === ORTHANC_HELP) return true
-  if (tool === 'Bash') return /\borthanc\b/.test(asString(input.command))
-  return /^mcp__.*(palantir|foundry)/i.test(tool)
-}
-
 async function traceText($: EngineInterface): Promise<string> {
   const lines = [`Tracing ${tracingNote}${literalNote}.`]
   if (tracing === null) {
@@ -802,33 +812,43 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 }
 
 // The session's binding, mirrored to the store so the next session can offer /fde resume.
-// A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
-  spaceCache.clear()
+  // The store mirror also identifies the outgoing binding after a restart.
+  // Store the new binding first, so a failed scope write cannot leave the old
+  // branch active after the operator has ended or replaced it.
+  const earlier = (await fdeState($)) ?? (await fdeFromEarlier($))
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
+  if (earlier !== null && (earlier.branchRid !== fde?.branchRid || earlier.profile !== fde?.profile || earlier.ontologyRid !== fde?.ontologyRid)) await dropBranchPicks($, earlier)
+}
+
+/** Remove only picks first selected on this branch. Untagged picks came from main. */
+const withoutBranchPicks = (scope: FoundryScope, branchRid: string): FoundryScope => ({
+  ...scope,
+  resources: { ...scope.resources, ...Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, (scope.resources[def.resource] ?? []).filter(item => item.branchRid !== branchRid)])) },
+})
+
+/**
+ * Takes the branch-read picks out of one stack's scope. That stack is not the
+ * active one after a /profile switch, and /profile is allowed while FDE mode is
+ * bound, so the picks are dropped where they were saved (same shape as
+ * storeNamespace, which reaches another stack's record for the same reason).
+ */
+async function dropBranchPicks($: EngineInterface, binding: FdeSession): Promise<void> {
+  const active = await currentScope($)
+  if (active.profile === binding.profile) {
+    if (active.ontology?.rid === binding.ontologyRid) await saveScope($, withoutBranchPicks(active, binding.branchRid))
+    return
+  }
+  const stored = await storedScopes($)
+  const entry = normalizeScope(stored[binding.profile], binding.profile, '')
+  if (entry.ontology?.rid !== binding.ontologyRid) return
+  await $.store.set('scopes', { ...stored, [binding.profile]: { ...withoutBranchPicks(entry, binding.branchRid), updatedAt: new Date().toISOString() } })
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
   return normalizeFde(await $.store.get('fdeOpen').catch(() => null))
-}
-
-// rid -> the namespace it is in, for the lookups of one binding. Only a
-// successful batch-get is cached, so a failed one is looked up again, and the
-// operator's answer to a failed check is never remembered.
-const spaceCache = new Map<string, string | null>()
-const SPACE_CACHE_MAX = 10_000
-
-function rememberSpaces(spaces: ReadonlyMap<string, string | null>): void {
-  for (const [rid, spaceRid] of spaces) {
-    // A folder batch-get did not return may exist by the next write: ask again, never remember it as missing.
-    if (spaceRid === null && rid.startsWith(COMPASS_FOLDER_RID)) continue
-    spaceCache.set(rid, spaceRid)
-    if (spaceCache.size <= SPACE_CACHE_MAX) continue
-    const oldest = spaceCache.keys().next().value
-    if (typeof oldest === 'string') spaceCache.delete(oldest)
-  }
 }
 
 /** While bound, the namespace in scope is the session's: nothing may move it. */
@@ -846,51 +866,6 @@ function spacesFrom(envelope: Envelope): FoundryNamespace[] {
 
 const couldNotBind = (ontology: FoundryNamed, namespace: FoundryNamespace, why: string) =>
   `Could not check that the ontology ${ontology.name} is in ${namespace.name} (${why}). FDE mode stays off; try /fde on again.`
-
-/** The RIDs a check could not place, first 20: what the ask and the refusal name. */
-const shownRids = (rids: readonly string[]) =>
-  rids.length <= 20 ? rids.join(', ') : `${rids.slice(0, 20).join(', ')} and ${rids.length - 20} more`
-
-/**
- * Why a write names something outside the bound namespace, or null. A RID this
- * session has not placed costs one batch-get, cached for the binding; a lookup
- * that cannot run asks the operator rather than failing closed, and names what
- * it could not check.
- */
-async function namespaceCheck($: EngineInterface, fde: FdeSession, args: string[], texts: readonly string[]): Promise<string | null> {
-  const scanned = namespaceScan(fde, args, texts)
-  if ('deny' in scanned) return scanned.deny
-  const placed = new Map<string, string | null>()
-  const unchecked: string[] = []
-  const failures: string[] = []
-  for (const rid of scanned.lookup) {
-    if (spaceCache.has(rid)) placed.set(rid, spaceCache.get(rid) ?? null)
-  }
-  for (const argv of batchGetArgs(scanned.lookup.filter(rid => !spaceCache.has(rid)))) {
-    const envelope = await runOrthanc($, argv, fde.profile, 60_000)
-    if (isErrorEnvelope(envelope)) {
-      failures.push(errorsOf(envelope))
-      unchecked.push(...argv.slice(2))
-      continue
-    }
-    const spaces = spacesOf(envelope.data, argv.slice(2))
-    rememberSpaces(spaces)
-    for (const [rid, spaceRid] of spaces) placed.set(rid, spaceRid)
-  }
-  const denied = namespaceDeny(fde, placed)
-  if (denied !== null || failures.length === 0 || fde.namespace === null) return denied
-  const error = failures.join('; ')
-  const shown = shownRids(unchecked)
-  const answer = await $.ui
-    .ask(`FDE mode (${fde.branchName}): the namespace check could not run for ${shown} (${error}). Run this write anyway, unchecked against ${fde.namespace.name}?`, {
-      header: 'FDE',
-      options: ['Run unchecked', 'Do not run'],
-    })
-    .catch(() => null)
-  return answer === 'Run unchecked'
-    ? null
-    : `FDE mode (${fde.branchName}): the namespace check could not run for ${shown} (${error}), and the operator declined or could not be asked, so the call was not run.`
-}
 
 /**
  * The global branch's name when it is an OPEN branch of the ontology, with the
@@ -910,64 +885,31 @@ async function openBranch(
   return typeof fit === 'string' ? { reason: fit, transient: false } : { name: fit.name, proposal: openProposal(envelope.data) }
 }
 
-// FDE mode: pin the call to the session's branch and hold each --apply to its
-// dry run. It only adds checks; the branch rule and the ladder still judge the
-// bound call. Returns the bound input and its plan, or why it is refused.
-const MAX_PINNED_FILE = 20_000_000
-type FdePlan = { signature: string; isApply: boolean; command: string; files: string[] }
-
-async function filesSignature(
-  $: EngineInterface,
-  fde: FdeSession,
-  command: string,
-  args: string[],
-  files: { required: string[]; optional: string[] },
-): Promise<{ signature: string; texts: string[] } | { deny: string }> {
-  const hashes: Record<string, string> = {}
-  const texts: string[] = []
-  for (const file of [...files.required, ...files.optional]) {
-    // Only regular files are read, and only up to a size, so a device or FIFO
-    // argument cannot hang the gate.
-    const stat = await $.fs.stat(file).catch(() => null)
-    if (stat !== null && stat.kind === 'file' && stat.size > MAX_PINNED_FILE) {
-      return { deny: `FDE mode: ${file} is over ${MAX_PINNED_FILE / 1_000_000} MB, too large to check against its dry run, so the call was not run.` }
-    }
-    const text = stat?.kind === 'file' ? await $.fs.read(file).then(String).catch(() => null) : null
-    if (text === null && files.required.includes(file)) return { deny: `FDE mode: could not read ${file} to check it against its dry run, so the call was not run.` }
-    if (text === null) continue
-    const foreign = foreignRids(fde, text)
-    if (foreign) return { deny: `FDE mode: ${foreign}` }
-    hashes[file] = await contentHash(text)
-    texts.push(text)
-  }
-  return { signature: planSignature(command, args, hashes), texts }
-}
-
+// FDE mode binds the call to the session's branch (added when an ontology write
+// names none) and refuses only a write aimed directly at main or master. The
+// branch rule and the ladder still judge the bound call. Returns the bound
+// input, and the command to record when it runs as a mutation.
 async function fdeGate(
   $: EngineInterface,
   fde: FdeSession,
   input: Record<string, unknown>,
   manifest: readonly ManifestCommand[],
-): Promise<{ deny: string } | { input: Record<string, unknown>; plan: FdePlan | null }> {
+): Promise<{ deny: string } | { input: Record<string, unknown>; ran: string | null }> {
   const resolved = resolveOrthancCommand(asString(input.command), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
-  const isMutation = resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest) === 'mutation'
-  const bound = fdeBind(fde, resolved.path, resolved.args, (await currentScope($)).profile, isMutation)
+  const isMutation = resolved.path !== '' && classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'mutation'
+  // A clone pull stays out of the *binding*: its --branch is a Code Repository
+  // branch, so pinning it to the session's global branch, or reading
+  // `--branch main` as a write aimed at main, would refuse a pull
+  // (hooks/fde-hold.test.ts H9a). The --force form is still the write the ladder
+  // judged, and it is still recorded: hooks/local-write.test.ts LW1 and
+  // hooks/fde-hold.test.ts H9b.
+  const bindable = isMutation && !isLocalPull(resolved.path)
+  const bound = fdeBind(fde, resolved.path, resolved.args, bindable)
   if ('deny' in bound) return bound
-  const next = { ...input, command: resolved.path, args: bound.args }
-  if (!isMutation) return { input: next, plan: null }
-  const files = fileCandidates(bound.args, await sessionCwd($), await homeDir($))
-  const pinned = await filesSignature($, fde, resolved.path, bound.args, files)
-  if ('deny' in pinned) return pinned
-  const signature = pinned.signature
-  const isApply = hasApply(bound.args)
-  const gated = planGate(fde, signature, isApply)
-  if (gated) return { deny: gated }
-  const outside = await namespaceCheck($, fde, bound.args, pinned.texts)
-  if (outside !== null) return { deny: outside }
-  return { input: next, plan: { signature, isApply, command: resolved.path, files: [...files.required, ...files.optional] } }
+  return { input: { ...input, command: resolved.path, args: bound.args }, ran: isMutation ? resolved.path : null }
 }
 
-// A /fde from one of these is the person's own typing: the terminal and Remote
+// A /fde end, /fde resume or /approval yolo from one of these is the person's own typing: the terminal and Remote
 // Control. An SDK turn (`claude -p`, the Agent SDK), peers, relays, channels,
 // triggers and plugins are not (zay, 2026-10-21: "Not you").
 const PERSON_ORIGINS = new Set(['composer', 'bridge'])
@@ -1103,17 +1045,24 @@ async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigi
   return [
     fdeStatus(fde),
     ...(proposal ? [`It has an open proposal (${proposal}): every write here changes what its reviewers see.`] : []),
-    'Ontology writes in this session now go to this branch only, and each --apply needs its dry run first.',
+    'Ontology writes in this session that name no branch go to this one. FDE mode refuses only a write aimed directly at main or master; ' +
+      'everything else on branches — proposals, deploys, merges — the branch rule and the approval ladder judge as usual.',
   ].join('\n')
 }
 
 // ---------- pickers ----------
 
-type Source = { title: string; isMulti: boolean; items: FoundryPickItem[]; resourceKind?: FoundryResourceKind }
+type Source = { title: string; isMulti: boolean; items: FoundryPickItem[]; resourceKind?: FoundryResourceKind; incomplete?: boolean }
 type PickerOptions = { resourceKind?: FoundryResourceKind; chain?: FoundryPickerKind[] }
 
 const toItems = (resources: readonly FoundryResource[]): FoundryPickItem[] =>
   resources.map(entry => ({ key: entry.rid, label: entry.name, hint: entry.hint }))
+
+/** Orthanc's note on a read, such as part of a branch listing coming from main. */
+const warningNote = (envelope: Envelope): string => {
+  const first = Array.isArray(envelope.warnings) ? envelope.warnings[0] : null
+  return isRecord(first) ? asString(first.message).slice(0, 90) : ''
+}
 
 async function inBatches<T, R>(values: readonly T[], size: number, run: (value: T) => Promise<R>): Promise<R[]> {
   const out: R[] = []
@@ -1121,15 +1070,21 @@ async function inBatches<T, R>(values: readonly T[], size: number, run: (value: 
   return out
 }
 
+/** The folder or project RIDs a Compass walk starts from: the selected projects, else every visible one. */
+async function compassRoots($: EngineInterface, scope: FoundryScope): Promise<string[] | string> {
+  const selected = scope.projects.map(project => project.rid)
+  if (selected.length > 0) return selected
+  const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
+  if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
+  return listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
+}
+
 /** Compass resources of one kind under the selected projects, or every visible project. */
 async function compassSource($: EngineInterface, scope: FoundryScope, kind: CompassKind, query: string): Promise<Source | string> {
   const def = COMPASS_KINDS[kind]
-  let roots = scope.projects.map(project => project.rid)
-  if (roots.length === 0) {
-    const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
-    if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
-    roots = listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
-  }
+  const found = await compassRoots($, scope)
+  if (typeof found === 'string') return found
+  const roots = found
   if (roots.length === 0) return `No projects are visible ${scope.namespace ? `in ${scope.namespace.name}` : 'on this stack'}. No selection was saved.`
   const search = kind === 'folders' && !query.trim() ? 'ri.compass.main.folder.' : query
   const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
@@ -1143,6 +1098,85 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
     isMulti: true,
     items: toItems(rows),
     resourceKind: kind,
+  }
+}
+
+/**
+ * `automate list` under the selected projects, or under the namespace in scope.
+ * With neither, one walk with no --folder-rid, which is every space; `--name` is
+ * orthanc's own filter, so the command's argument goes to it and not to the
+ * picker's.
+ */
+async function automateSource($: EngineInterface, scope: FoundryScope, query: string): Promise<Source | string> {
+  const name = query.trim()
+  // One root, '' = no --folder-rid, which walks every space.
+  let roots = ['']
+  if (scope.projects.length > 0) roots = scope.projects.map(project => project.rid)
+  else if (scope.namespace !== null) {
+    const found = await compassRoots($, scope)
+    if (typeof found === 'string') return found
+    if (found.length === 0) return `No projects are visible in ${scope.namespace.name}. No selection was saved.`
+    roots = found
+  }
+  const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
+    runOrthanc($, ['automate', 'list', ...(root === '' ? [] : ['--folder-rid', root]), ...(name === '' ? [] : ['--name', name])], scope.profile, 180_000),
+  )
+  const failed = envelopes.filter(isErrorEnvelope)
+  if (failed.length === envelopes.length && failed[0]) return `automate list failed: ${errorsOf(failed[0])}`
+  const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['automations'])), ['path'])
+  return {
+    // A root whose listing failed shrinks this list instead of failing it, so the
+    // title says when that happened, and the listing is not applied on its own:
+    // the operator sees the short list before picking from it.
+    incomplete: failed.length > 0,
+    title: `Automations${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}${failed.length === 0 ? '' : ` (${failed.length} of ${envelopes.length} listings failed)`}`,
+    isMulti: true,
+    items: toItems(rows),
+    resourceKind: 'automations',
+  }
+}
+
+/**
+ * `ontology object-type-list` / `ontology action-type-list` on the ontology in
+ * scope, on the main branch. Orthanc takes `--branch` on both, and the mod does
+ * not pass it here: a bound session picks its link types and interfaces off its
+ * own branch, and a write to a type that is not on the branch is refused by the
+ * branch rule and the plan gate, which judge the call itself.
+ */
+async function typeSource($: EngineInterface, kind: 'object-type' | 'action-type', ontology: FoundryNamed, profile: string): Promise<Source | string> {
+  const isAction = kind === 'action-type'
+  const envelope = await runOrthanc($, ['ontology', isAction ? 'action-type-list' : 'object-type-list', ontology.rid], profile, 120_000)
+  if (isErrorEnvelope(envelope)) return `${isAction ? 'action' : 'object'}-type-list failed: ${errorsOf(envelope)}`
+  return {
+    title: isAction ? 'Action types' : 'Object types',
+    isMulti: true,
+    items: listItems(envelope, isAction ? 'action_types' : 'object_types').map(entry => ({
+      key: asString(entry.api_name),
+      label: asString(entry.display_name) || asString(entry.api_name),
+      hint: asString(entry.api_name),
+    })),
+  }
+}
+
+/**
+ * `ontology link-type-list` / `ontology interface-list` on the ontology in scope,
+ * on FDE mode's branch when the session has one (readBranch), the way
+ * `ontology definition --branch` reads one, so an FDE session picks the types of
+ * its own branch.
+ */
+async function entitySource($: EngineInterface, kind: EntityKind, ontology: FoundryNamed, branch: { rid: string; name: string } | null, profile: string): Promise<Source | string> {
+  const def = ENTITY_KINDS[kind]
+  const envelope = await runOrthanc($, ['ontology', def.list, ontology.rid, ...(branch === null ? [] : ['--branch', branch.rid])], profile, 120_000)
+  const where = branch === null ? '' : ` on ${branch.name}`
+  if (isErrorEnvelope(envelope)) return `${def.list}${where} failed: ${errorsOf(envelope)}`
+  // Orthanc warns when part of a branch read came from main (an interface's members).
+  // The listing carries the note, so the title cannot claim the branch for main's rows.
+  const note = warningNote(envelope)
+  return {
+    title: `${def.label}${where}${note === '' ? '' : ` (orthanc: ${note})`}`,
+    isMulti: true,
+    items: toItems(entityRows(rowsOf(envelope, [def.rows]), def.hintKeys, def.separator)),
+    resourceKind: def.resource,
   }
 }
 
@@ -1207,24 +1241,11 @@ async function pickerSource(
       })),
     }
   }
-  if (scope.ontology === null) return 'No ontology is selected. Run /ontology first.'
-  const isAction = kind === 'action-type'
-  const envelope = await runOrthanc(
-    $,
-    ['ontology', isAction ? 'action-type-list' : 'object-type-list', scope.ontology.rid],
-    scope.profile,
-    120_000,
-  )
-  if (isErrorEnvelope(envelope)) return `${isAction ? 'action' : 'object'}-type-list failed: ${errorsOf(envelope)}`
-  return {
-    title: isAction ? 'Action types' : 'Object types',
-    isMulti: true,
-    items: listItems(envelope, isAction ? 'action_types' : 'object_types').map(entry => ({
-      key: asString(entry.api_name),
-      label: asString(entry.display_name) || asString(entry.api_name),
-      hint: asString(entry.api_name),
-    })),
-  }
+  if (kind === 'automation') return automateSource($, scope, query)
+  const ontology = scope.ontology
+  if (ontology === null) return 'No ontology is selected. Run /ontology first.'
+  if (kind === 'link-type' || kind === 'interface') return entitySource($, kind, ontology, readBranch(await fdeState($), scope.profile, ontology.rid), scope.profile)
+  return typeSource($, kind, ontology, scope.profile)
 }
 
 async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readonly string[]): Promise<string> {
@@ -1240,7 +1261,7 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const pick = chosen[0]
     if (pick === undefined) return 'No ontology selected.'
     await saveScope($, ontologyChanged(scope, { rid: pick.key, name: pick.label }))
-    return `Ontology: ${pick.label}. Projects, types, functions and object instances were cleared.`
+    return `Ontology: ${pick.label}. Projects, types, link types, interfaces, automations, functions and object instances were cleared.`
   }
   if (picker.kind === 'namespace') {
     const bound = await fdeState($)
@@ -1254,18 +1275,26 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const next = namespaceChanged(scope, { rid: pick.key, name: pick.label, path: pick.hint })
     await saveScope($, next)
     const dropped = next.projects.length !== scope.projects.length || JSON.stringify(next.resources) !== JSON.stringify(scope.resources)
-    return `Namespace: ${pick.label}.${dropped ? ' Projects and Compass resources picked before were cleared.' : ''}`
+    return `Namespace: ${pick.label}.${dropped ? ' Projects, Compass resources and automations picked before were cleared.' : ''}`
   }
   if (picker.kind === 'project') {
     await saveScope($, { ...scope, projects: chosen.map(item => ({ rid: item.key, name: item.label })) })
     return `Projects: ${chosen.map(item => item.label).join(', ') || 'none'}.`
   }
-  if (picker.kind === 'resource' && picker.resourceKind) {
+  if (picker.resourceKind !== undefined) {
     const kind = picker.resourceKind
     const asResource = (item: FoundryPickItem): FoundryResource => ({ rid: item.key, name: item.label, hint: item.hint })
-    const merged = mergeSelections(scope.resources[kind] ?? [], chosen.map(asResource), picker.items.map(asResource))
+    const existing = scope.resources[kind] ?? []
+    const branch = (picker.kind === 'link-type' || picker.kind === 'interface') && scope.ontology
+      ? readBranch(await fdeState($), scope.profile, scope.ontology.rid) : null
+    const selected = chosen.map(item => {
+      const previous = existing.find(entry => entry.rid === item.key)
+      const branchRid = previous ? previous.branchRid : branch?.rid
+      return { ...asResource(item), ...(branchRid ? { branchRid } : {}) }
+    })
+    const merged = mergeSelections(existing, selected, picker.items.map(asResource))
     await saveScope($, { ...scope, resources: { ...scope.resources, [kind]: merged } })
-    return `${RESOURCE_LABELS[kind]}: ${merged.map(entry => entry.name).join(', ') || 'none'}.`
+    return pickedText(kind, merged)
   }
   const key = picker.kind === 'action-type' ? 'actionTypes' : 'objectTypes'
   await saveScope($, { ...scope, [key]: chosen.map(item => ({ apiName: item.key, displayName: item.label })) })
@@ -1281,7 +1310,7 @@ function preselected(scope: FoundryScope, kind: FoundryPickerKind, resourceKind?
   if (kind === 'project') return scope.projects.map(project => project.rid)
   if (kind === 'object-type') return scope.objectTypes.map(type => type.apiName)
   if (kind === 'action-type') return scope.actionTypes.map(type => type.apiName)
-  if (kind === 'resource' && resourceKind) return (scope.resources[resourceKind] ?? []).map(entry => entry.rid)
+  if (resourceKind) return (scope.resources[resourceKind] ?? []).map(entry => entry.rid)
   return []
 }
 
@@ -1296,12 +1325,13 @@ async function openPicker($: EngineInterface, kind: FoundryPickerKind, source: S
     isMulti: source.isMulti,
     items: source.items,
     chosen: preselected(scope, kind, source.resourceKind),
-    filter: kind === 'resource' ? '' : query,
+    // These listings filter on the argument themselves; the picker starts unfiltered.
+    filter: kind === 'resource' || kind === 'automation' ? '' : query,
     chain,
   }
   const filtered = source.items.filter(item => matches(item, picker.filter))
   const only = filtered.length === 1 ? filtered[0] : undefined
-  if (query !== '' && only) return applyPick($, picker, [...new Set([...picker.chosen, only.key])])
+  if (query !== '' && only && !source.incomplete) return applyPick($, picker, [...new Set([...picker.chosen, only.key])])
   await $.state.set(PICKER, picker)
   const opened = await $.ui.open({ id: PANE, title: source.title, focus: true, closeOnEscape: true })
   if (!opened.isPlaced) {
@@ -1325,7 +1355,7 @@ async function runPicker($: EngineInterface, kind: FoundryPickerKind, args: stri
     if (kind === 'project') await saveScope($, { ...scope, projects: [] })
     if (kind === 'object-type') await saveScope($, { ...scope, objectTypes: [] })
     if (kind === 'action-type') await saveScope($, { ...scope, actionTypes: [] })
-    if (kind === 'resource' && options.resourceKind) {
+    if (options.resourceKind) {
       await saveScope($, { ...scope, resources: { ...scope.resources, [options.resourceKind]: [] } })
     }
     return `Cleared ${options.resourceKind ? RESOURCE_LABELS[options.resourceKind].toLowerCase() : kind} selection.`
@@ -1473,11 +1503,20 @@ async function authText($: EngineInterface, args: string): Promise<string> {
   const target = args.trim() || scope.profile
   const profile = (await listProfiles($)).find(entry => entry.name === target)
   const host = profile?.host || '<https://your-stack.palantirfoundry.com>'
+  const shown = profile ? 'auth store' : 'configure profile create'
+  // The guard refuses these and says the operator runs them; the operator has to
+  // be able to name them, so they are read from the same list the guard reads.
+  const refused = (await loadManifest($).catch(() => [] as readonly ManifestCommand[]))
+    .filter(entry => isCredentialCommand(entry))
+    .map(entry => entry.path)
+    .filter(path => path !== shown)
+    .sort()
   const lines = [
     `Credentials never pass through Claude. Run one of these in your own terminal:`,
     profile
       ? `  orthanc auth store --profile ${target} --host ${host}    # paste the token on stdin`
       : `  orthanc configure profile create    # new profile '${target}': host and token`,
+    ...(refused.length ? [`  Also operator-only, and refused through Claude: ${refused.join(', ')}`] : []),
     `Then run /onboard (or /profile ${target}) here to verify.`,
   ]
   if (profile) {
@@ -1517,8 +1556,10 @@ async function clearFromTree($: EngineInterface, target: ClearTarget): Promise<v
 async function runEntry($: EngineInterface, entry: CommandEntry, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const action = entry.action
   switch (action.type) {
-    case 'picker':
-      return runPicker($, action.kind, args)
+    case 'picker': {
+      const resourceKind = PICKER_RESOURCES[action.kind]
+      return runPicker($, action.kind, args, resourceKind === undefined ? {} : { resourceKind })
+    }
     case 'resource':
       return runPicker($, 'resource', args, { resourceKind: action.kind })
     case 'blocked':
@@ -1543,6 +1584,7 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
       return [
         renderChecks(checks),
         `orthanc commands: ${manifest.length} in the agent manifest${manifestCache.version ? ` of orthanc ${manifestCache.version}` : ''}`,
+        orthancTieWarning ?? `plugin ${PLUGIN_VERSION}: orthanc ${MIN_ORTHANC} to ${ORTHANC_CHECKED} (guard last checked against ${ORTHANC_CHECKED})`,
         `tools: mcp__foundry__orthanc_help, mcp__foundry__orthanc_cli`,
         refusedCommands.length > 0 ? `commands Claude Code refused: ${refusedCommands.join(', ')}` : 'all foundry slash commands registered',
       ].join('\n')
@@ -1574,6 +1616,14 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
       }
       const mode = parseApprovalMode(wanted)
       if (mode === null) return `Unknown mode '${wanted}'. Modes: ${APPROVAL_MODES.join(', ')}.`
+      // yolo is where destructive writes and promotions run with no ask, and the
+      // mode persists: only the person's own typing turns it on. An SDK turn, a
+      // peer or a relay can still pick a stricter mode.
+      if (mode === 'yolo' && !isPerson(origin)) {
+        return `Only you can turn on yolo: type /approval yolo yourself. This one came from ${
+          origin?.kind || 'an unknown source'
+        }, so the approval mode stays ${await approvalMode($)}.`
+      }
       await $.store.set('approvalMode', mode)
       return `Foundry approval mode: ${mode}.`
     }
@@ -1614,7 +1664,9 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   const { tool: _tool, tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...raw } =
     e as unknown as Record<string, unknown>
   let input: Record<string, unknown> = raw
-  note.foundry = touchesFoundry(tool, input, false)
+  // One predicate with the gate: a call the trace called Foundry while the guard did
+  // not would run with no ladder and no branch rule.
+  note.foundry = touchesFoundryTool(tool, input)
   note.outcome = 'block'
   const rootReason = compassRootReason(tool, input)
   if (rootReason) return { deny: rootReason }
@@ -1648,18 +1700,26 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     return { result: serialize(failed), context: ['orthanc_cli refused the call before it ran; read the error.'] }
   }
   const fde = tool === ORTHANC_CLI ? await fdeState($) : null
-  let plan: FdePlan | null = null
+  let fdeRan: string | null = null
   if (fde !== null) {
     const gated = await fdeGate($, fde, input, manifest)
     if ('deny' in gated) return gated
     input = gated.input
-    plan = gated.plan
+    fdeRan = gated.ran
   }
-  // A call over the cap is refused here, before the ladder can ask the operator
-  // to approve it and before an apply takes its dry run. executeCli checks again.
+  // A call over the cap, or one that fills the operator's credential store, is
+  // refused here, before the ladder can ask the operator to approve a call that
+  // cannot run. executeCli checks again.
   if (tool === ORTHANC_CLI) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
     const command = manifest.find(entry => entry.path === resolved.path)
+    if (command && isCredentialCommand(command)) {
+      note.foundry = true
+      note.command = command.path
+      note.outcome = 'block'
+      note.reason = 'credential-command-denied'
+      return { result: serialize(credentialFailure(command)), context: ['orthanc_cli refused the call before it ran; the credential is the operator’s to type.'] }
+    }
     const wait = command ? cliWait(command, resolved.args) : null
     if (command && wait?.overCap) {
       note.foundry = true
@@ -1669,23 +1729,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
       return { result: serialize(overCapFailure(command, wait)), context: ['orthanc_cli refused the call before it ran; read the error for a way that fits.'] }
     }
   }
-  // An apply takes its dry run now, in one step, so a parallel twin finds it gone.
-  // If the call then does not run, or fails, the plan is put back.
-  if (plan?.isApply) {
-    const signature = plan.signature
-    let taken = false
-    await update($, fdeAtom, current => {
-      if (current === null) return current
-      const took = takePlan(current, signature)
-      taken = took.taken
-      return took.fde
-    })
-    if (!taken) return { deny: planGate({ ...fde!, plans: [] }, signature, true)! }
-  }
-  let executed = false
   let failed = false
-  let notRun = false
-  try {
   const branch = (await $.state.get(BRANCH)).value ?? null
   const classification = classifyCall(tool, input, manifest, branch, await storedBranches($, tool, input, manifest))
   note.outcome = undefined
@@ -1694,8 +1738,10 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (classification) {
     note.foundry = true
     note.command = classification.command ?? undefined
+    // A call that already carries a refusal needs no second opinion: the ladder blocks
+    // on `error` before it looks at the model, so the call would only cost a round trip.
     const verdict =
-      mode === 'auto' && classification.kind === 'mutation'
+      mode === 'auto' && classification.kind === 'mutation' && !classification.error
         ? await guardVerdict($, tool, input, classification).catch(() => null)
         : undefined
     const decision = ladderDecision(mode, classification, verdict)
@@ -1718,18 +1764,49 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     }
   }
 
-  // The ladder may have waited on the operator: the files the call reads must still be the planned ones.
-  if (plan !== null && plan.files.length > 0) {
-    const args = Array.isArray(input.args) ? input.args.map(String) : []
-    const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
-    if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
+  // The wait budget above belongs to orthanc_cli. Bash holds a timer of its own
+  // over whatever Orthanc it runs, and the host moves a command that passes it
+  // to the background, where nobody reads its answer: give the call the time its
+  // own flags ask for (every Orthanc call in the line, one after another), and
+  // where no Bash timeout holds that long, refuse while the answer can still
+  // name the tool that fits (claude-foundry #19).
+  let call: Args<'tool.call'> = e
+  let raisedTo: number | null = null
+  if (tool === 'Bash' && typeof input.command === 'string' && input.run_in_background !== true) {
+    const timer = shellTimer(input.timeout, await $.env.get('BASH_DEFAULT_TIMEOUT_MS'), await $.env.get('BASH_MAX_TIMEOUT_MS'))
+    const waits = shellOrthancCalls(input.command, manifest).map(entry => ({ wait: cliWait(entry.command, entry.args), times: entry.times, join: entry.join }))
+    const cover = coverShellWaits(waits, timer)
+    if (cover.kind === 'over') {
+      note.foundry = true
+      note.outcome = 'block'
+      note.reason = 'bash-wait-over-timer'
+      note.command = cover.total.longest.path
+      return { deny: shellWaitDenial(cover.total, cover.timer) }
+    }
+    if (cover.kind === 'raise') {
+      note.foundry = true
+      note.outcome = 'allow'
+      note.reason = 'bash-wait-raised'
+      note.command = cover.total.longest.path
+      raisedTo = cover.timeoutMs
+      call = { ...e, timeout: cover.timeoutMs }
+    }
   }
-  executed = true
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
-  if (plan !== null && !failed) {
-    const done = plan
+  const ran =
+    tool === ORTHANC_CLI || tool === ORTHANC_HELP
+      ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), served.out))
+      : await next(call)
+  // A timeout the model did not ask for is said, not slipped in quietly: the
+  // result it reads carries the number the plugin handed the host.
+  const out =
+    raisedTo === null
+      ? ran
+      : { ...ran, context: [...(Array.isArray(ran.context) ? ran.context : []), `foundry: this Bash call ran with a ${raisedTo / 1000} s timeout, the wait its Orthanc calls ask for.`] }
+  // A bound mutation that ran goes into the session's record, which the handoff reports.
+  if (fdeRan !== null && !failed) {
+    const command = fdeRan
     let latest: FdeSession | null = null
-    await update($, fdeAtom, current => (latest = current === null ? null : done.isApply ? recordApply(current, done.command, done.signature, new Date()) : recordPlan(current, done.signature)))
+    await update($, fdeAtom, current => (latest = current === null ? null : recordWrite(current, command, new Date())))
     if (latest !== null) await $.store.set('fdeOpen', latest)
   }
   if (classification?.kind === 'branch-creation' && classification.command === 'global-branch create') {
@@ -1737,13 +1814,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     const rid = /ri\.branch\.[^"\s,}]+/.exec(text)?.[0]
     if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, rid ?? classification.proposedName ?? null)
   }
-  return ran
-  } finally {
-    if (plan?.isApply && (!executed || notRun)) {
-      const signature = plan.signature
-      await update($, fdeAtom, current => (current === null ? null : recordPlan(current, signature))).catch(() => undefined)
-    }
-  }
+  return out
 }
 
 export const register: Register = on => {
@@ -1799,7 +1870,20 @@ export const register: Register = on => {
       tracing = null
       tracingNote = 'off: tracing setup failed'
     })
-    void loadManifest($).catch(() => undefined)
+    // Wait a little for the manifest and version read, so the orthanc version
+    // warning (orthanc-tie.ts) is among the session's first lines. A slow
+    // orthanc does not hold the session: the read goes on in the background.
+    const read = loadManifest($).then(
+      () => undefined,
+      () => undefined,
+    )
+    let waited = () => {}
+    const timer = $.clock.after(STARTUP_MANIFEST_WAIT_MS, () => waited())
+    try {
+      await Promise.race([read, new Promise<void>(resolve => (waited = resolve))])
+    } finally {
+      timer.cancel()
+    }
     const earlier = (await fdeState($)) === null ? await fdeFromEarlier($).catch(() => null) : null
     if (earlier) $.ui.toast(`FDE branch ${earlier.branchName} (${goalLabel(earlier.goal)}) is still open from an earlier session: /fde resume or /fde end`)
     return started
@@ -1933,7 +2017,7 @@ export const register: Register = on => {
           <Text color="yellow" bold>
             FDE
           </Text>
-          <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName}${fde.namespace ? ` · ${fde.namespace.name}` : ''} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+          <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName}${fde.namespace ? ` · ${fde.namespace.name}` : ''} · ${fde.applied.length} writes · /fde end hands off`}</Text>
         </Box>
       </Box>
     )
