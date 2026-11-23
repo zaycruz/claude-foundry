@@ -889,7 +889,8 @@ async function fdeGate(
   // branch, so pinning it to the session's global branch, or reading
   // `--branch main` as a write aimed at main, would refuse a pull
   // (hooks/fde-hold.test.ts H9a). The --force form is still the write the ladder
-  // judged, and it is still recorded: hooks/local-write.test.ts LW1, H9b.
+  // judged, and it is still recorded: hooks/local-write.test.ts LW1 and
+  // hooks/fde-hold.test.ts H9b.
   const bindable = isMutation && !isLocalPull(resolved.path)
   const bound = fdeBind(fde, resolved.path, resolved.args, bindable)
   if ('deny' in bound) return bound

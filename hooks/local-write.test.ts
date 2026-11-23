@@ -62,6 +62,17 @@
 //      flags: an option whose shape the guard cannot read owns the word after
 //      it, so the unknown shape asks rather than plans (the rule
 //      `baseBranchOnWorkBranch` applies to the same pflag hazard).
+//  LW15 The question names the call's own words, so the operator sees which
+//      folder is deleted and which application's packages are installed — not
+//      only that some folder goes.
+//  LW16 The same sentence is in the reason a run leaves behind (the trace line is
+//      all the operator sees afterwards for a write yolo ran with no ask).
+//  LW17 modeGuidance, the sentence the model is told every turn, names the two
+//      commands in all four modes: a rule the model is not told reads as a hang
+//      (hooks/destructive.test.ts D11).
+//  LW18 The yolo ask for a `--branch main --force` clone does not tell the agent
+//      to pass a work branch: that flag is a Code Repository branch, and a
+//      branch changes nothing about what the call deletes.
 //  LW11 A Code Repository branch named main, or HEAD, on a plain clone stays a
 //      read: its --branch is not a Foundry branch (FDE mode pins nothing to a
 //      clone, hooks/register.tsx fdeGate). With --force the same call is judged
@@ -73,7 +84,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { renderCommand } from './orthanc'
 import { SNAPSHOT } from './orthanc-manifest.snapshot'
-import { classifyCall, ladderDecision, type ManifestCommand } from './policy'
+import { classifyCall, ladderDecision, modeGuidance, type ManifestCommand } from './policy'
 
 const CLI = 'mcp__foundry__orthanc_cli'
 const REPO = 'ri.code.main.repo.c0000000-0000-4000-8000-0000000000c4'
@@ -200,12 +211,36 @@ test('LW10: the ask and the Bash refusal say what the call does to this machine'
 // The trace line a ran write leaves is what the operator reads afterwards, and
 // in yolo nothing else said anything: 'destructive (--force)' without the
 // folder it deleted would read as an ordinary Foundry write.
-test('LW10: the reason of a run says it too', () => {
+test('LW16: the reason of a run says it too', () => {
   const forced = classifyCall(CLI, { command: 'repository clone', args: [REPO, './repo', '--force'] }, MANIFEST, null)!
   const installed = classifyCall(CLI, { command: 'dev-console sdk install', args: [APP, '--target', './app'] }, MANIFEST, null)!
   expect(forced ? ladderDecision('yolo', forced).reason.includes('deletes what is already in the target folder') : false).toBe(true)
   expect(ladderDecision('allow-edits', installed).reason.includes('npm or pip install')).toBe(true)
   expect(ladderDecision('auto', installed, { action: 'approve', reason: 'ok' }).reason.includes('npm or pip install')).toBe(true)
+})
+
+test('LW15: the question names the call the operator is approving', () => {
+  const reason = reasonOf(CLI, { command: 'repository clone', args: [REPO, './some/deep/dir', '--force'] }, 'auto')
+  expect({ reason }).toEqual({ reason: expect.stringContaining('./some/deep/dir') })
+  const installed = reasonOf(CLI, { command: 'dev-console sdk install', args: [APP, '--target', './app'] }, 'ask-always')
+  expect({ installed }).toEqual({ installed: expect.stringContaining(APP) })
+})
+
+test('LW17: every mode tells the model these two commands are judged as writes', () => {
+  for (const mode of MODES) {
+    const guidance = modeGuidance(mode)
+    expect({ mode, said: guidance.includes('write this machine instead of Foundry') }).toEqual({ mode, said: true })
+    expect({ mode, named: guidance.includes('repository clone <rid> <dir> --force') }).toEqual({ mode, named: true })
+    expect({ mode, named: guidance.includes('dev-console sdk install --yes|--target <dir>') }).toEqual({ mode, named: true })
+  }
+})
+
+test('LW18: the yolo ask for a --branch main --force clone asks, and sends no one to pass a work branch', () => {
+  const forced = classifyCall(CLI, { command: 'repository clone', args: [REPO, './repo', '--branch', 'main', '--force'] }, MANIFEST, null)!
+  const decision = ladderDecision('yolo', forced, { action: 'approve', reason: 'guard model absent' })
+  expect(decision.outcome).toBe('ask')
+  expect({ reason: decision.reason.includes('No Foundry branch changes what this writes') }).toEqual({ reason: true })
+  expect({ reason: decision.reason.includes('pass a work branch') }).toEqual({ reason: false })
 })
 
 test('LW11: a clone of main or HEAD is still a read, and --force is judged by --force', () => {
@@ -319,7 +354,7 @@ const cliCall = ($: Engine, command: string, args: string[]) =>
   $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string; result?: unknown }>
 const ran = (h: Harness, prefix: string) => h.calls.filter(call => call.startsWith(prefix))
 
-test('LW9: in ask-always a --force clone waits for the operator, and nothing else asks', async ($, on) => {
+test('LW9a: in ask-always a --force clone waits for the operator, and nothing else asks', async ($, on) => {
   const h = harness(on, 'ask-always')
   h.answer = 'throw'
   const denied = await cliCall($, 'repository clone', [REPO, './repo', '--force'])
@@ -331,7 +366,7 @@ test('LW9: in ask-always a --force clone waits for the operator, and nothing els
   expect(ran(h, 'repository clone').length).toBe(1)
 })
 
-test('LW9: a plain clone in yolo still runs with no ask', async ($, on) => {
+test('LW9b: a plain clone in yolo still runs with no ask', async ($, on) => {
   const h = harness(on, 'yolo')
   h.answer = 'throw'
   expect((await cliCall($, 'repository clone', [REPO, './repo'])).deny).toBe(undefined)

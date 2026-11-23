@@ -317,6 +317,7 @@ test('H9a: while bound, a clone of the repository main is not bound and not refu
   expect(applied(h)).toBe(0)
   const pulled = await clone($, [CODE_REPO, './repo', '--branch', 'main'])
   expect(pulled.deny).toBe(undefined)
+  expect(h.asked).toEqual([])
   expect(ran(h, `repository clone ${CODE_REPO} ./repo --branch main`)).toBe(true)
   expect(applied(h)).toBe(0)
 })
@@ -326,6 +327,13 @@ test('H9b: while bound, a --force clone is not bound to the branch and is one of
   await bind($)
   const forced = await clone($, [CODE_REPO, './repo', '--branch', 'main', '--force'])
   expect(forced.deny).toBe(undefined)
+  // Bound mode under yolo still asks here, because the guard sees a branch flag
+  // naming main and cannot tell from argv that this one is a Code Repository
+  // branch. Over-asking is the safe side, and this is the one question the
+  // operator gets — so it must say what the call does locally, not just that a
+  // branch is involved (hooks/local-write.test.ts LW15, LW18).
+  expect(h.asked.length).toBe(1)
+  expect({ asked: (h.asked[0] ?? '').includes('writes this machine, not Foundry') }).toEqual({ asked: true })
   expect(ran(h, `repository clone ${CODE_REPO} ./repo --branch main --force`)).toBe(true)
   expect(applied(h)).toBe(1)
 })

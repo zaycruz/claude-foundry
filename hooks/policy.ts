@@ -307,7 +307,7 @@ function isPlanCall(args: readonly string[], command: ManifestCommand | undefine
 export function localWriteReason(
   path: string,
   args: readonly string[],
-  command?: ManifestCommand,
+  command?: ManifestCommand | null,
 ): string | null {
   const entry = localWriteEntry(path)
   if (entry === null) return null
@@ -661,6 +661,15 @@ function argsHaveForce(command: string, args: readonly string[]): boolean {
 // A flag as the manifest may list it in when_all_flags.
 const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
 const QUESTION_ARGS_MAX = 600
+
+/** The call's own words, for a question an operator answers about it. JSON
+ * escapes newlines and quotes, so an argument cannot forge a line here
+ * (`operatorApprovalQuestion` shows its args for the same reason). */
+function calledAs(args: readonly string[]): string {
+  const shown = JSON.stringify(args)
+  const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
+  return `The call was: ${cut}.`
+}
 
 /** An `operator_approval` value the guard reads: `"always"` or
  * `{when_all_flags: [flags]}`, nothing else. Anything else is null: the guard
@@ -1116,7 +1125,11 @@ function orthancClassification(
     const approval = operatorApprovalQuestion(command, args, manifest)
     const approvalOnBranch = approval !== null && approvalOnWorkBranch(command, args, manifest)
     const trigger = destructiveTrigger(command, args, manifest.find(entry => entry.path === command))
-    const localWrite = localWriteReason(command, args, manifest.find(entry => entry.path === command))
+    const localFact = localWriteReason(command, args, manifest.find(entry => entry.path === command))
+    // Which folder gets deleted, and which application's packages get installed,
+    // are in the call: an operator told only 'deletes what is already in the
+    // target folder' is approving blind.
+    const localWrite = localFact === null ? null : `${localFact} ${calledAs(args)}`
     return {
       ...base,
       kind: 'mutation',
@@ -2187,8 +2200,12 @@ export function ladderDecision(
       reason:
         (classification.command !== null && BASE_BRANCH_WRITES.has(classification.command)
           ? `yolo mode: ${scenarioBaseReason(command)}`
-          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`) +
+          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves.`) +
         (classification.destructiveWhy ? ` It is also destructive (${classification.destructiveWhy}).` : '') +
+        // A local write reached this ask because a flag names main, and that flag
+        // is a Code Repository branch: work-branch advice would send the agent to
+        // pass a branch that changes nothing about what the call deletes.
+        (classification.localWrite ? ' No Foundry branch changes what this writes on this machine.' : ` ${workBranchFix(classification.command)}`) +
         local,
     }
   }
@@ -2242,7 +2259,11 @@ export function modeGuidance(mode: ApprovalMode): string {
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
-        'the call is blocked — report it, do not retry blindly.')
+        'the call is blocked — report it, do not retry blindly.') +
+    // Named in both sentences: the model reads this text to predict whether a
+    // call will stop, and a rule it is not told reads as a hang
+    // (hooks/destructive.test.ts D11).
+    ' Two commands Orthanc labels `read-only` write this machine instead of Foundry — `repository clone <rid> <dir> --force` deletes a non-empty target folder, and `dev-console sdk install --yes|--target <dir>` runs npm or pip install of the packages an application\'s SDK definition names — and the guard judges those two calls as writes.'
   )
 }
 
