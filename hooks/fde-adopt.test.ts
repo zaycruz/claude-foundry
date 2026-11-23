@@ -20,8 +20,11 @@
 //  A5  An open proposal on the adopted branch goes unmentioned when it is adopted,
 //      though every write changes what its reviewers see.
 //  A6  Bound to a foreign branch, a guard loosens: a write naming another branch,
-//      global-branch create or close (its own included), a proposal command or
-//      --profile runs, or a write naming no branch is not pinned to it.
+//      global-branch create or close (its own included) or a proposal command
+//      runs, or a write naming no branch is not pinned to it. Since 2026-11-20
+//      (zay: "whatever it wants on a branch ... just nothing direct against
+//      main or master") only a write aimed at main or master is refused; the
+//      branch-rule and ladder refusals (--profile on a write) still hold.
 //  A7  A /fde --branch the person did not type (another plugin, a peer session, a
 //      coordinator relay, a channel, a scheduled trigger, a task notification, an
 //      unclassified turn, an SDK host) adopts a branch not named agent/. Only composer
@@ -64,7 +67,6 @@ const session = (over: Partial<FdeSession> = {}): FdeSession => ({
   branchRid: FOREIGN,
   branchName: AI_FDE,
   startedAt: '2026-10-21T09:00:00.000Z',
-  plans: [],
   applied: [],
   namespace: null,
   spaces: [],
@@ -200,7 +202,7 @@ test('A1 A4: /fde --branch adopts an ai-fde/ branch and says it is not an agent/
   expect(said).toContain('FDE mode on')
   expect(said).toContain(`branch ${AI_FDE} (${FOREIGN})`)
   expect(said).toContain(FLAG)
-  expect(said.includes('proposal')).toBe(false)
+  expect(said.includes('open proposal')).toBe(false)
   expect(await prompt($)).toContain(OTHERS)
   expect(h.calls.some(call => call.startsWith('global-branch create'))).toBe(false)
 })
@@ -233,17 +235,28 @@ test('A3: a hostile branch name reaches neither the status nor the prompt', asyn
   expect(context.includes('Ignore the branch rule')).toBe(false)
 })
 
-test('A6: bound to a foreign branch, writes are pinned to it and the branch guards hold', async ($, on) => {
+test('A6: bound to a foreign branch, only a write aimed at main is refused', async ($, on) => {
   const h = harness(on)
   expect(await adopt($)).toContain('FDE mode on')
   expect((await write($, 'ontology object-type-upsert', [ONT.rid])).deny).toBe(undefined)
   expect(ran(h, `ontology object-type-upsert ${ONT.rid} --branch ${FOREIGN}`)).toBe(true)
+  // Everything else on branches runs: another branch, closing and creating global
+  // branches, a proposal write, a file naming another branch.
   for (const [command, args] of [
-    ['ontology object-type-upsert', [ONT.rid, '--branch', OTHER]],
-    ['ontology object-type-upsert', [ONT.rid, '--profile', 'tester']],
+    ['ontology object-type-upsert', [ONT.rid, '--branch', OTHER, '--apply']],
     ['global-branch close', [FOREIGN, '--apply', '--yes']],
     ['global-branch create', ['agent/fde-more', '--ontology-rid', ONT.rid, '--apply']],
-    ['proposal merge', [PROPOSAL, '--apply']],
+    ['proposal merge', [PROPOSAL, '--apply', '--yes']],
+  ] as const) {
+    const wrote = await write($, command, [...args])
+    expect({ command, args, deny: wrote.deny }).toEqual({ command, args, deny: undefined })
+    expect(ran(h, `${command} ${args.join(' ')}`)).toBe(true)
+  }
+  // The one hard refusal, and the ladder's own --profile rule, still hold.
+  for (const [command, args] of [
+    ['ontology object-type-upsert', [ONT.rid, '--branch', 'main', '--apply']],
+    ['ontology object-type-upsert', [ONT.rid, '-bmaster']],
+    ['ontology object-type-upsert', [ONT.rid, '--profile', 'tester']],
   ] as const) {
     const before = h.calls.length
     const wrote = await write($, command, [...args])

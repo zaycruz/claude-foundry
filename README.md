@@ -15,15 +15,40 @@ says so instead of falling back to REST.
   it starts and before any approval prompt, with the largest `--timeout` that
   fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
   `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
-  says `reason: cancelled`; a stop by the timer says `reason: timeout`.
+  says `reason: cancelled`; a stop by the timer says `reason: timeout`. The same
+  wait typed into `Bash` gets that budget too: the call's `timeout` is raised to
+  what its own flags ask for — the waits of the Orthanc calls in one command,
+  added up when the shell can run them one after another (`a && b`, `;`, a counted
+  `for` loop, and `a || b`, because a wait that times out exits 1 and the retry
+  runs), the larger of the two only where they genuinely cannot both happen (a
+  pipeline, the arms of a `case`), nothing for a job left running by `&` — up to the
+  shell's own limits (`BASH_DEFAULT_TIMEOUT_MS` 120 s, `BASH_MAX_TIMEOUT_MS` 600 s
+  by default). A line that cannot fit is refused before it starts and given
+  `orthanc_cli`, a `--timeout` that fits, and `run_in_background: true`; a line
+  the guard cannot price (arguments inside a substitution, a `--timeout` holding a
+  variable) is left exactly as it came.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
-  Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
-  judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
-  delete, `--force`) and release tags ask, protected branches ask, and a call
-  repeated three times is blocked. In `yolo` only a write on main asks:
-  deletes and `--force` writes run at once, and the loop guard is off. A
+  Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard judges
+  each mutation) and `yolo`. Outside `yolo`, a destructive change asks, as do
+  release tags and protected branches, and a call repeated three times is blocked. A
+  change is destructive when its command name, or one of its flags, says something is
+  left gone or overwritten — `marketplace installation uninstall`,
+  `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
+  given `--force`, or when the value of one of its flags is an act — one Orthanc
+  lists among that flag's accepted values (`--transaction-type DELETE`), or one
+  spelled in caps the way Orthanc spells its enumerated values.
+  The rule reads the name and anything that looks like a flag. A positional and a value
+  that names no act ask nothing, such as `--mode keep-outputs` or
+  `--branch delete-me`. An argument that starts with a hyphen looks like a flag, so it
+  asks: reading too much costs a prompt, reading too little costs the ask. The words,
+  and what each one leaves, are `DESTRUCTIVE_WORDS` in `hooks/policy.ts`; the
+  approval prompt builds its own wording from that table. In `yolo` only a write
+  on main asks: destructive writes run at once, the loop guard is off, and a
+  promotion (merging, accepting or approving a proposal, `global-branch
+  deploy`, `repository pull-request merge`) runs with no ask, since it lands
+  through a proposal, never directly on main. A
   release tag with no `--branch <global branch RID>` is a release on main and
   asks in `yolo` too. A write that Orthanc's agent manifest marks
   `operator_approval` (turning branch protection off, removing a required
@@ -35,7 +60,10 @@ says so instead of falling back to REST.
   `dataset branches delete <dataset> master` or `branch-protection repo
   unprotect <repo> main`), and `workshop module publish`, which works on main
   only, run only when the operator approves
-  them, in every mode; with no one to ask they are refused.
+  them, in every mode; with no one to ask they are refused. So does
+  `ontology scenario create --apply` when `--base-branch` does not name one
+  global branch RID: an Ontology scenario is a what-if fork, and its base is
+  main unless the call names a branch.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied. A command whose manifest entry names a credential the operator types —
   by `input`, or by `credential_store`, the store it writes — never runs, in any
@@ -49,11 +77,27 @@ says so instead of falling back to REST.
   branches, never on a production main. Ontology writes must pass
   `--branch <global branch RID>`; dataset, stream and build writes must name a
   work branch; code goes to a work branch through `orthanc repository push` and
-  a pull request. Branchless writes, `--allow-default-branch`, proposal
-  merges and approvals, `global-branch deploy`, `repository pull-request
-  merge`, default-branch pushes, raw `git push` to a Foundry
-  repository and Foundry writes outside Orthanc are blocked. A write naming
-  `main`/`master` asks the operator (above). Writes whose branch defaults to
+  a pull request. Branchless writes, `--allow-default-branch`,
+  default-branch pushes, raw `git push` to a Foundry
+  repository and Foundry writes outside Orthanc are blocked. A MCP tool counts as
+  such a write when its server name or its tool name says Palantir or Foundry, in any
+  case or spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
+  `mcp__palantirFoundry__…`, `mcp__tools__foundry_delete_object`), not only the exact
+  name `mcp__palantir__`. A tool
+  whose name reads with plain separated words (`list_objects`, `get-object`,
+  `search data`) still runs; a camelCase read (`listObjects`) is refused, because
+  the same shape hides a second verb. A name carrying both
+  a read verb and a write verb (`view_branch_and_revoke_protection`) counts as a
+  write, and one whose name the guard cannot read is refused. A write naming
+  `main`/`master` asks the operator (above). Promotions — proposal merges,
+  accepts and approvals, `global-branch deploy`, `repository pull-request
+  merge` — are not blocked: they land through a proposal, never directly on
+  main, so in `yolo` they run with no ask and elsewhere they follow the
+  ladder (the manifest's `operator_approval` marks ask). The one ontology write
+  whose branch spelling is not `--branch` is `ontology scenario create`: it takes
+  `--base-branch <global branch RID>`, and a `--apply` without one asks the
+  operator instead of being blocked, because a scenario based on main is a
+  legitimate call the operator may want to make. Writes whose branch defaults to
   main or master must name a branch too: connectivity imports, repository
   imports, `dataset create-from-csv`, `workshop module update`, `automate
   update`/`pause`/`resume` and the `pipeline` sandbox, edit, publish and
@@ -69,8 +113,9 @@ says so instead of falling back to REST.
   write, however the shell wraps the call. Text that only mentions Orthanc (a
   commit message, a PR body, an `echo`) is not a call.
 - **FDE mode** (`/fde on`, or `/fde <goal>`): binds the session to one agent global branch.
-  Ontology writes are pinned to it, each `--apply` needs a dry run of the same
-  call first, and `/fde end` hands the branch back to the operator, still open.
+  Ontology writes that name no branch get it added, a write aimed directly at
+  main or master is the one thing the mode refuses, and `/fde end` hands the
+  branch back to the operator, still open.
 - **Foundry context** in the system prompt (stack, ontology, projects, types,
   resources), and in the mod's own subagents.
 - **Slash commands** for choosing that context, and **`/foundry`**, a live view
@@ -95,10 +140,21 @@ orthanc --version
 orthanc onboarding        # skipped by the installer if a profile already exists
 ```
 
+Each plugin release names the orthanc versions it supports: `min_orthanc` and
+`orthanc_checked` in `.claude-plugin/plugin.json`. When the installed orthanc is
+older or newer, the session's first lines say so and name the command to run
+(`orthanc update --apply`, or `claude plugin update foundry@claude-foundry`).
+Reads still run either way, and writes the manifest marks for approval still ask.
+How a release moves these fields: [docs/RELEASE.md](docs/RELEASE.md).
+
 The mod runs `orthanc` from `PATH` (or `ORTHANC_BIN`). Add more stacks with
 `orthanc configure profile create`. Tokens stay in the macOS Keychain and never
 pass through Claude: `/auth` prints the command for you to run in your own
-terminal.
+terminal. Two commands are `read-only` in Orthanc's agent manifest and the mod
+still refuses them in every mode, because their job is to hand you a value:
+`orthanc repository git-credential get` prints the active profile's token
+(`password=…`), and `orthanc compute env get` writes one environment variable's
+value to a new file or to the clipboard. Run those in your own terminal.
 
 ### 2. The mod
 
@@ -120,17 +176,27 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
 | `/onboard`, `/mcp-status` | Check orthanc, profiles, stack, credentials, context |
 | `/auth [profile]` | How to store credentials, and whether they work |
 | `/profile`, `/ontology`, `/namespace`, `/project` | Choose the stack, ontology, namespace, projects |
-| `/object-type`, `/action-type` | Ontology types in scope |
-| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` | Compass resources in scope |
+| `/object-type`, `/action-type`, `/link-type`, `/interface` | Ontology types in scope |
+| `/folder` `/dataset` `/media-set` `/repository` `/contour` `/source` `/developer-console` `/aip-chatbot` `/automation` | Compass resources and automations in scope |
 | `/media-item`, `/objects`, `/function`, `/language-model`, `/permission`, `/search` | Lookups added to context |
 | `/scope [show\|clear\|ontology]`, `/approval [mode\|rules]`, `/recap` | Context, approval mode and guard rules, a two-paragraph recap |
 | `/fde on`, `/fde <goal>`, `/fde goal <text>`, `/fde --branch <rid> [goal]`, `/fde`, `/fde resume`, `/fde end` | FDE mode: start on a new agent branch (with or without a goal) or adopt any open one, set the goal, show status, rebind after a restart, hand off |
 | `/trace` | Trace export status, and whether the last Foundry trace reached Langfuse |
 
 Every command has one name; there are no aliases. Every list command takes a
-filter, and `clear`. `/link-type`, `/interface`, `/egress-policy`,
-`/certificate` and `/automation` wait on Orthanc list commands and say so; the
-mod never falls back to Foundry REST.
+filter, and `clear`. `/egress-policy` and `/certificate` wait on Orthanc list
+commands and say so, naming the bead; the mod never falls back to Foundry REST.
+`/link-type` and `/interface` run `ontology link-type-list` and `ontology
+interface-list` on the ontology in scope. While FDE mode is bound to that
+ontology they read its branch (`--branch`, the way `ontology definition` reads a
+branch), so an FDE session picks the link types and interfaces of its own branch,
+and the listing names that branch; otherwise they read the main branch.
+The pick shows what each link joins and which object types implement each
+interface, and names the RID of every pick whose name another pick shares.
+`/automation` runs `automate list` under the selected projects, or under the
+namespace's, or every space when neither is picked, and passes its argument to
+`--name`. When one of those listings fails, the result says how many did, and a
+short walk is never picked from on its own.
 
 `/namespace` scopes the context to one Compass namespace (orthanc's space):
 `/project` and the Compass pickers list only its projects, `/search` stays under
@@ -148,9 +214,7 @@ approval mode: `orthanc_cli` reads the profile's `read_only` mark from
 starts, naming the exact call and the mark. What does run is what orthanc's own
 gate runs: reads, plans and local commands, so an agent can still preview a
 change on such a stack. A plan is the same call with `--apply` left off: it is a
-plain flag, and leaving it off is how orthanc asks for a plan. Use that spelling
-in FDE mode too, because there `--apply=false` counts as an apply and will not
-run as a preview. A mutation whose manifest entry has no `--apply` flag writes the
+plain flag, and leaving it off is how orthanc asks for a plan. A mutation whose manifest entry has no `--apply` flag writes the
 moment orthanc starts it, so it is refused, and the refusal says so instead of
 telling the agent to plan. `configure profile set <name> --no-read-only`, which
 clears the mark, asks the operator in every mode, `yolo` included, whoever the
@@ -184,8 +248,9 @@ enumerated, so a command that would remove thousands of directories is refused e
 none of its names is the store. A stack `configure list` says nothing about is unknown, not
 writable: the write goes to the operator and never runs blind, while reads and
 plans are not held up. `/profile` and `orthanc_help` say which stacks are
-read-only. Outside FDE mode `/namespace` steers discovery only; the gate does not
-deny writes outside it. FDE mode holds a session to it (below).
+read-only. `/namespace` steers discovery only; the gate does not deny writes
+outside it, in FDE mode or out (FDE mode keeps the namespace in scope and locks
+the picker until `/fde end`).
 
 ## FDE mode
 
@@ -205,49 +270,36 @@ status, the prompt (others may have work on it) and the handoff, which leaves
 closing it to its owner; a name that is not a plain branch name shows as its
 RID, and an open proposal on it is named when it is adopted. While bound:
 
-- Ontology writes go to that branch. A write that needs a branch and names none
-  gets it; a call that names any other global branch, another ontology,
-  `--profile` or an abbreviated branch flag is refused. Dataset, stream and
-  build writes keep the branch rule (a work branch, never main) but are not
-  pinned to the global branch.
-- The agent cannot create, close or merge global branches, or touch proposals,
-  while bound; `global-branch add-repo` runs on the bound branch only.
-- Plan, then apply: an `--apply` runs only after a clean dry run of the same
-  call. The plan pins every file the call reads (`--*-file` values, `@file`, a
-  short flag with its file attached (`-s@schema.json`), and any path-like
-  argument that reads as a file) by SHA-256, checked again just before the call
-  runs, and a file naming another global branch or ontology is refused. Each
-  dry run licenses one apply: the apply takes it before running, so two
-  identical applies in parallel cannot share it, and a refused apply, or one
-  Orthanc rejects as a usage error, gives it back; any other failure keeps it
-  spent, since Foundry may have changed. Directory arguments are not hashed,
-  and a file over 20 MB is refused.
-- With a namespace in scope (`/namespace`), FDE mode holds the session to it.
-  `/fde on` and `/fde --branch` first check that the ontology is in it, and
-  refuse before any branch exists if it is not, if it is in no namespace, or
-  if the check cannot run. While bound, every resource a write names, in its
-  arguments or in the files it reads, inputs included, must be in that
-  namespace: a RID (looked up with `resource batch-get`, once per binding, but a
-  folder it did not return is looked up again at every write) or a
-  Compass path under another namespace is refused, and so is a Compass folder
-  `batch-get` does not return, since it sits in no namespace the session can
-  see. A RID or path written as JSON escapes (`\u002e`, `\/`, a string encoded
-  twice) is scanned as Orthanc reads it, and `space create` is refused: a new
-  space is outside the namespace. RIDs `batch-get` does not know (branches,
-  transactions, malformed ones) pass. If the lookup itself fails, the write
-  asks the operator, naming the RIDs it could not check (`Run unchecked` or
-  not) instead of failing closed; with no one to ask, it does not run. Reads
-  are not checked. A space name or path that is not plain shows as its RID.
-  `/namespace` and the pane's clear button leave the namespace as it is until
-  `/fde end`; `/scope clear` keeps it on the stack the session is bound to.
+- The mode refuses exactly one thing itself: a write aimed directly at main or
+  master, however it is spelled (`--branch main`, `-bmaster`, `HEAD`,
+  `refs/heads/main`, quoted or joined to the flag). Everything else on
+  branches is the agent's to do — creating, closing, deploying or renaming
+  global branches, raising, reviewing, accepting and merging proposals, and
+  applying writes — each judged by the branch rule and the approval ladder
+  exactly as they do without the mode (in `yolo` that means no asks outside a
+  write on main; in the other modes the ladder's and the manifest's questions
+  stand).
+- Ontology writes that name no branch get the session's branch added. A call
+  that names another global branch, another ontology, or no branch at all is
+  judged by the base rules, not by the mode; `--profile` on a write is refused
+  by the ladder as always.
+- With a namespace in scope (`/namespace`), `/fde on` and `/fde --branch` still
+  check first that the ontology is in it, and refuse before any branch exists
+  if it is not, if it is in no namespace, or if the check cannot run. The
+  namespace stays in scope while bound — `/namespace` and the pane's clear
+  button leave it as it is until `/fde end`, and `/scope clear` keeps it on
+  the stack the session is bound to — but writes are not held to it. A space
+  name or path that is not plain shows as its RID.
 - The goal, branch and namespace go into the system prompt and a band above
   the prompt, and every turn is traced (not only the ones that touch Foundry).
 
-`/fde end` prints a handoff (branch, namespace, applied writes, how to close it) and
-leaves the branch open: merging or closing it is the operator's call. If a
-session ends while bound, the next one offers `/fde resume`. The mode only
-adds checks. The branch rule and the approval ladder (with its destructive
-rule, outside `yolo`) judge every bound call as before.
+`/fde end` prints a handoff (branch, namespace, the writes the session ran,
+how to merge or close it) and leaves the branch open. If a
+session ends while bound, the next one offers `/fde resume`. The branch rule
+and the approval ladder (with its destructive rule, outside `yolo`) judge every
+bound call as they do without the mode. It changes context in one place: the
+link types and interfaces picked while a binding was in scope go with it, when
+`/fde end` ends it or another binding replaces it.
 
 ## Operator rules and auto mode
 
@@ -323,15 +375,25 @@ and never changes what a tool call does.
 ```
 claude plugin validate .
 claude plugin test .
+node scripts/orthanc-tie.mjs check
 ```
+
+`orthanc-tie.mjs check` fails when plugin.json, marketplace.json,
+`hooks/orthanc-tie.ts` and the manifest snapshot disagree (a hooks module cannot
+read plugin.json, so `orthanc-tie.ts` mirrors it). `validate` warns that
+`min_orthanc` and `orthanc_checked` are unknown fields; Claude Code ignores them.
 
 `hooks/*.test.ts` cover the ladder, parity, the context view and trace export. For an E2E run
 against your own stack, record real Orthanc output and replay it:
 
 ```
 FOUNDRY_E2E_PROFILE=<profile> FOUNDRY_E2E_PROJECT=<project rid> \
-FOUNDRY_E2E_ONTOLOGY=<ontology rid> ./scripts/record.sh
+FOUNDRY_E2E_ONTOLOGY=<ontology rid> FOUNDRY_E2E_SPACE=<namespace rid> \
+FOUNDRY_E2E_BRANCH=<open global branch rid on that ontology> ./scripts/record.sh
 ```
+
+`FOUNDRY_E2E_SPACE` is required; `FOUNDRY_E2E_BRANCH` is optional and records the
+branch-qualified link-type and interface reads FDE mode sends.
 
 That writes `hooks/fixtures.local.ts`, which `hooks/e2e.local.test.ts` replays.
 Both stay out of git: they hold your stack's data.
