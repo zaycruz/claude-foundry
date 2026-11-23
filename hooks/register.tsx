@@ -85,6 +85,7 @@ import {
   type ManifestCommand,
   classifyCall,
   classifyOrthancCommand,
+  isLocalPull,
   compassRootReason,
   DEFAULT_APPROVAL_MODE,
   type GateClassification,
@@ -883,8 +884,15 @@ async function fdeGate(
   manifest: readonly ManifestCommand[],
 ): Promise<{ deny: string } | { input: Record<string, unknown>; ran: string | null }> {
   const resolved = resolveOrthancCommand(asString(input.command), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
-  const isMutation = resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest) === 'mutation'
-  const bound = fdeBind(fde, resolved.path, resolved.args, isMutation)
+  const isMutation = resolved.path !== '' && classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'mutation'
+  // A clone pull stays out of the *binding*: its --branch is a Code Repository
+  // branch, so pinning it to the session's global branch, or reading
+  // `--branch main` as a write aimed at main, would refuse a pull
+  // (hooks/fde-hold.test.ts H9a). The --force form is still the write the ladder
+  // judged, and it is still recorded: hooks/local-write.test.ts LW1 and
+  // hooks/fde-hold.test.ts H9b.
+  const bindable = isMutation && !isLocalPull(resolved.path)
+  const bound = fdeBind(fde, resolved.path, resolved.args, bindable)
   if ('deny' in bound) return bound
   return { input: { ...input, command: resolved.path, args: bound.args }, ran: isMutation ? resolved.path : null }
 }
