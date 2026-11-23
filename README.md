@@ -26,8 +26,8 @@ says so instead of falling back to REST.
   deletes and `--force` writes run at once, the loop guard is off, and a
   promotion (merging, accepting or approving a proposal, `global-branch
   deploy`, `repository pull-request merge`) runs with no ask, since it lands
-  through a proposal, never directly on main. A
-  release tag with no `--branch <global branch RID>` is a release on main and
+  through a proposal, never directly on main. A release tag with no
+  `--branch <global branch RID>` is a release on main and
   asks in `yolo` too. A write that Orthanc's agent manifest marks
   `operator_approval` (turning branch protection off, removing a required
   check) asks in every mode; in `yolo` it runs with no ask only when the
@@ -40,7 +40,14 @@ says so instead of falling back to REST.
   only, run only when the operator approves
   them, in every mode; with no one to ask they are refused.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
-  denied.
+  denied. A command whose manifest entry names a credential the operator types —
+  by `input`, or by `credential_store`, the store it writes — never runs, in any
+  mode, through `orthanc_cli` or Bash, and is refused before the ladder can ask
+  (`auth store`, `configure profile create`, `configure configure`,
+  `onboarding`). `orthanc_help` marks those commands `operator-only` and `/auth`
+  lists them for the operator's own terminal. The two entries that only clear the
+  store (`auth delete`, `configure delete`) name it too and type nothing, so the
+  ladder judges them as the deletes they are.
 - **A branch rule** that no approval mode can turn off: agent work happens on
   branches, never on a production main. Ontology writes must pass
   `--branch <global branch RID>`; dataset, stream and build writes must name a

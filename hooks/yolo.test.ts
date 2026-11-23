@@ -48,7 +48,21 @@
 //      refused; the prompt in other modes stops saying tags ask.
 //  Y10 FDE mode loosens in yolo: an apply with no dry run runs, and a bound
 //      delete, deploy or merge runs without a dialog.
-//  Y11 A credential command (auth store) runs in yolo.
+//  Y11 A credential command runs in yolo. Orthanc names the commands that put
+//      a secret of the operator's into their credential store two ways:
+//      `input` (`token-on-stdin` for `auth store`, `host-and-token` for
+//      `configure profile create` and `onboarding`) and, for the hidden
+//      `configure configure`, `credential_store` (it reads the secret on
+//      `--token-stdin` / `--client-secret-stdin`). 0.6.2 refused the `token-on-stdin` spelling and
+//      two names, so `configure profile create <name> --host … --token-stdin
+//      --force` — which replaces the credentials the profile every later call
+//      runs on — reached orthanc in every mode, and so did the hidden command.
+//      Now both marks refuse, in every mode, with no orthanc
+//      call, and refused before the ladder: a call that cannot run asks no
+//      question and spends no auto-mode verdict (the seam W14 pins for an
+//      over-cap call). `auth delete` and `configure delete` name the store they
+//      clear and no secret going in, so the ladder still judges those as the
+//      deletes yolo runs.
 //  Y12 An Orthanc write in Bash runs in yolo instead of going to orthanc_cli.
 //
 // zay, 2026-11-17: "when im in yolo mode of the plugin, no approvals are
@@ -127,9 +141,11 @@ type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
 
 const envelope = (data: unknown) =>
   JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors: [], meta: {}, warnings: [], artifacts: [], pagination: null })
+// path and kind, plus the full entry for the commands the guard judges by
+// their credential fields (see CREDENTIAL_MANIFEST).
 const COMMANDS: [string, string][] = [
   ['configure list', 'local'],
-  ['auth store', 'local'],
+  ['configure profile set', 'local'],
   ['ontology list', 'read-only'],
   ['global-branch create', 'mutation'],
   ['ontology object-type-delete', 'mutation'],
@@ -182,7 +198,45 @@ const COMMANDS: [string, string][] = [
   ['proposal accept', 'mutation'],
   ['proposal approve', 'mutation'],
 ]
-const MANIFEST = envelope({ commands: COMMANDS.map(([path, kind]) => ({ path, kind, args: [] })) })
+// The commands whose manifest entry names a credential, as Orthanc 0.7.10 names
+// them: `input` (`auth store` is token-on-stdin; `configure profile create` and
+// `onboarding` are host-and-token), or `credential_store` with a flag that reads
+// the secret from standard input (`configure configure`, hidden from --help,
+// which replaces a live profile's credentials with --force). The two removals
+// carry `credential_store` too and no `input`: they clear the store, so the gate
+// must not refuse them (zay, 2026-11-17: yolo runs deletes). The last entry is
+// Orthanc's field in a shape this plugin cannot read; the call is refused, the
+// same way an unreadable `operator_approval` is refused.
+const CREDENTIAL_MANIFEST = [
+  { path: 'auth store', kind: 'local', input: 'token-on-stdin' },
+  { path: 'configure profile create', kind: 'local', input: 'host-and-token' },
+  { path: 'onboarding', kind: 'local', input: 'host-and-token' },
+  {
+    path: 'configure configure',
+    kind: 'local',
+    credential_store: 'secret-service-or-file',
+    args: [
+      { flag: '--token-stdin', takes_value: false },
+      { flag: '--client-secret-stdin', takes_value: false },
+    ],
+  },
+  { path: 'auth delete', kind: 'local', credential_store: 'secret-service-or-file' },
+  {
+    path: 'configure delete',
+    kind: 'local',
+    credential_store: 'secret-service-or-file',
+    args: [{ flag: '--force', takes_value: false }],
+  },
+  // Orthanc's field in a shape this plugin cannot read: still a credential
+  // marker, not an absent one.
+  { path: 'credential probe', kind: 'local', credential_store: true, args: [{ flag: '--token-stdin', takes_value: false }] },
+]
+const MANIFEST = envelope({
+  commands: [
+    ...COMMANDS.map(([path, kind]) => ({ path, kind, args: [] })),
+    ...CREDENTIAL_MANIFEST.map(entry => ({ args: [], ...entry })),
+  ],
+})
 
 type Answer = string | 'throw'
 type Harness = {
@@ -488,10 +542,81 @@ test('Y10: in FDE mode under yolo a deploy and a merge run with no ask', async (
   expect(h.asked).toEqual([])
 })
 
-test('Y11: a credential command does not run in yolo', async ($, on) => {
+const CREDENTIAL_CALLS: [string, string[]][] = [
+  ['auth store', ['tester']],
+  // Orthanc marks these `host-and-token`, not `token-on-stdin`: a name list
+  // misses them, and `--force` replaces the credentials of a live profile.
+  ['configure profile create', ['other', '--host', 'https://other.example.com', '--token-stdin']],
+  ['configure profile create', ['tester', '--host', 'https://tester.example.com', '--token-stdin', '--force']],
+  ['onboarding', []],
+  // The hidden one: no `input`, only `credential_store` and `--token-stdin`.
+  // No `--profile`: a write naming a stack is refused before this gate.
+  ['configure configure', ['--host', 'https://other.example.com', '--auth-type', 'token', '--token-stdin', '--force']],
+  // A credential marker this plugin cannot read is a credential marker.
+  ['credential probe', ['--apply']],
+]
+
+// What the tool answered with, for a call that never reached orthanc.
+const refusedWith = (wrote: { result?: unknown }) => {
+  if (typeof wrote.result !== 'string') return undefined
+  try {
+    const parsed = JSON.parse(wrote.result) as { errors?: { type?: string; message?: string }[] }
+    return parsed.errors?.[0]
+  } catch {
+    return undefined
+  }
+}
+
+for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+  test(`Y11: in ${mode} mode no credential command runs, asks no one, whatever flag it carries`, async ($, on) => {
+    const h = harness(on, mode)
+    // An operator who approves everything still sees no dialog: the refusal comes
+    // before the ladder, so a call that cannot run never spends a question or an
+    // auto-mode verdict (the seam W14:448 pins for an over-cap call).
+    h.answer = 'Approve'
+    for (const [command, args] of CREDENTIAL_CALLS) {
+      const error = refusedWith(await write($, command, args))
+      expect({ command, args, type: error?.type }).toEqual({ command, args, type: 'credential-command-denied' })
+      expect(error?.message ?? '').toContain(command)
+    }
+    for (const [command] of CREDENTIAL_CALLS) expect({ command, ran: ran(h, command) }).toEqual({ command, ran: [] })
+    expect({ mode, asked: h.asked }).toEqual({ mode, asked: [] })
+  })
+}
+
+// The gate reads a credential going IN. Taking one away names no secret, so
+// those are the deletes zay lets yolo run (2026-11-17), judged by the ladder.
+// Both entries carry `credential_store`, as Orthanc 0.7.10 ships them: these
+// fail if the gate ever refuses a command for naming the store alone.
+const CREDENTIAL_REMOVALS: [string, string[]][] = [
+  ['auth delete', ['tester']],
+  ['configure delete', ['tester']],
+]
+
+test('Y11: in yolo, dropping a credential runs as the delete it is', async ($, on) => {
   const h = harness(on)
-  await write($, 'auth store', ['tester'])
-  expect(ran(h, 'auth store')).toEqual([])
+  for (const [command, args] of CREDENTIAL_REMOVALS) {
+    expect((await write($, command, args)).deny).toBe(undefined)
+  }
+  expect(h.asked).toEqual([])
+  for (const [command] of CREDENTIAL_REMOVALS) expect(ran(h, command).length).toBe(1)
+})
+
+test('Y11: in auto, dropping a credential asks the operator instead of meeting the credential gate', async ($, on) => {
+  const h = harness(on, 'auto')
+  for (const [command, args] of CREDENTIAL_REMOVALS) {
+    const error = refusedWith(await write($, command, args))
+    expect({ command, deniedByCredentialGate: error?.type }).toEqual({ command, deniedByCredentialGate: undefined })
+  }
+  expect(h.asked.length).toBe(CREDENTIAL_REMOVALS.length)
+})
+
+test('Y11: /auth names the commands the guard refuses, so a refusal points somewhere real', async ($, on) => {
+  harness(on)
+  const text = await say($, 'auth', 'tester')
+  for (const command of ['configure configure', 'configure profile create', 'onboarding']) {
+    expect({ command, text: text.includes(command) }).toEqual({ command, text: true })
+  }
 })
 
 test('Y12: an Orthanc write in Bash is refused in yolo and asks no one', async ($, on) => {

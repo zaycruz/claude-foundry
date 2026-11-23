@@ -82,6 +82,11 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'ontology object-type-delete', kind: 'mutation' },
   { path: 'global-branch create', kind: 'mutation' },
   { path: 'ontology definition', kind: 'read-only' },
+  // orthanc 0.7.10 (#181): the schema writes beyond object, link and action types.
+  { path: 'ontology interface-upsert', kind: 'mutation' },
+  { path: 'ontology shared-property-upsert', kind: 'mutation' },
+  { path: 'ontology type-group-upsert', kind: 'mutation' },
+  { path: 'ontology branch-index', kind: 'mutation' },
   { path: 'proposal merge', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply', '--yes'] }, operatorApprovalScope: 'always' },
   { path: 'proposal accept', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply', '--yes'] }, operatorApprovalScope: 'always' },
   { path: 'global-branch deploy', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply', '--yes'] }, operatorApprovalScope: 'always' },
@@ -145,6 +150,25 @@ test('D6: an ontology write with no --branch is bound to the session branch', as
   expect(bind('ontology object-type-upsert', [ONT, `--branch=${RID}`])).toEqual({ args: [ONT, `--branch=${RID}`] })
   // An ontology command that does not require a branch is not given one.
   expect(bind('ontology definition', [ONT, '--object-type', 'X'])).toEqual({ args: [ONT, '--object-type', 'X'] })
+})
+
+// The mode promises "an ontology write that needs a branch and names none gets
+// it", for every ontology write the branch rule knows, not only the four paths
+// the first version listed. orthanc 0.7.10 (#181) added the schema writes
+// beyond object, link and action types; the rule covers them, so the mode's
+// injection does too. Ways this can fail:
+//  D6b A schema write the mode does not know (interface, shared property, type
+//      group, branch index) is passed through with no branch: orthanc refuses it
+//      as a usage error, so a bound session cannot do that work at all.
+//  D6c It is supplied twice, or the supplied RID is not the session's.
+test('D6b D6c: every ontology write gets the session branch, the 0.7.10 schema writes included', async () => {
+  for (const path of ['ontology interface-upsert', 'ontology shared-property-upsert', 'ontology type-group-upsert', 'ontology branch-index']) {
+    expect({ path, bound: bind(path, [ONT, '--apply']) }).toEqual({ path, bound: { args: [ONT, '--apply', '--branch', RID] } })
+    expect({ path, twice: bind(path, [ONT, '--branch', RID, '--apply']) }).toEqual({ path, twice: { args: [ONT, '--branch', RID, '--apply'] } })
+    // Another branch is the agent's to name since 2026-11-20: the mode passes it
+    // to the ladder, which runs it there (a global branch RID is never main).
+    expect({ path, other: 'deny' in bind(path, [ONT, '--branch', OTHER, '--apply']) }).toEqual({ path, other: false })
+  }
 })
 
 test('D7: a bound write naming main or master is refused, in every spelling, whatever the mode', async () => {
