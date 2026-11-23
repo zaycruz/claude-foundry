@@ -1599,6 +1599,13 @@ export const RULES_WRITE_REASON =
 
 /** A file path as the filesystem sees it: absolute against `cwd`, ~ expanded, . and // collapsed, lowercased (macOS). */
 export function normalizedPath(path: string, cwd: string, home: string): string {
+  return resolvedPath(path, cwd, home).toLowerCase()
+}
+
+/** The absolute path as written, case kept. The mark-store guard needs the case: a
+ * glob such as `[!F]oundry` matches `foundry` in bash, and only the written case shows
+ * that. A segment without glob characters is still compared without case. */
+function resolvedPath(path: string, cwd: string, home: string): string {
   const expanded = path.trim().replace(/^~(?=\/|$)/, home)
   const absolute = expanded.startsWith('/') ? expanded : `${cwd.replace(/\/$/, '')}/${expanded}`
   const parts: string[] = []
@@ -1607,7 +1614,7 @@ export function normalizedPath(path: string, cwd: string, home: string): string 
     if (part === '..') parts.pop()
     else parts.push(part)
   }
-  return `/${parts.join('/')}`.toLowerCase()
+  return `/${parts.join('/')}`
 }
 
 export function rulesWriteReason(tool: string, input: Record<string, unknown>, cwd = '/', home = ''): string | null {
@@ -1741,14 +1748,18 @@ function globMatches(pattern: string, name: string): boolean {
       }
     } else body += /[.+^${}()|[\]\\]/.test(character) ? `\\${character}` : character
   }
-  return new RegExp(`^${body}$`, 'i').test(name)
+  // bash matches a glob against the real name case by case, so `[!F]oundry` names
+  // `foundry`; a case-insensitive disk (macOS) can also resolve a differently-cased
+  // name. Either match counts, which never refuses less than bash would.
+  return new RegExp(`^${body}$`).test(name) || new RegExp(`^${body}$`, 'i').test(name)
 }
 
 /** bash brace expansion: `mv ~/.config/foundry{,.bak}` and
  * `rm -rf ~/.config/{foundry,x}` name the store although no word holds it whole. Comma
- * lists and `{a..z}` / `{0..9}` ranges, nested, capped at 16 results; anything odder is
- * left as written. */
-/** How many names a brace word can produce, and the guard's budget for listing them.
+ * lists and every sequence bash expands (`{a..z}`, `{z..a}`, `{a..z..2}`, `{01..10}`),
+ * nested. A group bash would not expand is left as written, as bash leaves it.
+ *
+ * How many names a brace word can produce, and the guard's budget for listing them.
  * Past the budget the varying part is read as a shape instead, which is the safe side. */
 const BRACE_BUDGET = 4096
 
@@ -1774,6 +1785,7 @@ function expandBraces(word: string, budget: { left: number }): string[] | undefi
   if (close < 0) return [word]
   const body = word.slice(open + 1, close)
   const parts = body.includes(',') ? splitTopLevel(body, ',') : rangeParts(body)
+  if (parts === 'overflow') return undefined
   if (parts === undefined || parts.length === 0) return [word]
   if (parts.length > budget.left) return undefined
   const out: string[] = []
@@ -1821,8 +1833,19 @@ function braceShape(word: string): string {
 /** `?` per character of the shortest name in a group, and a `*` when they differ. */
 function groupShape(body: string): string | undefined {
   if (body.includes('{') || body.includes('/')) return undefined
-  const parts = body.includes(',') ? splitTopLevel(body, ',') : rangeParts(body)
-  if (parts === undefined || parts.length === 0) return undefined
+  if (!body.includes(',')) {
+    const range = rangeSpec(body)
+    if (range === undefined) return undefined
+    if (range.count <= BigInt(BRACE_BUDGET)) {
+      const names = rangeParts(body) as string[]
+      const lengths = names.map(name => name.length)
+      const shortest = Math.min(...lengths)
+      return '?'.repeat(shortest) + (Math.max(...lengths) === shortest ? '' : '*')
+    }
+    return '?'.repeat(range.shortest) + (range.uniform ? '' : '*')
+  }
+  const parts = splitTopLevel(body, ',')
+  if (parts.length === 0) return undefined
   const lengths = parts.map(part => part.length)
   const shortest = Math.min(...lengths)
   return '?'.repeat(shortest) + (Math.max(...lengths) === shortest ? '' : '*')
@@ -1847,26 +1870,60 @@ function splitTopLevel(body: string, separator: string): string[] {
   return parts
 }
 
-/** `{a..d}` and `{2..4}` as their list, at any width, or undefined when it is not a
- * plain range. bash's `01..03` and `{1..9..2}` spellings are left as written rather than
- * expanded wrong. */
-function rangeParts(body: string): string[] | undefined {
-  const match = /^(\S+)\.\.(\S+)$/.exec(body)
+/** A bash sequence expression `{x..y}` or `{x..y..step}`, as bash reads it: integers
+ * (zero-padded when either end starts with `0` or `-0`) or single ASCII letters, in
+ * either direction, with any step (its sign is ignored and 0 means 1). A letter range
+ * walks every character code between its ends, so `{Y..b}` passes `[`, `\\` and `_`
+ * as bash does. Anything else is not a range and stays as written, as in bash. */
+type Range = { count: bigint; at: (index: bigint) => string; shortest: number; uniform: boolean }
+
+function rangeSpec(body: string): Range | undefined {
+  const match = /^([+-]?\d+|[a-zA-Z])\.\.([+-]?\d+|[a-zA-Z])(?:\.\.([+-]?\d+))?$/.exec(body)
   if (match === null) return undefined
-  const [, first = '', last = ''] = match
-  if (/^\d+$/.test(first) && /^\d+$/.test(last) && (first.startsWith('0') || last.startsWith('0')) && first.length !== last.length)
-    return undefined
-  if (/^-?\d+$/.test(first) && /^-?\d+$/.test(last)) {
-    const size = Math.abs(Number(last) - Number(first)) + 1
-    if (size > BRACE_BUDGET) return undefined
-    return Array.from({ length: size }, (_value, index) => String(Number(first) + index * Math.sign(Number(last) - Number(first))))
+  const [, first = '', last = '', stepText] = match
+  const rawStep = stepText === undefined ? 1n : BigInt(stepText.replace(/^\+/, ''))
+  const step = rawStep === 0n ? 1n : rawStep < 0n ? -rawStep : rawStep
+  const numeric = /\d/.test(first)
+  if (numeric !== /\d/.test(last)) return undefined
+  if (!numeric) {
+    const from = BigInt(first.charCodeAt(0))
+    const to = BigInt(last.charCodeAt(0))
+    const down = to < from
+    const span = down ? from - to : to - from
+    return {
+      count: span / step + 1n,
+      at: index => String.fromCharCode(Number(down ? from - index * step : from + index * step)),
+      shortest: 1,
+      uniform: true,
+    }
   }
-  if (first.length === 1 && last.length === 1 && /[a-zA-Z]/.test(first) && /[a-zA-Z]/.test(last) && first <= last) {
-    const size = last.charCodeAt(0) - first.charCodeAt(0) + 1
-    if (size > BRACE_BUDGET) return undefined
-    return Array.from({ length: size }, (_value, index) => String.fromCharCode(first.charCodeAt(0) + index))
+  const from = BigInt(first.replace(/^\+/, ''))
+  const to = BigInt(last.replace(/^\+/, ''))
+  const down = to < from
+  const span = down ? from - to : to - from
+  const padded = /^-?0\d/.test(first) || /^-?0\d/.test(last)
+  const width = padded ? Math.max(first.length, last.length) : 0
+  const format = (value: bigint) => {
+    if (!padded) return value.toString()
+    if (value < 0n) return `-${(-value).toString().padStart(width - 1, '0')}`
+    return value.toString().padStart(width, '0')
   }
-  return undefined
+  return {
+    count: span / step + 1n,
+    at: index => format(down ? from - index * step : from + index * step),
+    // With padding every name is at least `width` long; without it, a range that crosses
+    // the single digits has names of one character.
+    shortest: padded ? width : 1,
+    uniform: false,
+  }
+}
+
+/** The names of a range, or 'overflow' when there are more than the budget. */
+function rangeParts(body: string): string[] | 'overflow' | undefined {
+  const range = rangeSpec(body)
+  if (range === undefined) return undefined
+  if (range.count > BigInt(BRACE_BUDGET)) return 'overflow'
+  return Array.from({ length: Number(range.count) }, (_value, index) => range.at(BigInt(index)))
 }
 
 /** The words a line runs, as the shell runs them and with what it substitutes in
@@ -1904,7 +1961,7 @@ function runWords(command: string, home: string, configHome: string): { words: s
 function mentionedDirs(segments: readonly string[][], cwd: string, home: string): Set<string> {
   const dirs = new Set<string>([cwd.replace(/\/+$/, '') || '/'])
   const add = (path: string) => {
-    const found = normalizedPath(path.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
+    const found = resolvedPath(path.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
     dirs.add(found)
     const cut = found.lastIndexOf('/')
     if (cut > 0) dirs.add(found.slice(0, cut))
@@ -1948,8 +2005,8 @@ function bareNamesStore(token: string, dir: string): boolean {
  * a relative one resolves at each directory the command says it is working in, which is
  * how `cd ~ && rm -rf .config` names `~/.config`. */
 function storePaths(token: string, cwd: string, home: string, mentioned: Set<string>): string[] {
-  if (/^(?:\/|~|\$)/.test(token)) return [normalizedPath(token, cwd, home)]
-  return [...mentioned, cwd].map(where => normalizedPath(`${where.replace(/\/+$/, '')}/${token}`, cwd, home))
+  if (/^(?:\/|~|\$)/.test(token)) return [resolvedPath(token, cwd, home)]
+  return [...mentioned, cwd].map(where => resolvedPath(`${where.replace(/\/+$/, '')}/${token}`, cwd, home))
 }
 
 /** Whether one word reaches the mark store, anything under it, or a directory holding
@@ -1980,7 +2037,7 @@ export const PROFILE_STORE_WRITE_REASON =
 
 /** Where orthanc keeps its profiles: `configHome` if set, else `<home>/.config`, plus `foundry`. */
 const profileStoreDir = (home: string, configHome = ''): string =>
-  normalizedPath(`${configHome.trim() === '' ? (home === '' ? '~/.config' : `${home}/.config`) : configHome.trim()}/foundry`, '/', home)
+  resolvedPath(`${configHome.trim() === '' ? (home === '' ? '~/.config' : `${home}/.config`) : configHome.trim()}/foundry`, '/', home)
 
 /**
  * Why a call must not write into orthanc's config dir, or null. The read-only mark
@@ -2018,7 +2075,7 @@ export function profileStoreWriteReason(
   configHome = '',
 ): string | null {
   const dir = profileStoreDir(home, configHome)
-  const inside = (path: string) => pathReachesStore(normalizedPath(path.replace(/\\/g, '/'), cwd, home), dir)
+  const inside = (path: string) => pathReachesStore(resolvedPath(path.replace(/\\/g, '/'), cwd, home), dir)
   const paths = [input.file_path, input.notebook_path, input.path].filter((value): value is string => typeof value === 'string')
   if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
   if (tool !== 'Bash' || typeof input.command !== 'string') return null

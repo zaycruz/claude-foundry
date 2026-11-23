@@ -718,6 +718,46 @@ test('Q18: a wide brace range and a POSIX class reach the store too', async ($, 
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
 })
 
+// Review round 7: every spelling here is one bash expands to the store, checked with
+// `printf '%s\n' <token>` in a home that holds `.config/foundry`. A range runs in either
+// direction and takes a step; a negated set is matched against the name as bash matches
+// it, case by case, so `[!F]` excludes `F` and not `f`.
+test('Q19: a descending or stepped range and a negated set reach the store too', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  for (const command of [
+    'rm -rf ~/.config/foundr{z..a}',
+    'rm -rf ~/.co{z..a}fig',
+    'rm -rf ~/.config/foundr{a..z..1}',
+    'rm -rf ~/.config/foundr{a..z..2}',
+    'rm -rf ~/.config/foundr{y..a..1}',
+    'rm -rf ~/.config/foundr{z..a..-1}',
+    'rm -rf ~/.config/foundr{a..z..0}',
+    'rm -rf ~/.config/[!F]oundry',
+    'rm -rf ~/.config/[^F]oundry',
+    'rm -rf ~/.config/[!A-Z]oundry',
+    'rm -rf ~/.config/[^[:upper:]]oundry',
+    'rm -rf ~/.co[^N]fig',
+    'mv ~/.c[!O]nfig /tmp/',
+    // The home directory's own segment is matched as written too.
+    'rm -rf /home/[!T]ester/.config/foundry',
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command)
+  }
+  expect(denied).toEqual([])
+  // Ranges bash expands to names that are not the store still run.
+  for (const command of [
+    'rm -rf ~/.config/foundr{x..a}',
+    'rm -rf ~/.config/foundr{a..z..2}x',
+    'rm -rf ~/.config/foundr{b..z..2}',
+    'rm -rf ~/.config/foundry{05..1}',
+    'rm -rf ~/.config/[!f]oundry',
+    'rm -rf ~/.config/foundr[!y]',
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+})
+
 test('Q15: the stack name in the question cannot put a line in front of the operator', async ($, on) => {
   const h = harness(on, 'yolo')
   // The shape this ask exists for: a manifest that does not mark the clear.
