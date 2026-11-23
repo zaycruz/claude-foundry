@@ -1147,11 +1147,12 @@ function shellClassification(
 // while the trace still calls them Foundry. A gate narrower than the trace is the
 // defect this table exists to close (measured on e01f1dd: `mcp__Palantir__delete_object`
 // and `mcp__foundry_tools__delete_object` ran in all four modes).
-export const FOUNDRY_MCP_NAME = /(?:palantir|foundry)/i
+const FOUNDRY_MCP_NAME = /(?:palantir|foundry)/i
 const MCP_PREFIX = 'mcp__'
+const MCP_PREFIX_RE = /^mcp__/i
 
 /** `mcp__<server>__<tool>` as its two parts; null when the name is not an MCP tool. */
-export function mcpToolParts(tool: string): { server: string; inner: string } | null {
+function mcpToolParts(tool: string): { server: string; inner: string } | null {
   if (!tool.startsWith(MCP_PREFIX)) return null
   const rest = tool.slice(MCP_PREFIX.length)
   const split = rest.indexOf('__')
@@ -1164,8 +1165,10 @@ export function foundryMcpTool(tool: string): { inner: string } | null {
   const parts = mcpToolParts(tool)
   if (parts === null)
     // A name without the `mcp__<server>__<tool>` shape: read the rest as the tool,
-    // so the guard and the trace see the same set of names.
-    return tool.startsWith(MCP_PREFIX) && FOUNDRY_MCP_NAME.test(tool.slice(MCP_PREFIX.length))
+    // so the guard and the trace see the same set of names. The prefix test ignores
+    // case, as the trace's does, or `MCP__Palantir__delete_object` would be traced
+    // as Foundry and never gated.
+    return MCP_PREFIX_RE.test(tool) && FOUNDRY_MCP_NAME.test(tool.slice(MCP_PREFIX.length))
       ? { inner: tool.slice(MCP_PREFIX.length) }
       : null
   return FOUNDRY_MCP_NAME.test(parts.server) || FOUNDRY_MCP_NAME.test(parts.inner) ? { inner: parts.inner } : null
@@ -1182,12 +1185,21 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
   return foundryMcpTool(tool) !== null
 }
 
-const WRITE_WORDS = new Set(['add', 'apply', 'build', 'create', 'delete', 'deploy', 'edit', 'install', 'post', 'publish', 'put', 'remove', 'rename', 'set', 'submit', 'update', 'write'])
+// The verbs that change something in Foundry. This plugin already treats approvals,
+// merges, promotions and unprotects as writes that need the operator
+// (`DENIED_COMMANDS`, `destructiveFromWords`), so an MCP tool naming one is a write
+// too. Without these words a name like `view_branch_and_revoke_protection` hit only
+// its read verb and ran with no ladder (reviewed at e01f1dd, where it ran too).
+const WRITE_WORDS = new Set(['add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'revoke', 'rotate', 'set', 'submit', 'terminate', 'truncate', 'unprotect', 'update', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
 
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
-  const words = inner.toLowerCase().split(/[^a-z]+/)
+  // Split on separators and on letter case, so `listObjects`, `list_objects` and
+  // `ListObjects` all read as the words `list` and `objects`. Splitting only on
+  // separators made a camelCase read an unreadable name, and the guard refused a
+  // call that says plainly it only lists.
+  const words = inner.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/).map(word => word.toLowerCase())
   if (words.some(word => WRITE_WORDS.has(word))) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
   if (words.some(word => READ_WORDS.has(word))) return 'read'

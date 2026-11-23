@@ -62,6 +62,9 @@ const WRITES = [
   'mcp__foundryTools__delete_object',
   'mcp__palantirfoundry__delete_object',
   'mcp__mypalantir__delete_object',
+  // The `mcp__` prefix itself in caps: the trace reads it case-insensitively, so the
+  // guard must too.
+  'MCP__Palantir__delete_object',
   // A neutral server whose tool name says what it touches.
   'mcp__tools__foundry_delete_object',
 ]
@@ -71,6 +74,33 @@ test('MS1: a Foundry MCP write is blocked in every mode, in every spelling', asy
     expect({ tool, blocked: blockedEverywhere(classifyCall(tool, { object: 'ri.x' }, MANIFEST, 'agent/x')) }).toEqual({ tool, blocked: true })
     const reason = classifyCall(tool, { object: 'ri.x' }, MANIFEST, 'agent/x')!.error ?? ''
     expect({ tool, namesTool: reason.includes(tool), namesOrthanc: reason.includes('orthanc_cli') }).toEqual({ tool, namesTool: true, namesOrthanc: true })
+  }
+})
+
+test('MS2b: a camelCase or mixed-case read verb is still a read', async () => {
+  // Splitting only on separators would make `listObjects` an unreadable name and the
+  // guard would refuse a call that says plainly it only lists.
+  for (const tool of [
+    'mcp__palantir__listObjects',
+    'mcp__Palantir__getObject',
+    'mcp__foundry_tools__searchObjects',
+    'mcp__palantirFoundry__describeBranch',
+    'mcp__foundry-mcp__readObject',
+  ]) {
+    expect({ tool, classified: classifyCall(tool, { typeId: 'T' }, MANIFEST, null) }).toEqual({ tool, classified: null })
+  }
+})
+
+test('MS3b: a read verb does not excuse a write verb in the same name', async () => {
+  // 'view' and 'get' are reads; the write word must still win, or a name that says it
+  // revokes protection runs with no ladder and no ask.
+  for (const tool of [
+    'mcp__palantir__view_branch_and_revoke_protection',
+    'mcp__palantir__get_object_and_grant_access',
+    'mcp__foundry_tools__list_and_approve_action',
+    'mcp__palantirFoundry__searchAndMergeRequest',
+  ]) {
+    expect({ tool, blocked: blockedEverywhere(classifyCall(tool, {}, MANIFEST, 'agent/x')) }).toEqual({ tool, blocked: true })
   }
 })
 
@@ -190,20 +220,18 @@ test('MS8: the gate is never narrower than the trace, for any spelling', async (
   for (const tool of ['mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__linear-project-a__create_issue', 'Read']) {
     expect({ tool, gated: foundryMcpTool(tool) !== null, traced: touchesFoundryTool(tool, {}) }).toEqual({ tool, gated: false, traced: false })
   }
-  // The set equality, not just on these two functions: the guard's name test must
-  // be neither wider nor narrower than the shape the plugin's tracer has always
-  // used. A narrower guard runs the call; a wider one refuses calls the trace never
-  // called Foundry.
+  // The same name test against the shape the plugin's tracer has always used, so a
+  // change to one that leaves the other behind fails here. It is a copied shape on
+  // purpose: the copy is what shows the drift. A guard narrower than this runs the
+  // call; a guard wider than this refuses calls the trace never called Foundry.
   const TRACER = /^mcp__.*(palantir|foundry)/i
   // `osdk` and `ontology` are pinned NOT gated on purpose: they name no Foundry
   // product, so a name rule cannot reach them, and MS1 records them as still open.
-  // Widen the matcher and this loop fails until the README says so too.
+  // Widening the matcher past the trace fails this loop; so does narrowing it.
   for (const tool of [...NAMES, 'mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__refoundry__list', 'mcp__osdk__write_object', 'mcp__ontology__delete_object']) {
     expect({ tool, gate: foundryMcpTool(tool) !== null, trace: TRACER.test(tool) }).toEqual({ tool, gate: TRACER.test(tool), trace: TRACER.test(tool) })
   }
 })
-
-type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 
 for (const mode of MODES) {
   test(`MS6: through the hook in ${mode}, a Foundry MCP write is refused with no one asked, and orthanc_help still answers`, async ($, on) => {

@@ -49,8 +49,9 @@ says so instead of falling back to REST.
   server named for Palantir or Foundry counts as such a write in any case or
   spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
   `mcp__palantirFoundry__…`), not only the exact name `mcp__palantir__`; a tool
-  whose name only reads (`list`, `get`, `search`) still runs, and one whose name
-  the guard cannot read is refused. A write naming
+  whose name only reads (`list`, `get`, `search`) still runs; a name carrying both
+  a read verb and a write verb (`view_branch_and_revoke_protection`) counts as a
+  write, and one whose name the guard cannot read is refused. A write naming
   `main`/`master` asks the operator (above). Writes whose branch defaults to
   main or master must name a branch too: connectivity imports, repository
   imports, `dataset create-from-csv`, `workshop module update`, `automate
