@@ -1836,10 +1836,24 @@ const basename = (word: string | undefined) => (word ?? '').split('/').at(-1)?.r
 
 // Programs whose `-c` code is not shell code: Python (`python`, `python3`, `python3.12`).
 const CODE_INTERPRETERS = /^python[0-9.]*$/
+// Project tools whose `run` subcommand starts the program named after it (`uv run python`).
+const RUN_LAUNCHERS = new Set(['uv', 'poetry', 'pipenv', 'pdm', 'hatch', 'rye'])
+
+/** The name of the program a segment runs: its command word past wrappers
+ * (`sudo`, `env`, `timeout 5`, and `npx -c`'s code, a flag value) and past `uv run`. */
+function programName(words: readonly string[]): string {
+  let index = commandWord(words)
+  if (index < 0) return ''
+  if (RUN_LAUNCHERS.has(basename(words[index])) && words[index + 1] === 'run') {
+    index += 2
+    while ((words[index] ?? '').startsWith('-')) index += 1
+  }
+  return basename(words[index])
+}
 
 /** commandSegments for the mark-store guard. Code after `-c` (`su -c`, `npx -c`,
  * `flock -c`, `script -c`, `env -S`) is read as shell code, as codeWords reads it,
- * except when a program in CODE_INTERPRETERS runs it. That code's string literals
+ * except when the segment's program (programName) is in CODE_INTERPRETERS. That code's string literals
  * become words of its command instead, so a relative name after a `cd`
  * (`shutil.rmtree("foundry")`) still names the store, and a lone `'/'` is not the root.
  * `python3 -c "print('/')"` is Python: read as shell, `('/')` is a subshell whose
@@ -1847,7 +1861,9 @@ const CODE_INTERPRETERS = /^python[0-9.]*$/
  * path piece. */
 function storeSegments(command: string, depth = 0): Segment[] {
   const parsed = shellWords(command)
-  const interpreted = (words: readonly string[]) => words.some(word => CODE_INTERPRETERS.test(basename(word)))
+  // Only the program that runs the code decides, not a word of the code, a lock file
+  // or an argument (`sh -c "…; /usr/bin/python3"`, `flock /tmp/python3 -c …`).
+  const interpreted = (words: readonly string[]) => CODE_INTERPRETERS.test(programName(words))
   const shellCode = (words: readonly string[]) => (interpreted(words) ? [] : codeWords(words))
   const literals = (code: string) =>
     [...code.matchAll(/(['"])((?:\\.|(?!\1)[^\\])*)\1/g)].map(match => match[2]!).filter(text => text !== '' && !/^\/+$/.test(text))
@@ -3785,7 +3801,8 @@ const UNKNOWN_DIR = 'FOUNDRY_GUARD_UNKNOWN_DIR'
 
 /** Where `${X}/tail` can point when the line does not know X: each directory above the
  * store followed by the tail, and the store itself when the tail's first name can be
- * a mark file or the tail climbs back with `..` (`$X/x/../profile-settings.json`). So `rm -rf $X/.config/foundry` and `rm -f $D/profile-settings.json` can
+ * a mark file (`$D/./profile-settings.json` too) or the tail climbs back with `..`
+ * (`$X/x/../profile-settings.json`). So `rm -rf $X/.config/foundry` and `rm -f $D/profile-settings.json` can
  * reach the store, and `> $TMPDIR/out.txt` cannot. (Unset, X is the empty text: that
  * form, `/tail`, is already among the words.) */
 function unknownDirPaths(word: string, dir: string): string[] {
@@ -3794,7 +3811,7 @@ function unknownDirPaths(word: string, dir: string): string[] {
   const tail = match[1]!
   const above: string[] = []
   for (let cut = dir.lastIndexOf('/'); cut > 0; cut = dir.lastIndexOf('/', cut - 1)) above.push(dir.slice(0, cut))
-  const parts = tail.split('/').filter(part => part !== '')
+  const parts = tail.split('/').filter(part => part !== '' && part !== '.')
   const itself = bareNamesStore(parts[0] ?? '', dir) || parts.includes('..')
   return [...above, ...(itself ? [dir] : [])].map(base => base + tail)
 }

@@ -1148,6 +1148,10 @@ test('Q22: a redirect into a variable path and a / in interpreter text do not me
       `env PYTHONPATH=. python3 -c "print('/')"`,
       `python3 -c "import os; print(os.listdir('src'))"`,
       `python3 -c "print('a' + '/' + 'b')"`,
+      `timeout 5 python3 -c "print('/')"`,
+      `nice -n 5 python3 -c "x.split('/')"`,
+      `poetry run python -c "print('/')"`,
+      `/usr/bin/python3 -I -c "print('/')"`,
       `python3 -c 'print("//")'`,
       `python3 -c "print('a\\\\b'.split('/'))"`,
       `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b`,
@@ -1228,6 +1232,19 @@ test('Q22: a redirect into a variable path and a / in interpreter text do not me
         `cd ~/.config/foundry && python3 -c "import os; os.remove('profile-settings.json')"`,
         `cd ~ && python3 -c "import shutil; shutil.rmtree('.config/foundry')"`,
         `cd ~/.config && python3 -c "open('foundry/profile-settings.json', 'w').write('{}')"`,
+        // Review 3: only the program that runs the -c code decides whether it is Python;
+        // a word of the code, a lock file or an argument named python3 does not.
+        'cd ~/.config && bash -c "rm -rf foundry; /usr/bin/python3"',
+        'cd ~/.config && sh -c "rm -rf foundry && ./venv/bin/python3"',
+        'cd ~/.config && sh -c "rm -rf foundry" python3',
+        'cd ~/.config && su tester -c "rm -rf foundry; /usr/bin/python3"',
+        'cd ~/.config && flock /tmp/python3 -c "rm -rf foundry"',
+        'cd ~/.config && npx -c "rm -rf foundry; /usr/bin/python3"',
+        'cd ~/.config && su tester -c "rm -rf foundry" -s /usr/bin/python3',
+        // An unknown directory followed by ./ can be the store itself.
+        'echo {} > $D/./profile-settings.json',
+        'rm -f $D/./profile-settings.json',
+        'rm -f "$D"/./profile-settings.json',
       ].map(command => [where, command] as [string, string]),
     )
   writes.push(['/home/tester/.config/foundry', 'npx -c "cd .. && rm -rf foundry"'])

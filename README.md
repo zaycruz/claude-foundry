@@ -304,8 +304,8 @@ makes that variable unknown, not empty, so `curl -o "$OUT"` is not a write to `/
 or `~/*`. An unknown variable or substitution that starts a word and is followed
 by `/name` (`$TMPDIR/out.txt`, `"$S/marks.json"`, `"$(mktemp -d)/x"`) reads as an
 unknown directory. It can be the empty text (`/name`), any directory above the
-store, or the store itself when `name` can be a mark file or the rest of the path
-climbs back with `..`. So `rm -rf $X/.config/foundry`,
+store, or the store itself when `name` can be a mark file (also after `./`) or the
+rest of the path climbs back with `..`. So `rm -rf $X/.config/foundry`,
 `rm -rf "$X"/../tester/.config/foundry`, `rm -f $D/profile-settings.json` and
 `echo {} > $TMPDIR/x/../profile-settings.json` are refused from any working directory. The guard does not read such a word as `*`, which
 would resolve against every directory the line names. A redirect
@@ -316,7 +316,11 @@ redirect into `"$f"`, `$S/profile-settings.json` or `$S/p*` is still refused on 
 line that names the store. `mktemp` counts as a reader: it only makes a new file and
 never replaces or removes one. It resolves relative names after a `cd`. It reads the
 code after `-c` and `env -S` as shell code (`bash -c`, `sudo sh -c`, `su -c`,
-`npx -c`, `flock -c`, `script -c`), except when Python runs it. The code in
+`npx -c`, `flock -c`, `script -c`), except when the program that runs it is Python
+(`python3`, `sudo python3`, `timeout 5 python3`, `uv run python`). A word of the code,
+a lock file or an argument named `python3` does not count, so
+`sh -c "rm -rf foundry; /usr/bin/python3"` and `flock /tmp/python3 -c "…"` are read
+as shell. The code in
 `python3 -c "print('/')"` is Python, so `('/')` is not a subshell whose word `/` is
 the root. Its string literals count as names the command uses, so
 `cd ~/.config && python3 -c 'shutil.rmtree("foundry")'` is still refused. A literal
