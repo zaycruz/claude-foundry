@@ -1138,12 +1138,16 @@ function shellClassification(
 }
 
 // A Foundry MCP server, in any spelling the operator typed into their config: the
-// name says palantir or foundry (`Palantir`, `palantir-mcp`, `foundry_tools`). The
-// tracer already reads this shape (`register.tsx` touchesFoundry: a write outside
-// Orthanc is traced); a gate narrower than the trace lets the same call run with no
-// ladder, no branch rule and no refusal — measured on e01f1dd, `mcp__Palantir__delete_object`
-// and `mcp__foundry_tools__delete_object` ran in all four modes.
-const FOUNDRY_MCP_NAME = /(?:^|[^a-z])(?:palantir|foundry)(?:[^a-z]|$)/i
+// name says palantir or foundry (`Palantir`, `palantir-mcp`, `foundry_tools`,
+// `palantirFoundry`). The test is a substring, the same width the plugin's own
+// tracer uses, because a word boundary would miss the glued and camelCase names:
+// `[^a-z]` under `/i` also excludes `A`-`Z`, so a boundary rule leaves
+// `palantirFoundry`, `FoundryMCP` and `palantirfoundry` — the host form this repo
+// itself writes in `register.tsx` and `telemetry.test.ts` — running with no ladder
+// while the trace still calls them Foundry. A gate narrower than the trace is the
+// defect this table exists to close (measured on e01f1dd: `mcp__Palantir__delete_object`
+// and `mcp__foundry_tools__delete_object` ran in all four modes).
+export const FOUNDRY_MCP_NAME = /(?:palantir|foundry)/i
 const MCP_PREFIX = 'mcp__'
 
 /** `mcp__<server>__<tool>` as its two parts; null when the name is not an MCP tool. */
@@ -1158,8 +1162,24 @@ export function mcpToolParts(tool: string): { server: string; inner: string } | 
 /** True for an MCP tool that reaches Foundry: its server or its own name says so. */
 export function foundryMcpTool(tool: string): { inner: string } | null {
   const parts = mcpToolParts(tool)
-  if (parts === null) return null
+  if (parts === null)
+    // A name without the `mcp__<server>__<tool>` shape: read the rest as the tool,
+    // so the guard and the trace see the same set of names.
+    return tool.startsWith(MCP_PREFIX) && FOUNDRY_MCP_NAME.test(tool.slice(MCP_PREFIX.length))
+      ? { inner: tool.slice(MCP_PREFIX.length) }
+      : null
   return FOUNDRY_MCP_NAME.test(parts.server) || FOUNDRY_MCP_NAME.test(parts.inner) ? { inner: parts.inner } : null
+}
+
+/**
+ * The one answer to "does this call touch Foundry", for the guard and for the
+ * trace. A second copy of the name test is how the two drift apart: a call the
+ * trace called Foundry while the guard did not ran with no ladder.
+ */
+export function touchesFoundryTool(tool: string, input: Record<string, unknown>): boolean {
+  if (tool === ORTHANC_CLI || tool === ORTHANC_HELP) return true
+  if (tool === 'Bash') return /\borthanc\b/.test(typeof input.command === 'string' ? input.command : '')
+  return foundryMcpTool(tool) !== null
 }
 
 const WRITE_WORDS = new Set(['add', 'apply', 'build', 'create', 'delete', 'deploy', 'edit', 'install', 'post', 'publish', 'put', 'remove', 'rename', 'set', 'submit', 'update', 'write'])

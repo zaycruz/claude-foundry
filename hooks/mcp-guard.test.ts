@@ -31,7 +31,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { classifyCall, classifyMcpIntent, ladderDecision, type ManifestCommand } from './policy'
+import { classifyCall, classifyMcpIntent, foundryMcpTool, ladderDecision, type ManifestCommand, touchesFoundryTool } from './policy'
 
 const MANIFEST: ManifestCommand[] = [
   { path: 'ontology list', kind: 'read-only' },
@@ -55,6 +55,13 @@ const WRITES = [
   'mcp__Foundry__osdk_write',
   'mcp__foundry-mcp__delete_object',
   'mcp__foundry_tools__delete_object',
+  // Letter-glued and camelCase names: no delimiter to lean on. `palantirfoundry` is
+  // the host form this repo writes in `register.tsx` and `telemetry.test.ts`.
+  'mcp__palantirFoundry__apply_action',
+  'mcp__FoundryMCP__delete_object',
+  'mcp__foundryTools__delete_object',
+  'mcp__palantirfoundry__delete_object',
+  'mcp__mypalantir__delete_object',
   // A neutral server whose tool name says what it touches.
   'mcp__tools__foundry_delete_object',
 ]
@@ -103,8 +110,9 @@ test('MS4: the plugin owns mcp__foundry__, and its two tools keep their own path
 })
 
 test('MS5: a server with no Foundry name is left alone', async () => {
-  // The last six are the server names on the operator's own Claude config, so a
-  // real setup is what this test protects.
+  // The last six are the shapes a real Claude config holds (an operator's own
+  // mcpServers keys, written here with neutral names): a hyphen, a vendor word and
+  // a project suffix, none of them Foundry.
   for (const tool of [
     'mcp__github__create_issue',
     'mcp__filesystem__write_file',
@@ -113,8 +121,8 @@ test('MS5: a server with no Foundry name is left alone', async () => {
     'mcp__clerk__create_user',
     'mcp__supabase__run_query',
     'mcp__reasoning-bank__write_note',
-    'mcp__linear-raava__create_issue',
-    'mcp__linear-qwalo__update_issue',
+    'mcp__linear-project-a__create_issue',
+    'mcp__linear-project-b__update_issue',
     'Read',
     'Write',
   ]) {
@@ -161,6 +169,38 @@ function harness(on: On, mode: (typeof MODES)[number]) {
   })
   return { asked }
 }
+
+test('MS8: the gate is never narrower than the trace, for any spelling', async () => {
+  // The defect this rule exists to close: the trace called a call Foundry while the
+  // guard did not, so it ran with no ladder. Every name the trace claims must at
+  // least reach the guard, even where the guard then lets a read through.
+  const NAMES = [
+    ...WRITES,
+    'mcp__palantir__list_objects',
+    'mcp__Palantir__get_object',
+    'mcp__foundry_tools__search_objects',
+    'mcp__palantirfoundry__delete_object',
+    'mcp__palantir-mcp__delete_object',
+    'mcp__Palantir__delete_object',
+  ]
+  for (const tool of NAMES) {
+    expect({ tool, gated: foundryMcpTool(tool) !== null, traced: touchesFoundryTool(tool, {}) }).toEqual({ tool, gated: true, traced: true })
+  }
+  for (const tool of ['mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__linear-project-a__create_issue', 'Read']) {
+    expect({ tool, gated: foundryMcpTool(tool) !== null, traced: touchesFoundryTool(tool, {}) }).toEqual({ tool, gated: false, traced: false })
+  }
+  // The set equality, not just on these two functions: the guard's name test must
+  // be neither wider nor narrower than the shape the plugin's tracer has always
+  // used. A narrower guard runs the call; a wider one refuses calls the trace never
+  // called Foundry.
+  const TRACER = /^mcp__.*(palantir|foundry)/i
+  // `osdk` and `ontology` are pinned NOT gated on purpose: they name no Foundry
+  // product, so a name rule cannot reach them, and MS1 records them as still open.
+  // Widen the matcher and this loop fails until the README says so too.
+  for (const tool of [...NAMES, 'mcp__github__create_issue', 'mcp__filesystem__write_file', 'mcp__refoundry__list', 'mcp__osdk__write_object', 'mcp__ontology__delete_object']) {
+    expect({ tool, gate: foundryMcpTool(tool) !== null, trace: TRACER.test(tool) }).toEqual({ tool, gate: TRACER.test(tool), trace: TRACER.test(tool) })
+  }
+})
 
 type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
 

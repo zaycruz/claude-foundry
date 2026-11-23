@@ -104,6 +104,7 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
+  touchesFoundryTool,
   branchesIn,
   STORED_BRANCH_RUNS,
   storedBranchReads,
@@ -702,9 +703,10 @@ async function exportTurn($: EngineInterface, key: string, answer: string, usage
 }
 
 function touchesFoundry(tool: string, input: Record<string, unknown>, classified: boolean): boolean {
-  if (classified || tool === ORTHANC_CLI || tool === ORTHANC_HELP) return true
-  if (tool === 'Bash') return /\borthanc\b/.test(asString(input.command))
-  return /^mcp__.*(palantir|foundry)/i.test(tool)
+  if (classified) return true
+  // One predicate, shared with the gate: a call the trace called Foundry while the
+  // guard did not would run with no ladder and no branch rule.
+  return touchesFoundryTool(tool, input)
 }
 
 async function traceText($: EngineInterface): Promise<string> {

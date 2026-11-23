@@ -45,10 +45,12 @@ says so instead of falling back to REST.
   a pull request. Branchless writes, `--allow-default-branch`, proposal
   merges and approvals, `global-branch deploy`, `repository pull-request
   merge`, default-branch pushes, raw `git push` to a Foundry
-  repository and Foundry writes outside Orthanc are blocked — every MCP tool
-  from a server named for Palantir or Foundry, in any case or spelling
-  (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`), not only
-  the exact name `mcp__palantir__`. A write naming
+  repository and Foundry writes outside Orthanc are blocked. A MCP tool from a
+  server named for Palantir or Foundry counts as such a write in any case or
+  spelling (`mcp__palantir__…`, `mcp__Palantir__…`, `mcp__foundry_tools__…`,
+  `mcp__palantirFoundry__…`), not only the exact name `mcp__palantir__`; a tool
+  whose name only reads (`list`, `get`, `search`) still runs, and one whose name
+  the guard cannot read is refused. A write naming
   `main`/`master` asks the operator (above). Writes whose branch defaults to
   main or master must name a branch too: connectivity imports, repository
   imports, `dataset create-from-csv`, `workshop module update`, `automate
