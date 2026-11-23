@@ -74,7 +74,16 @@ function flagsFrom(args: unknown): ManifestFlag[] {
   if (!Array.isArray(args)) return []
   return args.filter(isRecord).flatMap(arg =>
     typeof arg.flag === 'string'
-      ? [{ flag: arg.flag, takesValue: arg.takes_value === true, ...(typeof arg.default === 'string' ? { default: arg.default } : {}) }]
+      ? [
+          {
+            flag: arg.flag,
+            takesValue: arg.takes_value === true,
+            ...(typeof arg.default === 'string' ? { default: arg.default } : {}),
+            // An enumerated option lists the values it accepts, which is how the
+            // guard tells `--transaction-type DELETE` from a branch someone named.
+            ...(Array.isArray(arg.values) ? { values: arg.values.filter((value: unknown): value is string => typeof value === 'string') } : {}),
+          },
+        ]
       : [],
   )
 }

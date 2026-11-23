@@ -30,11 +30,22 @@ says so instead of falling back to REST.
   Output over 20,000 chars is cut for the model, with row names, counts and the
   page token kept above the cut and the whole envelope written to a file.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
-  Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard
-  judges each mutation) and `yolo`. Outside `yolo`, destructive changes (a
-  delete, `--force`) and release tags ask, protected branches ask, and a call
-  repeated three times is blocked. In `yolo` only a write on main asks:
-  deletes and `--force` writes run at once, and the loop guard is off. A
+  Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard judges
+  each mutation) and `yolo`. Outside `yolo`, a destructive change asks, as do
+  release tags and protected branches, and a call repeated three times is blocked. A
+  change is destructive when its command name, or one of its flags, says something is
+  left gone or overwritten — `marketplace installation uninstall`,
+  `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
+  given `--force`, or when the value of one of its flags is an act — one Orthanc
+  lists among that flag's accepted values (`--transaction-type DELETE`), or one
+  spelled in caps the way Orthanc spells its enumerated values.
+  The rule reads the name and anything that looks like a flag. A positional and a value
+  that names no act ask nothing, such as `--mode keep-outputs` or
+  `--branch delete-me`. An argument that starts with a hyphen looks like a flag, so it
+  asks: reading too much costs a prompt, reading too little costs the ask. The words,
+  and what each one leaves, are `DESTRUCTIVE_WORDS` in `hooks/policy.ts`; the
+  approval prompt builds its own wording from that table. In `yolo` only a write
+  on main asks: destructive writes run at once, and the loop guard is off. A
   release tag with no `--branch <global branch RID>` is a release on main and
   asks in `yolo` too. A write that Orthanc's agent manifest marks
   `operator_approval` (turning branch protection off, removing a required
