@@ -768,6 +768,90 @@ test('Q19: a descending or stepped range and a negated set reach the store too',
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
 })
 
+// Review round 8: a list of write verbs is never complete, so the rule is turned
+// around. A command that names the store runs only when the guard knows it only reads
+// (cat, ls, jq, a find with no action, a git that does not write files…). Every other
+// command is refused, and so is a line where the store is named in one command and
+// something else may write in another. Each spelling below empties or replaces the mark
+// in bash, or (for the expansions) bash expands it to the store path.
+test('Q20: a command that is not known to only read cannot meet the store', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  const mark = '~/.config/foundry/profile-settings.json'
+  for (const command of [
+    // A redirect with no command word.
+    `> ${mark}`,
+    `>| ${mark}`,
+    'cd ~/.config/foundry; > profile-settings.json',
+    // Writers that were never on a list.
+    `echo "{}" | sort -o ${mark}`,
+    `curl -so ${mark} file:///dev/null`,
+    `wget -qO ${mark} file:///dev/null`,
+    `find ~/.config/foundry -maxdepth 0 -fprint ${mark}`,
+    `ex -sc '%d|x' ${mark}`,
+    `vim -es -c '%d|x' ${mark}`,
+    'rename s/foundry/x/ ~/.config/foundry',
+    `gio trash ${mark}`,
+    'trash ~/.config/foundry',
+    `sqlite3 x.db ".output ${mark}"`,
+    `git diff --output=${mark}`,
+    "git -c core.pager='rm -rf ~/.config/foundry' log",
+    `less -o ${mark} notes.txt`,
+    // Word expansions bash does.
+    "rm -rf ~/.config/foundr$'y'",
+    `truncate -s0 ~/.config/foundr$"y"/profile-settings.json`,
+    'rm -rf ${HOME:-/x}/.config/foundry',
+    'rm -rf "${HOME%/}/.config/foundry"',
+    'cd ~ && rm -rf ~+/.config/foundry',
+    'rm -rf ~tester/.config/foundry',
+    'shopt -s extglob; rm -rf ~/.config/+(f)oundry',
+    'shopt -s extglob; rm -rf ~/.config/!(x)',
+    // The store named in one command, the write in another.
+    `xargs truncate -s0 <<< ${mark}`,
+    'xargs rm -rf <<< ~/.config/foundry',
+    'read -r a <<< ~/.config/foundry; rm -rf "$a"',
+    `echo ${mark} | xargs truncate -s0`,
+    'ls -d ~/.config/foundry | while read d; do rm -rf "$d"; done',
+    'for f in ~/.config/foundry/*; do : > "$f"; done',
+    'rm -rf $(echo ~/.config/foundry)',
+    'rm -rf `echo ~/.config/foundry`',
+    'mapfile -t a < <(echo ~/.config/foundry); rm -rf "${a[@]}"',
+    // Keywords and wrappers in front of the command.
+    'if true; then rm -rf ~/.config/foundry; fi',
+    '! rm -rf ~/.config/foundry',
+    '{ rm -rf ~/.config/foundry; }',
+    'time rm -rf ~/.config/foundry',
+    'nice -n 5 truncate -s0 ' + mark,
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command)
+  }
+  expect(denied).toEqual([])
+  // Reads of the store, and work that does not touch it, still run.
+  for (const command of [
+    'echo hi',
+    'ls ~/.config/foundry',
+    `cat ${mark}`,
+    'stat ~/.config/foundry',
+    `wc -c ${mark}`,
+    'grep -r read_only ~/.config/foundry',
+    "find ~/.config/foundry -name '*.json' -print",
+    'jq . ~/.config/foundry/profiles.json | less',
+    `if [ -f ${mark} ]; then echo yes; fi`,
+    'git log --oneline -- ~/.config/foundry',
+    'git commit -m "note: rm -rf ~/.config/foundry clears a mark"',
+    'rm -rf /tmp/x',
+    'rm -rf ~/.config/foundry-old',
+    'rm -rf ~/projects/foundry',
+    'rm -rf ~/.config/foundryx',
+    'rm -rf ~/.config/{foundry}',
+    'cd ~ && npm test',
+    'cd ~/projects/app && rm -rf node_modules && npm ci',
+    `cat > notes.md <<'EOF'\nthe mark lives in ${mark}\nEOF`,
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+})
+
 test('Q15: the stack name in the question cannot put a line in front of the operator', async ($, on) => {
   const h = harness(on, 'yolo')
   // The shape this ask exists for: a manifest that does not mark the clear.

@@ -1325,7 +1325,7 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 // Absent: the next command runs after this one (`&&`, `;`, a newline).
 export type ShellJoin = 'fail' | 'arm' | 'pipe' | 'bg'
 
-export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin; targets?: string[] }
+export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin; targets?: string[]; stdin?: string[] }
 
 // Code that can start another process, per interpreter.
 const SPAWNS: [RegExp, RegExp][] = [
@@ -1350,6 +1350,47 @@ function spawns(runner: string, code: string): boolean {
  * reads stdin as code: then a shell's text is code, and an interpreter's text
  * makes the line `hidden` when the line names orthanc and the text can start a
  * process. Single-quoted text stays literal. */
+/** The text of a `$'…'` word from just after its quote, with bash's escapes decoded,
+ * and the index of its closing quote. */
+function ansiCQuoted(command: string, start: number): { text: string; end: number } {
+  const simple: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' }
+  let text = ''
+  let index = start
+  for (; index < command.length; index += 1) {
+    const char = command[index]!
+    if (char === "'") break
+    if (char !== '\\' || index + 1 >= command.length) {
+      text += char
+      continue
+    }
+    const next = command[index + 1]!
+    const hex = /^x([0-9a-fA-F]{1,2})/.exec(command.slice(index + 1))
+    const octal = /^([0-7]{1,3})/.exec(command.slice(index + 1))
+    const unicode = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(command.slice(index + 1))
+    if (simple[next] !== undefined) {
+      text += simple[next]
+      index += 1
+    } else if (hex !== null) {
+      text += String.fromCharCode(parseInt(hex[1]!, 16))
+      index += hex[0].length
+    } else if (octal !== null) {
+      text += String.fromCharCode(parseInt(octal[1]!, 8) & 0xff)
+      index += octal[0].length
+    } else if (unicode !== null) {
+      const point = parseInt((unicode[1] ?? unicode[2])!, 16)
+      text += point <= 0x10ffff ? String.fromCodePoint(point) : ''
+      index += unicode[0].length
+    } else if (next === 'c' && index + 2 < command.length) {
+      text += String.fromCharCode(command.charCodeAt(index + 2) & 0x1f)
+      index += 2
+    } else {
+      text += `\\${next}`
+      index += 1
+    }
+  }
+  return { text, end: index }
+}
+
 function shellWords(command: string): { segments: Segment[]; code: string[]; hidden: boolean } {
   const segments: Segment[] = []
   const code: string[] = []
@@ -1390,6 +1431,9 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     const join: ShellJoin | undefined =
       operator === '||' ? 'fail' : operator === ';;' || arm ? 'arm' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
     armPattern = operator === ';;' ? true : operator === ')' ? false : words.length > 0 ? false : armPattern
+    // A redirect with no command word (`> file`) is bash's null command with that
+    // redirect: it still opens, and empties, the file. It is read as `:`.
+    if (words.length === 0 && targets.length > 0) words.push(':')
     if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join, targets })
     words = []
     targets = []
@@ -1430,7 +1474,29 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
       } else word += char
       continue
     }
-    if (char === "'" || char === '"') {
+    if (char === '$' && command[index + 1] === "'") {
+      // ANSI-C quoting: `foundr$'y'` is `foundry`, with backslash escapes decoded.
+      const decoded = ansiCQuoted(command, index + 2)
+      word += decoded.text
+      quoted = true
+      index = decoded.end
+    } else if (char === '$' && command[index + 1] === '"') {
+      // Locale quoting: `$"y"` is `"y"` when no translation exists.
+      quote = '"'
+      quoted = true
+      index += 1
+    } else if (char === '(' && word !== '' && '@+*?!'.includes(word.at(-1)!)) {
+      // An extglob group (`+(f)oundry`, `!(x)`) is part of the word, as bash reads it
+      // under `shopt -s extglob`; without it bash refuses the line anyway.
+      let depth = 0
+      let last = index
+      for (; last < command.length; last += 1) {
+        if (command[last] === '(') depth += 1
+        else if (command[last] === ')' && (depth -= 1) === 0) break
+      }
+      word += command.slice(index, last + 1)
+      index = last
+    } else if (char === "'" || char === '"') {
       quote = char
       quoted = true
     } else if (char === '\\' && index + 1 < command.length) word += command[++index]
@@ -1474,7 +1540,11 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
   endSegment()
   // A heredoc opened on the last line has no body to skip, but still feeds its owner.
   const owners = new Set([...heredocs, ...fed].map(item => item.owner))
-  for (const segment of segments) segment.fed = owners.has(segment.words)
+  for (const segment of segments) {
+    segment.fed = owners.has(segment.words)
+    const stdin = fed.filter(item => item.owner === segment.words).map(item => item.text)
+    if (stdin.length > 0) segment.stdin = stdin
+  }
   let hidden = false
   for (const { owner, text } of fed) {
     const reader = stdinReader(owner)
@@ -2317,15 +2387,85 @@ export function rulesWriteReason(tool: string, input: Record<string, unknown>, c
 // rsync unpacked over it. So the guard anchors on the resolved config directory and on
 // every directory above it, and a path token may carry a glob on any segment. The same
 // file name under any other directory is left alone.
-// A write to the filesystem, judged per simple command, so a verb counts where its
-// target is: `git` alone is not one (it writes the repository it runs in, not the path
-// named beside it), `git clean` and `git checkout` are. Neither is `find` or `xargs`,
-// which reach the store only through `-delete` or `-exec`: a search that merely names a
-// `profile-*` pattern is a read (`find ~ -name 'profile-*.png'`).
-const STORE_WRITE_VERB =
-  /^(?:rm|rmdir|mv|unlink|shred|truncate|dd|tee|install|touch|chmod|chown|chattr|ln|rsync|scp|sftp|tar|cp|unzip|cpio|ditto|gzip|bzip2|xz|zstd|zip|7z|rar|sed|patch|perl|python[0-9.]*|ruby|node|bun|deno|php|awk|lua|swift|osascript)$/i
-const STORE_DELETE_FLAG = /^-(?:delete|exec|execdir)$/i
-const GIT_WRITE_SUBCOMMAND = /^(?:clean|checkout|restore|apply|reset)$/i
+// The commands that may name the store, because they only read the files they name.
+// The list says what is safe, so a command nobody thought of (`sort -o`, `curl -o`,
+// `ex`, `gio trash`) is refused rather than let through. A reader with a flag that
+// writes a file or runs a program is not one (`less -o`, `file -C`).
+const STORE_READERS = new Set([
+  'cat', 'tac', 'ls', 'stat', 'file', 'wc', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'jq',
+  'diff', 'cmp', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'du', 'df', 'realpath',
+  'readlink', 'dirname', 'basename', 'echo', 'printf', 'test', '[', '[[', 'true', 'false', ':', 'pwd', 'cd',
+  'pushd', 'popd', 'which', 'type', 'strings', 'hexdump', 'od', 'column', 'nl', 'id', 'whoami', 'date',
+  'sleep', 'export', 'declare', 'local', 'readonly', 'typeset', 'shopt', 'set', 'unset',
+  // Text filters: they read files or stdin and write stdout only.
+  'tr', 'cut', 'paste', 'sort', 'join', 'comm', 'fold', 'fmt', 'expand', 'unexpand', 'rev', 'seq', 'base64',
+  'zcat', 'printenv', 'uname', 'tree', 'rg', 'ag', 'fd', 'eza', 'exa',
+])
+const READER_WRITE_FLAG: Record<string, RegExp> = {
+  less: /^(?:-[A-Za-z]*[oO]|--log-file|--LOG-FILE)/,
+  file: /^(?:-[A-Za-z]*C|--compile)/,
+  date: /^(?:-[A-Za-z]*s|--set)/,
+  sort: /^(?:-[A-Za-z]*o|--output)/,
+  tree: /^(?:-[A-Za-z]*o|--output)/,
+  rg: /^--pre(?:=|$)/,
+  fd: /^(?:-[A-Za-z]*[xX]|--exec|--exec-batch)/,
+  ag: /^--pager(?:=|$)/,
+  base64: /^(?:-[A-Za-z]*o|--output)/,
+}
+// Shell words that open or close a construct; the command is the word after them.
+const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'fi', 'done', 'esac', 'in', '(', ')'])
+// Keywords whose words are data to bind or match (`for f in …`, `case x in`).
+const BINDING_KEYWORDS = new Set(['for', 'select', 'case'])
+// A find that only prints: tests, options and the print actions. Any other primary
+// (`-delete`, `-exec`, `-ok`, `-fprint`, `-fls`, one added later) makes it a writer.
+const FIND_READ_PRIMARY = new Set([
+  '-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename', '-regex', '-iregex', '-regextype', '-lname',
+  '-ilname', '-type', '-xtype', '-maxdepth', '-mindepth', '-depth', '-print', '-print0', '-printf', '-ls',
+  '-size', '-mtime', '-mmin', '-atime', '-amin', '-ctime', '-cmin', '-newer', '-anewer', '-cnewer', '-newermt',
+  '-perm', '-user', '-group', '-uid', '-gid', '-nouser', '-nogroup', '-empty', '-readable', '-writable',
+  '-executable', '-prune', '-not', '-o', '-or', '-a', '-and', '-true', '-false', '-follow', '-xdev', '-mount',
+  '-noleaf', '-daystart', '-samefile', '-inum', '-links', '-quit', '-warn', '-nowarn', '-ignore_readdir_race',
+  '-L', '-H', '-P',
+])
+// A git that writes only its own repository: these subcommands, with no flag that
+// writes a file or runs a program. `git rm`, `git checkout`, `git clean` and the rest
+// write the work tree and are refused.
+const GIT_READ_SUBCOMMAND = new Set([
+  'log', 'show', 'diff', 'status', 'grep', 'blame', 'rev-parse', 'ls-files', 'ls-tree', 'cat-file', 'describe',
+  'shortlog', 'rev-list', 'branch', 'tag', 'remote', 'commit', 'add', 'fetch', 'push', 'reflog', 'whatchanged',
+  'help', 'version', 'name-rev', 'merge-base', 'for-each-ref', 'show-ref', 'count-objects', 'check-ignore',
+])
+const GIT_WRITE_FLAG = /^(?:--output(?:=|$)|-O|--open-files-in-pager|--exec(?:=|$)|--upload-pack|--receive-pack|--ext-diff|--textconv)/
+// Options git takes before its subcommand, and whether each takes the next word.
+const GIT_GLOBAL_OPTION = /^(?:-C|--git-dir|--work-tree|--namespace)$/
+const GIT_GLOBAL_FLAG = /^(?:--no-pager|-P|--bare|--no-replace-objects|--literal-pathspecs|--git-dir=.*|--work-tree=.*|--namespace=.*)$/
+
+/** Whether one simple command only reads: its program (after assignments and shell
+ * keywords) is a reader, used without a flag that writes or runs. A wrapper (`sudo`,
+ * `nice`, `time`, `xargs`) or anything unknown is not a reader. */
+function readsOnly(words: readonly string[]): boolean {
+  let head = 0
+  while (head < words.length && (ASSIGNMENT_WORD.test(words[head]!) || SHELL_KEYWORDS.has(words[head]!))) {
+    head += 1
+  }
+  if (head >= words.length) return true
+  const program = basename(words[head])
+  if (BINDING_KEYWORDS.has(program)) return true
+  const rest = words.slice(head + 1)
+  if (program === 'find') return rest.every(word => !word.startsWith('-') || FIND_READ_PRIMARY.has(word) || /^-O[0-9]$|^-D$/.test(word))
+  if (program === 'git') {
+    let index = 0
+    while (index < rest.length && (GIT_GLOBAL_OPTION.test(rest[index]!) || GIT_GLOBAL_FLAG.test(rest[index]!))) {
+      index += GIT_GLOBAL_OPTION.test(rest[index]!) ? 2 : 1
+    }
+    const sub = rest[index]
+    return sub !== undefined && GIT_READ_SUBCOMMAND.has(sub) && !rest.slice(index + 1).some(word => GIT_WRITE_FLAG.test(word))
+  }
+  if (!STORE_READERS.has(program)) return false
+  const writeFlag = READER_WRITE_FLAG[program]
+  return writeFlag === undefined || !rest.some(word => writeFlag.test(word))
+}
+
 const MARK_FILE_NAMES = ['profile-settings.json', 'profile-settings.lock']
 // A search that picks files by name or path pattern, rather than by the directory it
 // was pointed at.
@@ -2434,7 +2574,7 @@ function bracketRegex(set: { negate: boolean; ranges: CodeRange[]; any: boolean 
 const GLOB_CACHE = new Map<string, [RegExp, RegExp]>()
 
 function globMatches(pattern: string, name: string): boolean {
-  if (!/[*?[]/.test(pattern)) return pattern.toLowerCase() === name.toLowerCase()
+  if (!/[*?[]|[@+!]\(/.test(pattern)) return pattern.toLowerCase() === name.toLowerCase()
   const [exact, folded] = GLOB_CACHE.get(pattern) ?? globRegexes(pattern)
   // bash matches a glob against the real name case by case, so `[!F]oundry` names
   // `foundry`; a case-insensitive disk (macOS) can also resolve a differently-cased
@@ -2446,6 +2586,21 @@ function globRegexes(pattern: string): [RegExp, RegExp] {
   let body = ''
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index]!
+    if ('@+*?!'.includes(character) && pattern[index + 1] === '(') {
+      // An extglob group (`+(f)`, `!(x)`, `@(a|b)`) is read as any text: it can only
+      // match more than bash does, never less.
+      let depth = 0
+      let last = index + 1
+      for (; last < pattern.length; last += 1) {
+        if (pattern[last] === '(') depth += 1
+        else if (pattern[last] === ')' && (depth -= 1) === 0) break
+      }
+      if (last < pattern.length) {
+        body += '[\\s\\S]*'
+        index = last
+        continue
+      }
+    }
     if (character === '*') body += '[\\s\\S]*'
     else if (character === '?') body += '[\\s\\S]'
     else if (character === '\\' && index + 1 < pattern.length) {
@@ -2651,11 +2806,15 @@ function rangeParts(body: string): string[] | 'overflow' | undefined {
 }
 
 /** The words a line runs, as the shell runs them and with what it substitutes in
- * place: `~`, `$HOME`, `$XDG_CONFIG_HOME` and the variables the command itself assigns
- * are put in (twice, so `D=$HOME/.config/foundry` then `rm -rf "$D"` reads as one
- * path), and braces are expanded. An unknown variable is left as written: nothing can
- * be said about it. */
-function runWords(command: string, home: string, configHome: string): { words: string[]; targets: string[] }[] {
+ * place: `~` in every form bash reads (`~`, `~+`, `~-`, `~login`), `$HOME`,
+ * `$XDG_CONFIG_HOME` and the variables the command itself assigns, with bash's
+ * `${NAME:-x}`, `${NAME%/}` and other operators (done twice, so
+ * `D=$HOME/.config/foundry` then `rm -rf "$D"` reads as one path), and braces are
+ * expanded. Where bash's answer depends on what the guard cannot know (`~-`, another
+ * login's home, a pattern operator), every answer it could give is kept, so the word
+ * can only name more. An unknown variable is left as written. The text a heredoc or a
+ * here-string feeds a command is kept apart as `stdin`, split into words. */
+function runWords(command: string, home: string, configHome: string, cwd = '/'): { words: string[]; targets: string[]; stdin: string[] }[] {
   const config = configHome.trim() === '' ? `${home}/.config` : configHome.trim()
   const segments = commandSegments(command)
   const assigned = new Map<string, string>()
@@ -2664,19 +2823,75 @@ function runWords(command: string, home: string, configHome: string): { words: s
       const assign = ASSIGNMENT_WORD.exec(word)
       if (assign !== null && assign[1] !== undefined) assigned.set(assign[1], assign[2] ?? '')
     }
-  const once = (word: string) =>
+  const homeText = home === '' ? '~' : home
+  // Where `~+` and `~-` can point: the session's directory, home, and every directory
+  // the line moves into.
+  const visited = new Set<string>([cwd])
+  for (const segment of segments)
+    segment.words.forEach((word, index) => {
+      const next = segment.words[index + 1]
+      if ((word === 'cd' || word === 'pushd') && next !== undefined && !next.startsWith('-'))
+        visited.add(resolvedPath(next.replace(/^~(?=\/|$)/, homeText), cwd, home))
+    })
+  const value = (name: string): string | undefined =>
+    name === 'HOME' ? homeText : name === 'XDG_CONFIG_HOME' ? config : assigned.get(name)
+  // `~`, `~+` (the working directory), `~-` (the last one, unknown: home and the
+  // working directory both) and `~login` (that login's home: the one beside ours, and
+  // ours too, since the guard cannot read the password file) at the start of a word or
+  // of an assignment's value.
+  const tildes = (word: string): string[] => {
+    const match = /^((?:[^=~]*=)?)~([^/:]*)(.*)$/s.exec(word)
+    if (match === null) return [word]
+    const [, before = '', login = '', rest = ''] = match
+    if (login === '') return [`${before}${homeText}${rest}`]
+    if (login === '+' || login === '-') return [homeText, ...visited].map(where => `${before}${where}${rest}`)
+    if (!/^[A-Za-z0-9._-]+$/.test(login)) return [word]
+    const beside = home === '' ? `/home/${login}` : `${home.replace(/\/[^/]*\/?$/, '')}/${login}`
+    return [`${before}${homeText}${rest}`, `${before}${beside}${rest}`]
+  }
+  // `${NAME op word}` for a name the guard knows. The default and assign forms give the
+  // value (it is set); `:+`/`+` give the word; a trim (`%`, `#`) gives the trimmed
+  // value; anything else (a replacement, a substring, a case change) gives the value,
+  // which is what the store path is spelled from.
+  const parameters = (word: string): string[] => {
+    const match = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])([^}]*)\}/.exec(word)
+    if (match === null) return [word]
+    const [whole, name = '', op = '', operand = ''] = match
+    const known = value(name)
+    if (known === undefined) return [word]
+    const at = (text: string) => `${word.slice(0, match.index)}${text}${word.slice(match.index + whole.length)}`
+    let results: string[]
+    if (op === ':+' || op === '+') results = [at(operand)]
+    else if (op.startsWith('%') || op.startsWith('#')) results = [at(trimmed(known, op, operand)), at(known)]
+    else results = [at(known)]
+    return results.flatMap(parameters)
+  }
+  const plain = (word: string) =>
     word
-      .replace(/(^|=)~/g, (_whole, before: string) => `${before}${home === '' ? '~' : home}`)
-      .replace(/\$\{(?:HOME|XDG_CONFIG_HOME)\}|\$(?:HOME|XDG_CONFIG_HOME)/g, name => (name.includes('XDG') ? config : home))
-      .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (whole, first, second) => {
-        const name = (first ?? second) as string
-        return assigned.get(name) ?? whole
-      })
-  const substitute = (word: string) => once(once(word))
+      .replace(/\$\{(?:HOME|XDG_CONFIG_HOME)\}|\$(?:HOME|XDG_CONFIG_HOME)(?![A-Za-z0-9_])/g, name => (name.includes('XDG') ? config : homeText))
+      .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (whole, first, second) => assigned.get((first ?? second) as string) ?? whole)
+  const once = (word: string) => tildes(word).flatMap(parameters).map(plain)
+  const substitute = (word: string) => [...new Set(once(word).flatMap(once))]
+  const expand = (word: string) => substitute(word).flatMap(braceCandidates)
   return segments.map(segment => ({
-    words: segment.words.flatMap(word => braceCandidates(substitute(word))),
-    targets: (segment.targets ?? []).flatMap(target => braceCandidates(substitute(target))),
+    words: segment.words.flatMap(expand),
+    targets: (segment.targets ?? []).flatMap(expand),
+    stdin: (segment.stdin ?? []).flatMap(text => text.split(/\s+/)).filter(piece => piece !== '').flatMap(expand),
   }))
+}
+
+/** `${NAME%pat}`, `${NAME%%pat}`, `${NAME#pat}`, `${NAME##pat}`: the value with the
+ * shortest or longest matching suffix or prefix removed. */
+function trimmed(text: string, op: string, pattern: string): string {
+  const cuts = Array.from({ length: text.length + 1 }, (_value, index) => index)
+  if (op.startsWith('%')) {
+    const order = op === '%' ? cuts.reverse() : cuts
+    for (const cut of order) if (globMatches(pattern, text.slice(cut)) || pattern === text.slice(cut)) return text.slice(0, cut)
+    return text
+  }
+  const order = op === '#' ? cuts : cuts.reverse()
+  for (const cut of order) if (globMatches(pattern, text.slice(0, cut)) || pattern === text.slice(0, cut)) return text.slice(cut)
+  return text
 }
 
 /** The directories a command works in: the session's, the target of any `cd` or `pushd`
@@ -2707,9 +2922,11 @@ function mentionedDirs(segments: readonly string[][], cwd: string, home: string)
  * (`rm ~/.config/found?y`, `rm -rf ~/.config/foundr*`, a pattern one segment deeper
  * than the store). A pattern shorter than the
  * store path is a directory above it, which is exactly what is refused. */
-function pathReachesStore(pattern: string, dir: string): boolean {
+function pathReachesStore(pattern: string, dir: string, inside = false): boolean {
   const parts = pattern.split('/').filter(part => part !== '' && part !== '.')
   const target = dir.split('/').filter(part => part !== '' && part !== '.')
+  // Only the store or a path in it: a directory above it does not count.
+  if (inside && parts.length < target.length) return false
   // `/`, or a `.` that resolves to it, holds everything, the store included.
   if (parts.length === 0) return target.length > 0
   if (target.length === 0) return false
@@ -2752,7 +2969,7 @@ function storePaths(token: string, cwd: string, home: string, mentioned: Set<str
  * it. A name with no directory in it counts only where the command (or the session)
  * stands, so `rm /tmp/profile-settings.json` and `rm -rf $STORE` (an unknown variable)
  * stay free. */
-function namesStore(token: string, cwd: string, home: string, dir: string, mentioned: Set<string>): boolean {
+function namesStore(token: string, cwd: string, home: string, dir: string, mentioned: Set<string>, inside = false): boolean {
   const written = token.replace(/\\/g, '/')
   // `/` on its own is the root, and the root holds the store; a relative `.` is the
   // working directory, which the resolution below already handles.
@@ -2762,7 +2979,7 @@ function namesStore(token: string, cwd: string, home: string, dir: string, menti
   // to the shell as `tar -C <store>`, and a path can sit inside the argument of a
   // function call (`glob("~/...")`) rather than be the whole word.
   const spellings = [path, path.replace(/^--?[A-Za-z0-9_.+-]+=/, ''), ...pathPieces(path)].filter(spelling => spelling !== '')
-  return spellings.some(spelling => storePaths(spelling, cwd, home, mentioned, dir).some(where => pathReachesStore(where, dir)))
+  return spellings.some(spelling => storePaths(spelling, cwd, home, mentioned, dir).some(where => pathReachesStore(where, dir, inside)))
 }
 
 /** The path-shaped pieces inside a word: what a shell would pass to `open` when the
@@ -2818,11 +3035,12 @@ export function profileStoreWriteReason(
   const paths = [input.file_path, input.notebook_path, input.path].filter((value): value is string => typeof value === 'string')
   if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
   if (tool !== 'Bash' || typeof input.command !== 'string') return null
-  const segments = runWords(input.command, home, configHome)
-  const allWords = segments.flatMap(segment => [...segment.words, ...segment.targets])
+  const segments = runWords(input.command, home, configHome, cwd)
+  const every = (segment: { words: string[]; targets: string[]; stdin: string[] }) => [...segment.words, ...segment.targets, ...segment.stdin]
+  const allWords = segments.flatMap(every)
   const mentioned = mentionedDirs(segments.map(segment => [...segment.words, ...segment.targets]), cwd, home)
   const reaches = (words: readonly string[]) => words.some(word => namesStore(word, cwd, home, dir, mentioned))
-  const names = (segment: { words: string[]; targets: string[] }) => {
+  const names = (segment: { words: string[]; targets: string[]; stdin: string[] }) => {
     // A search limited by a name or path pattern reaches the mark only when that
     // pattern can name it: `find ~ -name 'profile-*.png' -delete` takes someone
     // else's screenshots and leaves the mark alone, while
@@ -2830,31 +3048,26 @@ export function profileStoreWriteReason(
     // not.
     const limited = segment.words.some(word => NAME_LIMIT_FLAG.test(word))
     if (limited && !segment.words.some(word => bareNamesStore(word, dir))) return false
-    return reaches([...segment.words, ...segment.targets])
+    return reaches(every(segment))
   }
-  const writes = (segment: { words: string[]; targets: string[] }) =>
-    segment.words.some((word, index) => {
-      const program = basename(word)
-      if (STORE_WRITE_VERB.test(program) || STORE_DELETE_FLAG.test(word)) return true
-      if (program !== 'git') return false
-      const sub = segment.words.slice(index + 1).find(candidate => !candidate.startsWith('-'))
-      return sub !== undefined && GIT_WRITE_SUBCOMMAND.test(sub)
-    }) ||
-    segment.targets.some(target => namesStore(target, cwd, home, dir, mentioned))
-  // One rule, per simple command. It covers the directory itself, anything under it, a
-  // directory above it (`rm -rf ~/.config`), a glob or a bracket class on any segment,
-  // a brace expansion, a quote- or backslash-split word, a redirect into the store, the
-  // store reached from a search root above it (`find ~ -name profile-*.json -delete`),
-  // a path inside a nested `bash -c` or `$(…)`, and a relative name after a move into
-  // its parent (`cd ~ && rm -rf .config`, or a bare `cd`).
+  // A command that can change a file: anything but a reader, a redirect into the
+  // store, or a redirect to a path the guard cannot read (`: > "$f"`).
+  const writes = (segment: { words: string[]; targets: string[]; stdin: string[] }) =>
+    !readsOnly(segment.words) ||
+    segment.targets.some(target => /[$`]/.test(target) || namesStore(target, cwd, home, dir, mentioned))
+  // Per simple command: a writer that names the store, anything in it, or a directory
+  // above it (`rm -rf ~/.config`), however the word is spelled (globs, braces,
+  // quoting, `~` forms, variables the line sets), from a relative name after a `cd`,
+  // or through text fed to its stdin (`xargs rm <<< …`).
   if (segments.some(segment => names(segment) && writes(segment))) return PROFILE_STORE_WRITE_REASON
-  // A pattern naming the mark file or the store directory, with the verb in another
+  // Across the line: the store (or a path in it) named anywhere, and a writer anywhere,
+  // because a pipe, a variable, a loop or a substitution can carry the path from one
+  // to the other (`ls -d <store> | while read d; do rm -rf "$d"; done`).
+  const named = allWords.some(word => namesStore(word, cwd, home, dir, mentioned, true))
+  if (named && segments.some(writes)) return PROFILE_STORE_WRITE_REASON
+  // A pattern naming the mark file or the store directory, with the writer in another
   // segment: `find ~ -name profile-settings.json | xargs -d '\n' rm`.
-  if (
-    allWords.some(word => bareNamesStore(word, dir)) &&
-    segments.some(segment => writes(segment)) &&
-    reaches(allWords)
-  )
+  if (allWords.some(word => bareNamesStore(word, dir)) && segments.some(writes) && reaches(allWords))
     return PROFILE_STORE_WRITE_REASON
   return null
 }

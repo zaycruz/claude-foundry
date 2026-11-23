@@ -220,31 +220,42 @@ telling the agent to plan. `configure profile set <name> --no-read-only`, which
 clears the mark, asks the operator in every mode, `yolo` included, whoever the
 mark is on: the question names the stack the call names. The plugin writes
 nothing into orthanc's config directory (`~/.config/foundry`, or
-`$XDG_CONFIG_HOME/foundry`), where `profile-settings.json` keeps the mark: file
-writes there are refused, and so is any shell command that can change those files
-or remove a directory holding them — `rm -rf` of the directory or of a directory
-above it (`~/.config`, `~`), `mv`, `find ... -delete` whose name pattern can match
-the mark or the directory, a glob on any part of the path
-(`rm ~/.config/*/profile-settings.json`) including a bracket class
-(`rm -rf ~/.config/[f]oundry`, the POSIX kind, `~/.config/[[:alpha:]]oundry`, and a
-negated set, `~/.config/[!F]oundry`, matched case by case as bash matches it, read
-with bash's whole bracket grammar: `[=f=]`, `[.f.]`, a leading `]`, `!` as a member) or a
-brace expansion of any size (`mv ~/.config/foundry{,.bak}`,
-`rm -rf ~/.config/foundr{a..z}` — bash's 25th name is the store — and every sequence
-bash expands: descending, stepped and zero-padded, `foundr{z..a}`,
-`foundr{a..z..2}`, `{01..10}`), a variable the
-command sets to the path, a word
-built out of quoted pieces (`~/.config/fo""undry`), a backslash inside a word, a
-redirect into the store, a path inside `bash -c '…'`, a relative name after `cd ~`
-or a bare `cd`, an unpacked tar, even a `cp` of the directory out
-(`cp a b` and `cp b a` are the same shape to anything short of a shell parser).
-Removing that file gets past both gates. Reads are left alone: `cat`, `ls`, `jq`, a
-`find` with no `-delete`, and a search that picks files by name
-(`find ~ -name "profile-*.png"`) all run. One limit is stated plainly: the guard
-reads the command line, not a shell, so a path built at run time inside a script
-(`python3 -c "os.remove(os.path.join(os.environ['HOME'], '.config', 'foundry', ...))"`)
-is not caught. A brace list past 4096 names is read as a shape rather than
-enumerated, so a command that would remove thousands of directories is refused even when
+`$XDG_CONFIG_HOME/foundry`), where `profile-settings.json` keeps the mark. File
+writes there are refused. A shell command that names the store, a file in it, or a
+directory above it (`~/.config`, `~`) runs only when it is a known reader: `cat`,
+`ls`, `stat`, `wc`, `head`, `tail`, `grep`, `jq`, `diff`, a checksum, `echo`,
+`printf`, `test`, a text filter such as `cut`, `tr` or `sort`, a `find` that uses
+only tests and print actions, or a `git` subcommand that writes only the
+repository (`log`, `diff`, `status`, `add`, `commit`, and the like), each without a
+flag that writes a file or runs a program (`sort -o`, `less -o`, `find -fprint`,
+`git diff --output`, `git -c`). Everything else is refused. That includes a command
+the list does not know (`curl -o`, `wget -O`, `ex`, `vim -es`, `gio trash`,
+`sqlite3`), a wrapper (`sudo`, `env`, `nice`, `time`, `xargs`), and a redirect into
+the store, with or without a command word (`> profile-settings.json` after a
+`cd`). When the store, or a path in it, appears anywhere on the line, including in
+a heredoc or a here-string, then every command on the line must be a reader. A
+pipe, a loop, `read`, `mapfile` or a command substitution can carry the path
+from one command to another (`ls -d <store> | while read d; do rm -rf "$d"; done`).
+A redirect to a path the guard cannot read (`: > "$f"`) counts as a write. The
+guard spells each word the way bash would. It expands globs on any part of the
+path, with bash's whole bracket grammar (`[!F]`, `[[:alpha:]]`, `[=f=]`, a leading
+`]`), matched case by case and also case-free for macOS. It reads extglob groups
+(`+(f)oundry`, `!(x)`) as any text. It expands every brace sequence bash expands,
+in any direction, step or padding (`foundr{a..z}`, `foundr{z..a..2}`, `{01..10}`).
+It joins quoted pieces (`fo""undry`, `foundr$'y'`, `foundr$"y"`), drops backslashes,
+and expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
+`$XDG_CONFIG_HOME` and the variables the line sets, also with bash's operators
+(`${HOME:-x}`, `${HOME%/}`). It resolves relative names after a `cd`, and reads the
+path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
+mark (`find ~ -name "profile-*.png" -delete`) still runs. The limits are these: the
+guard reads the command line, not a running shell. A path built at run time inside
+a script (`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`) is not
+caught, and neither is a variable the guard cannot see (one set in an earlier
+command). The rule also refuses more than it must: a command that is not a reader
+and only mentions the store (`npm run x -- --note ~/.config/foundry`) is refused,
+and so is a `cp` of the store out. A brace
+list past 4096 names is read as a shape rather than enumerated, so a command that
+would remove thousands of directories is refused even when
 none of its names is the store. A stack `configure list` says nothing about is unknown, not
 writable: the write goes to the operator and never runs blind, while reads and
 plans are not held up. `/profile` and `orthanc_help` say which stacks are
