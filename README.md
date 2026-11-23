@@ -161,8 +161,12 @@ writes there are refused, and so is any shell command that can change those file
 or remove a directory holding them — `rm -rf` of the directory or of a directory
 above it (`~/.config`, `~`), `mv`, `find ... -delete` whose name pattern can match
 the mark or the directory, a glob on any part of the path
-(`rm ~/.config/*/profile-settings.json`), a variable the command sets to the path,
-a relative name after `cd ~`, an unpacked tar, even a `cp` of the directory out
+(`rm ~/.config/*/profile-settings.json`) including a bracket class
+(`rm -rf ~/.config/[f]oundry`) or a brace expansion
+(`mv ~/.config/foundry{,.bak}`), a variable the command sets to the path, a word
+built out of quoted pieces (`~/.config/fo""undry`), a backslash inside a word, a
+redirect into the store, a path inside `bash -c '…'`, a relative name after `cd ~`
+or a bare `cd`, an unpacked tar, even a `cp` of the directory out
 (`cp a b` and `cp b a` are the same shape to anything short of a shell parser).
 Removing that file gets past both gates. Reads are left alone: `cat`, `ls`, `jq`, a
 `find` with no `-delete`, and a search that picks files by name

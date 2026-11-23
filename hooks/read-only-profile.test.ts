@@ -640,6 +640,51 @@ test('Q16: removing a parent directory or globbing a middle segment clears nothi
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
 })
 
+// Review round 5: the guard has to meet the store where a shell meets it, which is
+// not only in the words a naive split sees. Bracket classes, brace expansion, a word
+// built out of quoted pieces, a backslash inside a word, a bare `cd`, a redirect into
+// the store and a nested `bash -c` all name it. Text that only says so stays text.
+test('Q17: a bracket class, a brace or a quote split cannot hide the store', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  for (const command of [
+    'rm -rf ~/.config/[f]oundry',
+    'rm -rf ~/.[c]onfig',
+    'rm ~/.config/foundr[y]/profile-settings.json',
+    'mv ~/.config/foundry{,.bak}',
+    'rm -rf ~/.config/{foundry,x}',
+    'rm -rf ~/.config/fo""undry',
+    'rm -rf ~/.config/fo"un"dry',
+    'rm -rf ~/.config/found\\ry',
+    'cd && rm -rf .config',
+    "bash -c 'rm -rf ~/.config/foundry'",
+    'printf x > ~/.config/found"ry"/profile-settings.json',
+    // The root and the wrappers a shell walks through to reach it.
+    'rm -rf /',
+    'find / -name profile-settings.json -delete',
+    'rm -rf ${HOME}/.config/foundry',
+    "rm -rf $'~/.config/foundry'",
+    'sudo rm -rf ~/.config/foundry',
+    'eval "rm -rf ~/.config/foundry"',
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command)
+  }
+  expect(denied).toEqual([])
+  // Free text about the guard, and work whose names only look like the store.
+  for (const command of [
+    'echo "rm -rf ~/.config/foundry is what the guard stops"',
+    'git commit -m "note: rm -rf ~/.config/foundry clears a mark"',
+    'rm -rf ~/.config/foundr{a..z}',
+    'rm -rf ~/proj/[d]ist',
+    'rm -rf ~/project/{dist,build}',
+    'ls -la ~/.config/foundry',
+    'jq . ~/.config/foundry/profiles.json | less',
+    'xargs -a list.txt rm',
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+})
+
 test('Q15: the stack name in the question cannot put a line in front of the operator', async ($, on) => {
   const h = harness(on, 'yolo')
   // The shape this ask exists for: a manifest that does not mark the clear.
