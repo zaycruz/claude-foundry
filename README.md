@@ -57,7 +57,10 @@ says so instead of falling back to REST.
   `dataset branches delete <dataset> master` or `branch-protection repo
   unprotect <repo> main`), and `workshop module publish`, which works on main
   only, run only when the operator approves
-  them, in every mode; with no one to ask they are refused.
+  them, in every mode; with no one to ask they are refused. So does
+  `ontology scenario create --apply` when `--base-branch` does not name one
+  global branch RID: an Ontology scenario is a what-if fork, and its base is
+  main unless the call names a branch.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied. A command whose manifest entry names a credential the operator types —
   by `input`, or by `credential_store`, the store it writes — never runs, in any
@@ -75,7 +78,11 @@ says so instead of falling back to REST.
   merges and approvals, `global-branch deploy`, `repository pull-request
   merge`, default-branch pushes, raw `git push` to a Foundry
   repository and Foundry writes outside Orthanc are blocked. A write naming
-  `main`/`master` asks the operator (above). Writes whose branch defaults to
+  `main`/`master` asks the operator (above). The one ontology write whose branch
+  spelling is not `--branch` is `ontology scenario create`: it takes
+  `--base-branch <global branch RID>`, and a `--apply` without one asks the
+  operator instead of being blocked, because a scenario based on main is a
+  legitimate call the operator may want to make. Writes whose branch defaults to
   main or master must name a branch too: connectivity imports, repository
   imports, `dataset create-from-csv`, `workshop module update`, `automate
   update`/`pause`/`resume` and the `pipeline` sandbox, edit, publish and

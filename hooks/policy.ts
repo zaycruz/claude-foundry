@@ -99,6 +99,17 @@ const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-ups
 // Writes that change main and take no branch: each is a write on main, so it
 // asks the operator in every mode, yolo too.
 const MAIN_WRITES = new Set(['workshop module publish'])
+// An ontology scenario (orthanc 0.7.9, SRC-85) is a what-if fork whose base is
+// main unless the call names one global branch: `ontology scenario create` says
+// "Make a scenario on main (or on --base-branch)", and orthanc CONTRACTS.md
+// keeps that base for the scenario's life. Its branch spelling is --base-branch,
+// not --branch, so no other rule here sees it: without this, yolo ran a
+// scenario based on main, `--base-branch main` included. Without --apply the
+// command prints a plan and writes nothing, so it asks no one (as a release tag
+// plan does). `ontology scenario rebase` is left alone: it edits the scenario it
+// names, never its base.
+const BASE_BRANCH_WRITES = new Set(['ontology scenario create'])
+const BASE_BRANCH_FLAGS = ['--base-branch']
 // Writes that name their branch as a positional. Any positional naming main
 // counts (a flag the guard does not know can shift the positions), so these
 // ask for main in every mode; over-reading only asks more.
@@ -539,6 +550,8 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
   const values: string[] = []
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] ?? ''
+    // After `--` every word is a positional, so nothing there names a branch.
+    if (arg === '--') return false
     const lower = arg.toLowerCase()
     const name = names.find(found => arg === found || arg.startsWith(`${found}=`))
     if (name !== undefined) {
@@ -553,6 +566,42 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
     if (BRANCH_FLAGS.some(flag => lower === flag || lower.startsWith(`${flag}=`)) || /^-b./i.test(arg)) return false
   }
   return values.length === 1 && WORK_BRANCH_RID.test(values[0]!)
+}
+
+/** True when the entry says this command can print a plan instead of writing: it
+ * declares `--apply`. An entry that lists no flags (an older orthanc, a partial
+ * manifest) says nothing either way, and is treated as one that can, as every
+ * command this rule covers does. An entry that lists flags and none is
+ * `--apply` writes on every call, so the base rule applies to it on every call. */
+function canPlan(entry: ManifestCommand | undefined): boolean {
+  if (entry?.flags === undefined || entry.flags.length === 0) return true
+  return entry.flags.some(flag => typeof flag.flag === 'string' && flag.flag.toLowerCase() === '--apply')
+}
+
+/** True only when one `--base-branch` holds one global branch RID and nothing in
+ * the call could have taken that word for something else. Two shapes hide a base
+ * there: everything after `--` is a positional (oneWorkBranchFlag refuses it),
+ * and pflag binds a value-taking flag's value before it looks for the next flag,
+ * so `--description --base-branch <rid>` sets a description and leaves the base
+ * main. The manifest prices each flag of the command; a flag the entry does not
+ * list may take a value, so the call is unproven and asks. */
+function baseBranchOnWorkBranch(args: readonly string[], entry: ManifestCommand | undefined): boolean {
+  if (!oneWorkBranchFlag(args, BASE_BRANCH_FLAGS)) return false
+  const priced = new Map(
+    (entry?.flags ?? [])
+      .filter(flag => typeof flag.flag === 'string')
+      .map(flag => [flag.flag.toLowerCase(), flag.takesValue] as [string, boolean]),
+  )
+  for (let index = 1; index < args.length; index += 1) {
+    const previous = unquote(args[index - 1] ?? '').toLowerCase()
+    // `--flag=value` binds its own value, so nothing follows it that could be swallowed.
+    if (!previous.startsWith('-') || previous.includes('=')) continue
+    if (priced.get(previous.split('=')[0] ?? '') === false) continue
+    // The value it took may be the `=` spelling of the base flag.
+    const current = (unquote(args[index] ?? '').toLowerCase().split('=')[0] ?? '').replace(/^-+/, '')
+    if (BASE_BRANCH_FLAGS.some(flag => flag.replace(/^-+/, '') === current)) return false
+  }
+  return true
 }
 
 /** An `operator_approval_scope` value the guard reads (orthanc CONTRACTS.md,
@@ -868,12 +917,17 @@ function orthancClassification(
   stored?: readonly string[] | null,
 ): GateClassification {
   const action = ACTION_BRANCH_WRITES.has(command) ? actionBranches(command, args) : null
+  const entry = manifest.find(found => found.path === command)
   const base = {
     command,
     hasWorkingBranch: branchIsWorking(workingBranch),
     // `-b` is --branch in every command, so every spelling of it names the branch.
     targetsProtected:
       MAIN_WRITES.has(command) ||
+      // A scenario whose base is not provably one global branch is a scenario on main.
+      (BASE_BRANCH_WRITES.has(command) &&
+        (!canPlan(entry) || argsNameFlag(args, ['--apply'])) &&
+        !baseBranchOnWorkBranch(args, entry)) ||
       (action !== null && 'branches' in action && action.branches.some(isProtectedValue)) ||
       // A stored branch that could not be read, or none (Foundry reads none as master), may be main.
       (STORED_BRANCH_RUNS.has(command) &&
@@ -1684,6 +1738,22 @@ export function classifyCall(
   return null
 }
 
+/** The fix the agent can actually apply, in the flag this command takes: a
+ * scenario has no --branch, and telling it to pass one sends it back to the
+ * same ask (the loop guard is off in yolo). A write that takes no branch at all
+ * gets no branch advice. */
+function workBranchFix(command: string | null): string {
+  if (command !== null && BASE_BRANCH_WRITES.has(command)) return 'otherwise pass --base-branch <global branch RID>, or create one with \'global-branch create agent/<name>\''
+  if (command !== null && (MAIN_WRITES.has(command) || MAIN_ONLY_WRITES.has(command))) return ''
+  return 'otherwise pass a work branch'
+}
+
+/** The yolo ask for a scenario: the fork writes neither main nor its base, so
+ * what the operator is approving is the choice of main as that base. */
+function scenarioBaseReason(command: string): string {
+  return `'${command}' is a scenario based on main: its --base-branch is missing, or is not one global branch RID. The scenario writes neither main nor that base, so the call to approve is which branch the work forks from; ${workBranchFix(command)}.`
+}
+
 export function ladderDecision(
   mode: ApprovalMode,
   classification: GateClassification,
@@ -1718,7 +1788,9 @@ export function ladderDecision(
     return {
       outcome: 'ask',
       reason:
-        `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.` +
+        (classification.command !== null && BASE_BRANCH_WRITES.has(classification.command)
+          ? `yolo mode: ${scenarioBaseReason(command)}`
+          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`) +
         (classification.destructiveWhy ? ` It is also destructive (${classification.destructiveWhy}).` : ''),
     }
   }
@@ -1738,7 +1810,7 @@ export function ladderDecision(
   if (classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology)${note}`,
+      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology).${workBranchFix(classification.command) === '' ? '' : ` ${workBranchFix(classification.command)}.`}${note}`,
     }
   }
   if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval` }
@@ -1751,15 +1823,16 @@ export function ladderDecision(
 export function modeGuidance(mode: ApprovalMode): string {
   return (
     'Branch rule: agent work happens on branches, never on a production main. Every ontology write ' +
-    'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
+    'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>; `ontology scenario create` spells its branch --base-branch); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
-    'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
+    'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +
     (mode === 'yolo'
       ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
-        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
+        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
+        'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
