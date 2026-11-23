@@ -303,8 +303,11 @@ whose output is unknown and that is a variable's whole value (`OUT=$(mktemp)`)
 makes that variable unknown, not empty, so `curl -o "$OUT"` is not a write to `/`
 or `~/*`. An unknown variable or substitution that starts a word and is followed
 by `/name` (`$TMPDIR/out.txt`, `"$S/marks.json"`, `"$(mktemp -d)/x"`) reads as an
-unknown directory: if unset, it is the empty text, so the word is `/name`. It is not
-read as `*`, which would resolve against every directory the line names. A redirect
+unknown directory. It can be the empty text (`/name`), any directory above the
+store, or the store itself when `name` can be a mark file. So `rm -rf $X/.config/foundry`,
+`rm -rf "$X"/../tester/.config/foundry` and `rm -f $D/profile-settings.json` are
+refused from any working directory. The guard does not read such a word as `*`, which
+would resolve against every directory the line names. A redirect
 into such a path writes a file whose name the line spells. When that name cannot be
 a mark file or the store, the redirect clears no mark wherever the variable points,
 so `ls ~/.config > $TMPDIR/o.txt` and `jq . <mark> > "$S/marks.json"` run. A
@@ -325,7 +328,7 @@ command line, not a running shell, so it has these limits. It does not catch a p
 built at run time inside a script
 (`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`). It does not catch
 a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`),
-or such a variable followed by `..` (`rm -rf "$X"/../.config/foundry`),
+or an unknown directory that one command takes from another (`ls -d $X/.config | xargs rm -rf`),
 or a command substitution whose output only the run shows (`rm -rf $(cat list)`).
 It also does not catch a path that a file the line reads supplies
 (`xargs rm -rf < list`, `source script.sh`). The rule also refuses more than it must: a command that is not a reader

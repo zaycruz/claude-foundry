@@ -3783,7 +3783,7 @@ function unknownDirPaths(word: string, dir: string): string[] {
   const above: string[] = []
   for (let cut = dir.lastIndexOf('/'); cut > 0; cut = dir.lastIndexOf('/', cut - 1)) above.push(dir.slice(0, cut))
   const first = tail.split('/').find(part => part !== '') ?? ''
-  return [...above, ].map(base => base + tail)
+  return [...above, ...(bareNamesStore(first, dir) ? [dir] : [])].map(base => base + tail)
 }
 
 function storeLineWriteReason(command: string, cwd: string, home: string, configHome: string, dir: string): string | null {
@@ -3822,7 +3822,7 @@ function storeLineWriteReason(command: string, cwd: string, home: string, config
   // store, or a redirect the guard cannot read.
   const writes = (segment: { words: string[]; targets: string[]; stdin: string[] }) =>
     !readsOnly(segment.words) ||
-    segment.targets.some(target => blind(target) || namesStore(target, cwd, home, dir, mentioned) || reachesThrough([target]))
+    segment.targets.some(target => blind(target) || namesStore(target, cwd, home, dir, mentioned))
   // Per simple command: a writer that names the store, anything in it, or a directory
   // above it (`rm -rf ~/.config`), however the word is spelled (globs, braces,
   // quoting, `~` forms, variables the line sets), from a relative name after a `cd`,
