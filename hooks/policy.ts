@@ -339,7 +339,9 @@ function ownedFlagValues(args: readonly string[]): [string, string][] {
     const text = unquote(arg).trim()
     const equals = text.indexOf('=')
     if (equals > 0 && text.startsWith('-')) {
-      pairs.push([text.slice(0, equals), text.slice(equals + 1)])
+      // The value is unquoted on its own: `--flag='VALUE'` quotes the value, not
+      // the whole argument, and an unquote of the whole string leaves the quotes on.
+      pairs.push([text.slice(0, equals), unquote(text.slice(equals + 1))])
       return
     }
     if (index > 0 && !text.startsWith('-')) {

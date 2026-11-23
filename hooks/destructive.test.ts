@@ -139,6 +139,10 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'repository checks rerun', kind: 'mutation' },
   { path: 'repository imports remove', kind: 'mutation' },
   { path: 'resource delete', kind: 'mutation' },
+  // A name no orthanc has: 0.7.11 has no read-only command whose name carries a
+  // table word (measured: 0 of 281), so the case below that a read named like a
+  // removal still asks nothing can only be pinned on an invented name. It is
+  // forward cover for the day one ships, not a claim about this surface.
   { path: 'resource delete-impact', kind: 'read-only' },
   { path: 'resource permanently-delete', kind: 'mutation' },
   // Orthanc marks this command `operator_approval` with `--apply` (and scopes the
@@ -202,6 +206,9 @@ const DESTRUCTIVE: [string, string[]][] = [
   // destructive word nor an operator_approval.
   ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type', 'DELETE', '--apply']],
   ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type=DELETE', '--apply']],
+  // The shell keeps the quotes on the value alone, so the value is unquoted on
+  // its own before it is read: this form is the one a quoting shell produces.
+  ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type=\'DELETE\'', '--apply']],
   // A verb no 0.7.11 command uses: a rename into the table is read at once.
   // These four are the names the parity cycle (FND-17) reported; measured
   // against the released 0.7.11 manifest none of them is a command today, so
@@ -268,6 +275,8 @@ for (const [command, args, stored] of ORDINARY) {
   })
 }
 
+// `resource delete-impact` is the invented half (see the fixture);
+// `connectivity sync list` is a real read-only entry on 0.7.11.
 test('D4: a read-only entry named like a removal never reaches the ladder', async () => {
   expect(classifyCall(CLI, { command: 'resource delete-impact', args: ['ri.compass.main.folder.1'] }, MANIFEST, 'agent/x')).toBe(null)
   expect(classifyCall(CLI, { command: 'connectivity sync list', args: ['ri.magritte..source.1'] }, MANIFEST, 'agent/x')).toBe(null)
