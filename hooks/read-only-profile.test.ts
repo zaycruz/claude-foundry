@@ -1141,6 +1141,14 @@ test('Q22: a redirect into a variable path and a / in interpreter text do not me
       `python3 -c "x.rstrip('/')"`,
       `python3 -c "os.path.join(a, '/')"`,
       `python3 -c "x.replace('/', '_')"`,
+      `python -c "print('/')"`,
+      `python3.12 -c "print('/')"`,
+      `sudo python3 -c "print('/')"`,
+      `uv run python -c "print('/'.join('ab'))"`,
+      `env PYTHONPATH=. python3 -c "print('/')"`,
+      `python3 -c "import os; print(os.listdir('src'))"`,
+      `python3 -c "print('a' + '/' + 'b')"`,
+      `python3 -c 'print("//")'`,
       `python3 -c "print('a\\\\b'.split('/'))"`,
       `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b`,
       `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b > o.txt`,
@@ -1197,6 +1205,32 @@ test('Q22: a redirect into a variable path and a / in interpreter text do not me
         'pushd -n ~/.config >/dev/null; cd ~/.config && rm -rf foundry',
       ].map(command => [where, command] as [string, string]),
     )
+  // Review 2: shell code run by su -c, npx -c, flock -c, script -c and env -S is
+  // still read (R7), and an unknown directory followed by `x/..` can be the store.
+  for (const where of ['/home/tester', '/home/tester/.config', '/home/tester/projects/app', '/'])
+    writes.push(
+      ...[
+        'su tester -c "rm -rf ~/.config/foundry"',
+        'su tester -c "cd ~; rm -rf .config/foundry"',
+        'su - tester -c "cd; rm -rf .config/foundry"',
+        'cd ~/.config/foundry/.. && npx -c "rm -rf foundry"',
+        'cd ~/.config && su tester -c "rm -rf foundry"',
+        'cd ~/.config && flock /tmp/l -c "rm -rf foundry"',
+        'cd ~/.config && bash -c "rm -rf foundry"',
+        "su tester -c 'cd; cd .config; rm -rf foundry'",
+        "npx -c 'cd; cd .config; rm -rf foundry'",
+        `env -S 'sh -c "cd; cd .config; rm -rf foundry"'`,
+        "script -qc 'cd; cd .config; rm -rf foundry' /dev/null",
+        "flock /tmp/l -c 'cd; cd .config; rm -rf foundry'",
+        'echo {} > $TMPDIR/x/../profile-settings.json',
+        // A relative name in Python code after a cd: main read it as shell code.
+        `cd ~/.config && python3 -c 'import shutil; shutil.rmtree("foundry")'`,
+        `cd ~/.config/foundry && python3 -c "import os; os.remove('profile-settings.json')"`,
+        `cd ~ && python3 -c "import shutil; shutil.rmtree('.config/foundry')"`,
+        `cd ~/.config && python3 -c "open('foundry/profile-settings.json', 'w').write('{}')"`,
+      ].map(command => [where, command] as [string, string]),
+    )
+  writes.push(['/home/tester/.config/foundry', 'npx -c "cd .. && rm -rf foundry"'])
   const ran: string[] = []
   for (const [where, command] of writes) {
     cwd = where

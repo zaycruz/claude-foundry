@@ -1834,15 +1834,27 @@ export function commandSegments(command: string, depth = 0): Segment[] {
 
 const basename = (word: string | undefined) => (word ?? '').split('/').at(-1)?.replace(/^!/, '') ?? ''
 
-/** commandSegments for the mark-store guard. Code after `-c` is read as shell code
- * only when a shell (or `eval`, `watch` …) runs it. `python3 -c "print('/')"` is
- * Python: read as shell, `('/')` is a subshell whose word `/` is the root. A path in
- * such code is still met in the outer word, as a path piece. */
+// Programs whose `-c` code is not shell code: Python (`python`, `python3`, `python3.12`).
+const CODE_INTERPRETERS = /^python[0-9.]*$/
+
+/** commandSegments for the mark-store guard. Code after `-c` (`su -c`, `npx -c`,
+ * `flock -c`, `script -c`, `env -S`) is read as shell code, as codeWords reads it,
+ * except when a program in CODE_INTERPRETERS runs it. That code's string literals
+ * become words of its command instead, so a relative name after a `cd`
+ * (`shutil.rmtree("foundry")`) still names the store, and a lone `'/'` is not the root.
+ * `python3 -c "print('/')"` is Python: read as shell, `('/')` is a subshell whose
+ * word `/` is the root. A path in such code is still met in the outer word, as a
+ * path piece. */
 function storeSegments(command: string, depth = 0): Segment[] {
-  const { segments, code, hidden } = shellWords(command)
+  const parsed = shellWords(command)
+  const interpreted = (words: readonly string[]) => words.some(word => CODE_INTERPRETERS.test(basename(word)))
+  const shellCode = (words: readonly string[]) => (interpreted(words) ? [] : codeWords(words))
+  const literals = (code: string) =>
+    [...code.matchAll(/(['"])((?:\\.|(?!\1)[^\\])*)\1/g)].map(match => match[2]!).filter(text => text !== '' && !/^\/+$/.test(text))
+  const segments = parsed.segments.map(segment =>
+    interpreted(segment.words) ? { ...segment, words: [...segment.words, ...codeWords(segment.words).flatMap(literals)] } : segment)
+  const { code, hidden } = parsed
   const own = hidden ? [...segments, UNREADABLE] : segments
-  const shellCode = (words: readonly string[]) =>
-    words.some(word => SHELLS.test(basename(word)) || LINE_RUNNERS.has(basename(word))) ? codeWords(words) : []
   const nested = [...code, ...segments.flatMap(segment => shellCode(segment.words))].filter(item => item.trim() !== '')
   if (nested.length === 0) return own
   if (depth >= NESTING_LIMIT) return [...own, UNREADABLE]
@@ -3773,7 +3785,7 @@ const UNKNOWN_DIR = 'FOUNDRY_GUARD_UNKNOWN_DIR'
 
 /** Where `${X}/tail` can point when the line does not know X: each directory above the
  * store followed by the tail, and the store itself when the tail's first name can be
- * a mark file. So `rm -rf $X/.config/foundry` and `rm -f $D/profile-settings.json` can
+ * a mark file or the tail climbs back with `..` (`$X/x/../profile-settings.json`). So `rm -rf $X/.config/foundry` and `rm -f $D/profile-settings.json` can
  * reach the store, and `> $TMPDIR/out.txt` cannot. (Unset, X is the empty text: that
  * form, `/tail`, is already among the words.) */
 function unknownDirPaths(word: string, dir: string): string[] {
@@ -3782,8 +3794,9 @@ function unknownDirPaths(word: string, dir: string): string[] {
   const tail = match[1]!
   const above: string[] = []
   for (let cut = dir.lastIndexOf('/'); cut > 0; cut = dir.lastIndexOf('/', cut - 1)) above.push(dir.slice(0, cut))
-  const first = tail.split('/').find(part => part !== '') ?? ''
-  return [...above, ...(bareNamesStore(first, dir) ? [dir] : [])].map(base => base + tail)
+  const parts = tail.split('/').filter(part => part !== '')
+  const itself = bareNamesStore(parts[0] ?? '', dir) || parts.includes('..')
+  return [...above, ...(itself ? [dir] : [])].map(base => base + tail)
 }
 
 function storeLineWriteReason(command: string, cwd: string, home: string, configHome: string, dir: string): string | null {

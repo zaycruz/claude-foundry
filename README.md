@@ -304,9 +304,10 @@ makes that variable unknown, not empty, so `curl -o "$OUT"` is not a write to `/
 or `~/*`. An unknown variable or substitution that starts a word and is followed
 by `/name` (`$TMPDIR/out.txt`, `"$S/marks.json"`, `"$(mktemp -d)/x"`) reads as an
 unknown directory. It can be the empty text (`/name`), any directory above the
-store, or the store itself when `name` can be a mark file. So `rm -rf $X/.config/foundry`,
-`rm -rf "$X"/../tester/.config/foundry` and `rm -f $D/profile-settings.json` are
-refused from any working directory. The guard does not read such a word as `*`, which
+store, or the store itself when `name` can be a mark file or the rest of the path
+climbs back with `..`. So `rm -rf $X/.config/foundry`,
+`rm -rf "$X"/../tester/.config/foundry`, `rm -f $D/profile-settings.json` and
+`echo {} > $TMPDIR/x/../profile-settings.json` are refused from any working directory. The guard does not read such a word as `*`, which
 would resolve against every directory the line names. A redirect
 into such a path writes a file whose name the line spells. When that name cannot be
 a mark file or the store, the redirect clears no mark wherever the variable points,
@@ -314,10 +315,12 @@ so `ls ~/.config > $TMPDIR/o.txt` and `jq . <mark> > "$S/marks.json"` run. A
 redirect into `"$f"`, `$S/profile-settings.json` or `$S/p*` is still refused on a
 line that names the store. `mktemp` counts as a reader: it only makes a new file and
 never replaces or removes one. It resolves relative names after a `cd`. It reads the
-code after `-c` as shell code only when a shell, `eval`, `watch` and similar programs
-run it (`bash -c '…'`, `sudo sh -c '…'`). The code in `python3 -c "print('/')"` is
-Python, so `('/')` is not a subshell whose word `/` is the root. A path written in
-such code is still found inside the word. A pattern (`*/x.bak`) is not a directory
+code after `-c` and `env -S` as shell code (`bash -c`, `sudo sh -c`, `su -c`,
+`npx -c`, `flock -c`, `script -c`), except when Python runs it. The code in
+`python3 -c "print('/')"` is Python, so `('/')` is not a subshell whose word `/` is
+the root. Its string literals count as names the command uses, so
+`cd ~/.config && python3 -c 'shutil.rmtree("foundry")'` is still refused. A literal
+that is only slashes is not the root. A pattern (`*/x.bak`) is not a directory
 the command works in, so `rm -f */x.bak` from home does not read as `~/*/*/x.bak`. A
 backslash that quoting keeps (`--jq '"\(.number)"'`, `sed 's/\(a\)/x/'`) is a
 character of the name, not a `/`. A lone `/` inside a program's text (`split("/")`,
