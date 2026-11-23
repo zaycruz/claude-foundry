@@ -3,7 +3,7 @@
 // orthanc's own agent-manifest `kind`.
 
 /** One option of a manifest command, as Orthanc's agent-manifest lists it. */
-export type ManifestFlag = { flag: string; takesValue: boolean; default?: string }
+export type ManifestFlag = { flag: string; takesValue: boolean; default?: string; values?: string[] }
 export type ManifestCommand = {
   path: string
   kind?: string
@@ -99,6 +99,17 @@ const MAIN_ONLY_WRITES = new Set(['ontology object-upsert', 'ontology object-ups
 // Writes that change main and take no branch: each is a write on main, so it
 // asks the operator in every mode, yolo too.
 const MAIN_WRITES = new Set(['workshop module publish'])
+// An ontology scenario (orthanc 0.7.9, SRC-85) is a what-if fork whose base is
+// main unless the call names one global branch: `ontology scenario create` says
+// "Make a scenario on main (or on --base-branch)", and orthanc CONTRACTS.md
+// keeps that base for the scenario's life. Its branch spelling is --base-branch,
+// not --branch, so no other rule here sees it: without this, yolo ran a
+// scenario based on main, `--base-branch main` included. Without --apply the
+// command prints a plan and writes nothing, so it asks no one (as a release tag
+// plan does). `ontology scenario rebase` is left alone: it edits the scenario it
+// names, never its base.
+const BASE_BRANCH_WRITES = new Set(['ontology scenario create'])
+const BASE_BRANCH_FLAGS = ['--base-branch']
 // Writes that name their branch as a positional. Any positional naming main
 // counts (a flag the guard does not know can shift the positions), so these
 // ask for main in every mode; over-reading only asks more.
@@ -150,6 +161,36 @@ export const CREDENTIAL_HINT = 'The operator runs it in their own terminal; /aut
 const PROFILE_FLAG = /^--profile(=|$)/
 // Local commands that change which stack orthanc runs on when none is named.
 const STACK_COMMANDS = new Set(['configure use', 'configure set-default'])
+// Two commands hand a value to whoever runs them, and through a tool the agent is
+// whoever runs them. `repository git-credential get` answers with the active
+// profile's token (`password=…`, under --agent too: measured on the v0.7.11 binary,
+// hooks/operator-handoff.test.ts); `compute env get` writes one environment
+// variable's value to a new 0600 file or to the clipboard, and a file the agent
+// names is a file the agent reads back. Orthanc marks both `kind: read-only`, so
+// the read short-circuit below would run either one in every mode with no question,
+// and README's promise that a token never passes through Claude would be false.
+// They are refused, not asked: an approval would not make the value safe for the
+// agent to hold, and the operator has a terminal. A name Orthanc renames simply
+// stops matching; hooks/orthanc-snapshot.json holds the entries these names and
+// kinds came from.
+const OPERATOR_ONLY_COMMANDS: Readonly<Record<string, string>> = {
+  'repository git-credential':
+    "answers with the active profile's token (`password=…`), which git uses to fetch, push and pull; a token never passes through Claude",
+  'compute env get':
+    'writes the value of one environment variable of a compute module to a new file or to the clipboard, which is how the operator gets a value the command never prints',
+}
+
+/** Why this command is the operator's to run, or null. One sentence the agent can act on. */
+export function operatorOnlyReason(path: string): string | null {
+  // hasOwnProperty, not a plain read: `path` can be any text the agent typed
+  // (`command` is free-form in orthanc_cli's schema, and a name the manifest
+  // does not know reaches here unresolved), so 'constructor' or '__proto__'
+  // would otherwise read an inherited Object.prototype member and print it back
+  // as the reason. hooks/operator-handoff.test.ts Q9.
+  if (!Object.prototype.hasOwnProperty.call(OPERATOR_ONLY_COMMANDS, path)) return null
+  const why = OPERATOR_ONLY_COMMANDS[path]
+  return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
+}
 // Orthanc `local` commands that only read local state.
 const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
@@ -164,6 +205,12 @@ export type GateClassification = {
   hasWorkingBranch: boolean
   targetsProtected: boolean
   isDestructive: boolean
+  /** Why it read as destructive: the word in its name, the flag it was given,
+   * an enum value it was given, or `--force`. Carried into the ask and the debug
+   * log, so the operator deciding the dialog and whoever reads the log later can
+   * tell the four (`data-health check-group update --remove-check …` is not a
+   * `project remove-orgs`). */
+  destructiveWhy?: string
   proposedName?: string
   /** The question to put to the operator for a release tag apply. */
   release?: string
@@ -194,17 +241,271 @@ export function classifyOrthancCommand(
   return 'mutation'
 }
 
-function isDestructiveCommand(command: string): boolean {
-  return lastWord(command.trim().toLowerCase()).split('-').at(-1) === 'delete'
+/**
+ * A word that says the write leaves something gone or overwritten.
+ *
+ * The rule used to read one word, `delete`, and only in one position: the last
+ * hyphen part of the last word of a command path. Measured on the orthanc 0.7.11 agent-manifest the plugin pins
+ * (541 command names, 260 of them mutation or local): 25 writes the old rule
+ * read, 51 carry a word in this table. The 26 it missed split two ways. 15
+ * asked nobody outside yolo — `marketplace installation uninstall` ("the plan
+ * previews what is deleted"), `streams stream reset` ("Clear all records from
+ * the stream on a branch"), `dataset transactions abort` ("discard its
+ * changes"), `devops draft abort` ("Drop a draft"), `alias clear` ("Delete all
+ * saved aliases"), `alias remove`, the two `project …remove…`,
+ * `repository imports remove`, `dev-console scope remove`,
+ * `media-sets input-schema remove`, `connectivity code-import remove-importer`,
+ * `data-health check replace`, `orchestration schedules replace`,
+ * `admin org replace`. 11 more asked only with the `--apply` their
+ * `operator_approval` condition names, so the same call without it ran:
+ * `resource remove-markings`, `resource-role revoke`,
+ * `global-branch remove-repo`, `global-branch remove-resources`,
+ * `repository checks required remove`, `branch-protection repo unprotect`,
+ * `admin marking replace`, `admin group member remove`, `workshop module
+ * revert`, `solution-design node remove`, `solution-design edge remove`. The act
+ * is the same; the ask is keyed on the act, not on the word orthanc chose.
+ *
+ * `purge`, `discard`, `destroy`, `truncate`, `wipe`, `erase`, `repair` and
+ * `overwrite` name no command on 0.7.11: they cover a rename before the next
+ * pin. `repair` and `overwrite` are the words the parity cycle of 2026-11-22
+ * named for writes it saw planned; a sync-gap repair rewrites history, so its
+ * plain form in the sentence the operator reads is 'rewritten'.
+ *
+ * Read on every word of a command path, and on a flag name
+ * (`destructiveFlag`), split on anything that is not a letter or a digit, so
+ * `resource permanently-delete`, `project remove-orgs`, `delete_object` and a
+ * future `orthanc remove resource` all count. Measured on the 541 names of
+ * 0.7.11, every destructive word sits in the last word of its path, so reading
+ * the whole path asks nothing new today and covers a name that puts the verb
+ * first. A positional or a branch name carries nothing, and so does a value
+ * except where it is an enum written in caps (`--transaction-type DELETE`), the
+ * way Orthanc writes its enumerated values: `--mode keep-outputs`,
+ * `--branch delete-me` and `alias remove delete` say nothing about what the
+ * write erases, and an option value that names the act (destructiveValue). Orthanc
+ * declares the options of its writes in that manifest — 990 on 0.7.11, 573 of them
+ * with a value, 17 of them with the values they accept — so the value lane is read
+ * against the declaration where one exists. One over-read stays on purpose: a word
+ * that starts with a hyphen is read as an option even where the option before it
+ * takes a value (`--description "-remove the old rows"` asks). Orthanc may take that
+ * word as the value or refuse it, the guard cannot tell from argv alone, and the two
+ * answers cost different things: reading too much costs a prompt, reading too little
+ * costs the ask.
+ *
+ * `set`, `update`, `add`, `close`, `cancel`, `pause` and `restore` stay out:
+ * they change or stop something that is still there, and the `auto` guard
+ * judges them. A `remove`, `revoke` or `unprotect` that only drops a reference
+ * is in: it is the same word, and the guard cannot tell a reference from a
+ * record.
+ *
+ * The table carries each word with what it leaves, in the plain form the
+ * operator and the model are told, and `modeGuidance` builds its sentence from
+ * that second column, so the wording an operator reads cannot fall behind the
+ * rule that asked them (pinned by destructive.test.ts D11).
+ */
+export const DESTRUCTIVE_WORDS = [
+  ['delete', 'deleted'],
+  ['remove', 'removed'],
+  ['uninstall', 'uninstalled'],
+  ['purge', 'purged'],
+  ['discard', 'discarded'],
+  ['clear', 'cleared'],
+  ['reset', 'reset'],
+  ['revert', 'reverted'],
+  ['replace', 'replaced'],
+  ['repair', 'rewritten'],
+  ['overwrite', 'overwritten'],
+  ['truncate', 'truncated'],
+  ['abort', 'aborted'],
+  ['revoke', 'revoked'],
+  ['unprotect', 'unprotected'],
+  ['destroy', 'destroyed'],
+  ['wipe', 'wiped'],
+  ['erase', 'erased'],
+] as const satisfies ReadonlyArray<readonly [string, string]>
+
+const TERMS = new Set<string>(DESTRUCTIVE_WORDS.map(([term]) => term))
+
+/** 'deleted, removed, …, destroyed or erased', for the guidance sentence. */
+function destructiveWords(): string {
+  const forms = DESTRUCTIVE_WORDS.map(([, form]) => form)
+  return `${forms.slice(0, -1).join(', ')} or ${forms.at(-1)}`
 }
 
+/** The destructive word in a command path or a flag name, or null. One word per
+ * run of letters and digits, so `-`, `_` and a space all split a name and the
+ * leading `--` of a flag carries nothing: `permanently-delete`, `remove-orgs`,
+ * `delete_object` and `--remove-check` all read. Case is ignored. An argument
+ * reaches this only as a flag name, so a value, a positional or a branch name
+ * carries nothing into the answer. */
+export function destructiveTermIn(name: string): string | null {
+  const words = name.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  return words.find(word => TERMS.has(word)) ?? null
+}
+
+/** A flag whose name says what the write removes: `--remove`, `--remove-check`,
+ * `--remove-resource`, `--delete-project`, `--delete-object-type`. The flags are
+ * not in the pinned snapshot, so this is measured against the binary the pin
+ * names, and re-run that way before the pin moves:
+ *
+ *   gh release download v0.7.11 --repo zaycruz/orthanc --pattern '*linux-gnu.tar.gz*'
+ *   tar xzf orthanc-x86_64-unknown-linux-gnu.tar.gz && ./orthanc --agent agent-manifest \
+ *     | jq -r '.data.commands[] | .path as $p | .args[]? | [.flag] | @tsv' | sort -u
+ *
+ * On 0.7.11 six flag names carry a word: these five, and `--abort-on-failure`.
+ * Three asked nobody (`--remove-check` on `data-health check-group update`,
+ * `--remove-resource` on `devops draft set`, `--delete-project` on `marketplace
+ * installation uninstall`). Two sit on a command Orthanc also marks
+ * `operator_approval` (`--delete-object-type` on `global-branch deploy` and
+ * `proposal merge`, `--remove` on `global-branch roles set` and `proposal
+ * request-review`), so they asked with the marked flag given and ran without
+ * it. Pinned as data in destructive.test.ts D13.
+ * `--abort-on-failure` holds the word `abort` and erases nothing (it stops a
+ * build when one job fails), so it reads as no claim; the exemption is by flag
+ * name, not by command, because the name says the same thing wherever it
+ * appears. Measured too: no `--no-…` flag of 0.7.11 holds a destructive word, so
+ * the negation rule is for the next pin — a flag that denies what it names is
+ * not a claim that the write erases.
+ * The two negations that drop a protection (`--no-read-only`,
+ * `--no-auto-protect-new-resources`) are marked `operator_approval` by Orthanc
+ * and ask on that. */
+const NON_DESTRUCTIVE_FLAGS = new Set(['--abort-on-failure'])
+
+/** Whether `flag` names what the write removes. A flag shape, not one of the
+ * exemptions, and a word of the table. */
+function isDestructiveFlag(flag: string): boolean {
+  return flag.startsWith('-') && !NON_DESTRUCTIVE_FLAGS.has(flag) && !flag.startsWith('--no-') && destructiveTermIn(flag) !== null
+}
+
+/** What one option of this call claims, as Orthanc declared it: its flag name,
+ * the value it was given (null when it takes none), and the values it may take
+ * (empty when the manifest lists none). */
+type GivenFlag = { flag: string; value: string | null; values: readonly string[] }
+
+/** Every option the call gave, read against the shapes the manifest declares for
+ * this command. Orthanc's agent-manifest names the options of its writes — on
+ * v0.7.11, 990 of them, 573 with a value, 417 without, and 10 commands with no
+ * options at all — and `orthanc.ts` parses them into `ManifestCommand.flags`, so
+ * the guard does not have to guess whether a hyphen-led word is a flag or someone's
+ * value. `--flag=v` and `--flag v` are one call, including when the value starts with
+ * a hyphen: the `=` form reads its remainder as an option too, so the two spellings
+ * cannot ask differently. Two readings survive as a guess, both on the safe side: an
+ * option the manifest does not name is still read as an option, and a word after a
+ * flag whose shape is unknown is read as its value, so a pin that lost its args asks
+ * more. One shape error asks less, and is worth knowing: an option that declares
+ * `takes_value: false` owns no value, so the word after it is never read as one. */
+function givenFlags(args: readonly string[], shapes: ReadonlyMap<string, ManifestFlag>): GivenFlag[] {
+  const given: GivenFlag[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const text = unquote(args[index]!).trim()
+    if (!text.startsWith('-')) continue
+    const equals = text.indexOf('=')
+    const flag = flagNameOf(text)
+    const shape = shapes.get(flag)
+    let value: string | null = null
+    if (equals > 0) value = unquote(text.slice(equals + 1)).trim()
+    else if (shape ? shape.takesValue : args[index + 1] !== undefined && !unquote(args[index + 1]!).trim().startsWith('-')) {
+      value = unquote(args[index + 1] ?? '').trim()
+      // `-f` shortening swallows its value (`-fvalue`), and a flag with no shape
+      // and no next word owns nothing.
+      if (value.startsWith('-') || value === flag) value = ''
+      else index += 1
+    }
+    given.push({ flag, value, values: shape?.values ?? [] })
+    // A value that starts with a hyphen is also an option as far as this rule is
+    // concerned, so `--flag=-remove the old rows` asks where `--flag -remove the old
+    // rows` asks. One spelling asking and the other silent would be a hole a caller
+    // could fall into by accident.
+    if (value !== null && value.startsWith('-')) given.push({ flag: value, value: null, values: [] })
+  }
+  return given
+}
+
+/** The flag whose name says what the write removes: `--remove`, `--remove-check`,
+ * `--remove-resource`, `--delete-project`, `--delete-object-type`. */
+function destructiveFlag(given: readonly GivenFlag[]): string | null {
+  return given.find(entry => isDestructiveFlag(entry.flag))?.flag ?? null
+}
+
+/** An option value that names the act. Two spellings count, and the pinned surface
+ * carries one of each.
+ *
+ * A value equal to one of the values the manifest lists for that option, when that
+ * value is a word of the table: `dataset transactions start --transaction-type
+ * DELETE` (its options are APPEND, UPDATE, SNAPSHOT, DELETE; the pinned entry is a
+ * plain `mutation` with no `operator_approval`), and the same enum written in lower
+ * case, which `marketplace installation uninstall --mode delete` really is — so
+ * case is not what decides here, the declaration is. Without it, the word could only
+ * be guessed from how a value looks, and a name is written every way there is.
+ *
+ * A value written in all caps that equals a word of the table, where the option
+ * declares no values of its own: that is how Orthanc spells an enumerated value, and
+ * it is not how anyone spells a name, so `--branch delete-me`, a build whose `--job`
+ * is called `revert`, and a dataset called `remove` stay no claim. A caps name a
+ * person chose (`--branch DELETE`) does ask, which is the safe side of that guess.
+ *
+ * The cue is built from the declared spelling and the flag, so no model-written text
+ * reaches the dialog through this lane. What is left unread: a word in a positional
+ * (a dataset RID, a schedule id) or in a value Orthanc does not enumerate, which is
+ * 973 of its 990 options. A caller who erases through such a value is judged by the
+ * command name, the `--force` rule, or the `auto` guard. */
+function destructiveValue(given: readonly GivenFlag[]): string | null {
+  for (const { flag, value, values } of given) {
+    if (value === null || value === '') continue
+    const word = value.toLowerCase()
+    if (!TERMS.has(word)) continue
+    const declared = values.some(allowed => allowed.toLowerCase() === word)
+    if (declared || /^[A-Z]+$/.test(value)) return `${displayTrigger(flag)}=${values.find(allowed => allowed.toLowerCase() === word) ?? value}`
+  }
+  return null
+}
+
+/** The declared shapes of one command's options, by flag name. */
+function flagShapes(entry: ManifestCommand | undefined): Map<string, ManifestFlag> {
+  const shapes = new Map<string, ManifestFlag>()
+  for (const shape of entry?.flags ?? []) shapes.set(shape.flag.toLowerCase(), shape)
+  return shapes
+}
+
+/** Why a write reads as destructive, in the words the operator is told: a word
+ * in the command name, a flag that names what the write removes, an option value
+ * that names it, or `--force`. The answer goes into the approval dialog, the
+ * debug log and the trace, and an argument is text a model wrote, so a flag is
+ * shown as written only when it is spelled like a flag. Anything else is JSON
+ * escaped and cut — the same contract `operatorApprovalQuestion` keeps, where a
+ * newline in an arg would otherwise forge lines in the question a human
+ * answers. */
+function destructiveTrigger(command: string, args: readonly string[], entry: ManifestCommand | undefined): string | null {
+  const word = destructiveTermIn(command)
+  if (word !== null) return word
+  const given = givenFlags(args, flagShapes(entry))
+  const flag = destructiveFlag(given)
+  if (flag !== null) return displayTrigger(flag)
+  const value = destructiveValue(given)
+  if (value !== null) return value
+  return argsHaveForce(command, args) ? '--force' : null
+}
+
+const SHOWN_FLAG = /^--?[a-z0-9][a-z0-9-]*$/
+const SHOWN_MAX = 80
+
+function displayTrigger(flag: string): string {
+  // Cut the argument first, on code points, then escape: cutting escaped text
+  // can split a `\n` or a surrogate pair and leave half an escape in the dialog.
+  const chars = Array.from(flag)
+  const cut = chars.length > SHOWN_MAX ? `${chars.slice(0, SHOWN_MAX).join('')}…` : flag
+  return SHOWN_FLAG.test(cut) ? cut : JSON.stringify(cut)
+}
+
+/** One arg as the flag it names, in any case, with or without a `=value`
+ * (`--FORCE` and `--force=true` both read as `--force`). Over-matching only
+ * asks more. */
+function flagNameOf(arg: string): string {
+  return unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
+}
 /** True when any arg names one of these flags, in any case, with or without a
  * `=value` (`--force`, `--APPLY`, `--apply=true`). Over-matching only asks more. */
 function argsNameFlag(args: readonly string[], names: readonly string[]): boolean {
-  return args.some(arg => {
-    const flag = unquote(arg).trim().toLowerCase().replace(/=.*$/, '')
-    return names.includes(flag)
-  })
+  return args.some(arg => names.includes(flagNameOf(arg)))
 }
 
 // The local commands where -f is --force. Elsewhere -f is --format or --folder.
@@ -218,25 +519,33 @@ function argsHaveForce(command: string, args: readonly string[]): boolean {
 const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
 const QUESTION_ARGS_MAX = 600
 
-/** The every-mode question for a call whose manifest entry carries
- * `operator_approval`, or null. `{when_all_flags: [...]}` asks when every
- * listed flag is given (argsNameFlag: any case, `=value`, any order);
- * `"always"` asks on every call. Anything else is unreadable and asks on every
- * call: a condition the guard cannot read never lets a call through. */
-/** `{when_all_flags: [flags]}`, nothing else. ("always" is handled before.) */
-function approvalReadable(value: unknown): boolean {
-  if (value === 'always') return true
+/** An `operator_approval` value the guard reads: `"always"` or
+ * `{when_all_flags: [flags]}`, nothing else. Anything else is null: the guard
+ * then asks on every call (operatorApprovalQuestion), and the manifest
+ * snapshot test fails (orthanc-snapshot.test.ts). */
+export type ApprovalCondition = { kind: 'always' } | { kind: 'flags'; flags: string[] }
+
+export function readApprovalCondition(value: unknown): ApprovalCondition | null {
+  if (value === 'always') return { kind: 'always' }
   const condition = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
   const flags = condition?.when_all_flags
-  return (
+  if (
     condition !== null &&
     Object.keys(condition).length === 1 &&
     Array.isArray(flags) &&
     flags.length > 0 &&
     flags.every(flag => typeof flag === 'string' && APPROVAL_FLAG.test(flag))
-  )
+  ) {
+    return { kind: 'flags', flags: (flags as string[]).map(flag => flag.toLowerCase()) }
+  }
+  return null
 }
 
+/** The every-mode question for a call whose manifest entry carries
+ * `operator_approval`, or null. `{when_all_flags: [...]}` asks when every
+ * listed flag is given (argsNameFlag: any case, `=value`, any order);
+ * `"always"` asks on every call. Anything else is unreadable and asks on every
+ * call: a condition the guard cannot read never lets a call through. */
 export function operatorApprovalQuestion(
   path: string,
   args: readonly string[],
@@ -249,11 +558,12 @@ export function operatorApprovalQuestion(
   const shown = JSON.stringify(args)
   const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
   const ask = (why: string) => `'${path}' ${cut} weakens a governance control: ${why} The operator approves it.`
-  if (value === 'always') return ask("Orthanc's agent manifest marks it operator_approval.")
-  if (!approvalReadable(value)) {
+  const condition = readApprovalCondition(value)
+  if (condition === null) {
     return ask("Orthanc's agent manifest marks it operator_approval in a form the Foundry guard cannot read, so it asks on every call.")
   }
-  const listed = ((value as Record<string, unknown>).when_all_flags as string[]).map(flag => flag.toLowerCase())
+  if (condition.kind === 'always') return ask("Orthanc's agent manifest marks it operator_approval.")
+  const listed = condition.flags
   if (!listed.every(flag => argsNameFlag(args, [flag]))) return null
   return ask(`Orthanc's agent manifest marks it operator_approval when ${listed.join(' ')} are given.`)
 }
@@ -270,6 +580,8 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
   const values: string[] = []
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index] ?? ''
+    // After `--` every word is a positional, so nothing there names a branch.
+    if (arg === '--') return false
     const lower = arg.toLowerCase()
     const name = names.find(found => arg === found || arg.startsWith(`${found}=`))
     if (name !== undefined) {
@@ -286,17 +598,74 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
   return values.length === 1 && WORK_BRANCH_RID.test(values[0]!)
 }
 
+/** True when the entry says this command can print a plan instead of writing: it
+ * declares `--apply`. An entry that lists no flags (an older orthanc, a partial
+ * manifest) says nothing either way, and is treated as one that can, as every
+ * command this rule covers does. An entry that lists flags and none is
+ * `--apply` writes on every call, so the base rule applies to it on every call. */
+function canPlan(entry: ManifestCommand | undefined): boolean {
+  if (entry?.flags === undefined || entry.flags.length === 0) return true
+  return entry.flags.some(flag => typeof flag.flag === 'string' && flag.flag.toLowerCase() === '--apply')
+}
+
+/** True only when one `--base-branch` holds one global branch RID and nothing in
+ * the call could have taken that word for something else. Two shapes hide a base
+ * there: everything after `--` is a positional (oneWorkBranchFlag refuses it),
+ * and pflag binds a value-taking flag's value before it looks for the next flag,
+ * so `--description --base-branch <rid>` sets a description and leaves the base
+ * main. The manifest prices each flag of the command; a flag the entry does not
+ * list may take a value, so the call is unproven and asks. */
+function baseBranchOnWorkBranch(args: readonly string[], entry: ManifestCommand | undefined): boolean {
+  if (!oneWorkBranchFlag(args, BASE_BRANCH_FLAGS)) return false
+  const priced = new Map(
+    (entry?.flags ?? [])
+      .filter(flag => typeof flag.flag === 'string')
+      .map(flag => [flag.flag.toLowerCase(), flag.takesValue] as [string, boolean]),
+  )
+  for (let index = 1; index < args.length; index += 1) {
+    const previous = unquote(args[index - 1] ?? '').toLowerCase()
+    // `--flag=value` binds its own value, so nothing follows it that could be swallowed.
+    if (!previous.startsWith('-') || previous.includes('=')) continue
+    if (priced.get(previous.split('=')[0] ?? '') === false) continue
+    // The value it took may be the `=` spelling of the base flag.
+    const current = (unquote(args[index] ?? '').toLowerCase().split('=')[0] ?? '').replace(/^-+/, '')
+    if (BASE_BRANCH_FLAGS.some(flag => flag.replace(/^-+/, '') === current)) return false
+  }
+  return true
+}
+
+/** An `operator_approval_scope` value the guard reads (orthanc CONTRACTS.md,
+ * SRC-15): `"always"`, `"work-branch"`, or `{work_branch_flag, flag_aliases?}`
+ * with each flag a `--long-flag`. Anything else, a missing scope included, is
+ * null: the guard reads it as `"always"` and asks, and the manifest snapshot
+ * test fails (orthanc-snapshot.test.ts). */
+export type ApprovalScope = { kind: 'always' } | { kind: 'work-branch' } | { kind: 'flag'; flags: string[] }
+
+export function readApprovalScope(scope: unknown): ApprovalScope | null {
+  if (scope === 'always') return { kind: 'always' }
+  if (scope === 'work-branch') return { kind: 'work-branch' }
+  if (typeof scope !== 'object' || scope === null || Array.isArray(scope)) return null
+  const record = scope as Record<string, unknown>
+  if (!Object.keys(record).every(key => key === 'work_branch_flag' || key === 'flag_aliases')) return null
+  const flag = record.work_branch_flag
+  const aliases = record.flag_aliases ?? []
+  if (typeof flag !== 'string' || !SCOPE_FLAG.test(flag)) return null
+  if (!Array.isArray(aliases) || !aliases.every(alias => typeof alias === 'string' && SCOPE_FLAG.test(alias))) return null
+  return { kind: 'flag', flags: [flag, ...(aliases as string[])] }
+}
+
 /** True only when the entry's operator_approval_scope (orthanc #118) shows
  * that this call lands on one global work branch, never on main:
  * `"work-branch"` with a global branch RID among the positionals and nothing
  * naming main, or `{work_branch_flag, flag_aliases?}` with that flag (or an
- * alias) holding one global branch RID. A missing or unreadable scope, or an
- * unreadable operator_approval, is false: yolo then asks. */
+ * alias) holding one global branch RID. `"always"`, a missing or unreadable
+ * scope, or an unreadable operator_approval, is false: yolo then asks. */
 export function approvalOnWorkBranch(path: string, args: readonly string[], manifest: readonly ManifestCommand[]): boolean {
   const entry = manifest.find(found => found.path === path)
-  if (entry === undefined || !approvalReadable(entry.operatorApproval)) return false
-  const scope = entry.operatorApprovalScope
-  if (scope === 'work-branch') {
+  if (entry === undefined || readApprovalCondition(entry.operatorApproval) === null) return false
+  const scope = readApprovalScope(entry.operatorApprovalScope)
+  if (scope === null || scope.kind === 'always') return false
+  if (scope.kind === 'work-branch') {
     // Every word that is not a flag counts, whatever flag comes before it: the
     // guard does not know which flags take a value (`--yes main`).
     const words = args.filter(arg => !unquote(arg).startsWith('-'))
@@ -306,14 +675,7 @@ export function approvalOnWorkBranch(path: string, args: readonly string[], mani
       !flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue)
     )
   }
-  if (typeof scope !== 'object' || scope === null || Array.isArray(scope)) return false
-  const record = scope as Record<string, unknown>
-  if (!Object.keys(record).every(key => key === 'work_branch_flag' || key === 'flag_aliases')) return false
-  const flag = record.work_branch_flag
-  const aliases = record.flag_aliases ?? []
-  if (typeof flag !== 'string' || !SCOPE_FLAG.test(flag)) return false
-  if (!Array.isArray(aliases) || !aliases.every(alias => typeof alias === 'string' && SCOPE_FLAG.test(alias))) return false
-  return oneWorkBranchFlag(args, [flag, ...(aliases as string[])])
+  return oneWorkBranchFlag(args, scope.flags)
 }
 
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.
@@ -585,12 +947,17 @@ function orthancClassification(
   stored?: readonly string[] | null,
 ): GateClassification {
   const action = ACTION_BRANCH_WRITES.has(command) ? actionBranches(command, args) : null
+  const entry = manifest.find(found => found.path === command)
   const base = {
     command,
     hasWorkingBranch: branchIsWorking(workingBranch),
     // `-b` is --branch in every command, so every spelling of it names the branch.
     targetsProtected:
       MAIN_WRITES.has(command) ||
+      // A scenario whose base is not provably one global branch is a scenario on main.
+      (BASE_BRANCH_WRITES.has(command) &&
+        (!canPlan(entry) || argsNameFlag(args, ['--apply'])) &&
+        !baseBranchOnWorkBranch(args, entry)) ||
       (action !== null && 'branches' in action && action.branches.some(isProtectedValue)) ||
       // A stored branch that could not be read, or none (Foundry reads none as master), may be main.
       (STORED_BRANCH_RUNS.has(command) &&
@@ -607,11 +974,13 @@ function orthancClassification(
         : null
     const approval = operatorApprovalQuestion(command, args, manifest)
     const approvalOnBranch = approval !== null && approvalOnWorkBranch(command, args, manifest)
+    const trigger = destructiveTrigger(command, args, manifest.find(entry => entry.path === command))
     return {
       ...base,
       kind: 'mutation',
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
-      isDestructive: isDestructiveCommand(command) || argsHaveForce(command, args),
+      isDestructive: trigger !== null,
+      ...(trigger === null ? {} : { destructiveWhy: trigger }),
       ...(release !== null ? release : {}),
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
@@ -777,7 +1146,16 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 }
 
 /** One simple command: its words; fed: a heredoc or here-string feeds its stdin; split: it ended at an unquoted $( or backquote. */
-export type Segment = { words: string[]; fed: boolean; split: boolean }
+// The operator that ended a segment: 'fail' for `||`, the next command runs only
+// when this one failed - which is what a wait that timed out does, so both are
+// still paid for; 'arm' for a `case` arm's `;;` and the pattern that opens the
+// next, the arms run instead of each other and only one is ever chosen; 'pipe'
+// for `|`, the next command runs alongside this one; 'bg' for `&`, this command
+// is left running and the line answers at once.
+// Absent: the next command runs after this one (`&&`, `;`, a newline).
+export type ShellJoin = 'fail' | 'arm' | 'pipe' | 'bg'
+
+export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin }
 
 // Code that can start another process, per interpreter.
 const SPAWNS: [RegExp, RegExp][] = [
@@ -824,10 +1202,23 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     word = ''
     quoted = false
   }
-  const endSegment = (split = false) => {
+  // `split` marks a segment whose command continues inside a substitution, so
+  // its words are not the whole call; `join` says how the next command relates
+  // to this one ('alt' for ||, 'pipe' for |, 'bg' for a job left running).
+  // After `;;` the next words are the next `case` arm's pattern, up to its `)`:
+  // they run nothing, and the arm they name runs instead of the arm before it.
+  let armPattern = false
+  const endSegment = (operator: '\n' | '$(' | '`' | '<(' | '&&' | '||' | ';;' | '|' | '&' | '' = '') => {
     endWord()
     target = null
-    if (words.length > 0) segments.push({ words, fed: false, split })
+    // A `)` closing a `case` arm's pattern is the arm's own separator: the words
+    // before it name a match, they do not run, and the arm is an alternative to
+    // the arm before it.
+    const arm = operator === ')' && armPattern
+    const join: ShellJoin | undefined =
+      operator === '||' ? 'fail' : operator === ';;' || arm ? 'arm' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
+    armPattern = operator === ';;' ? true : operator === ')' ? false : words.length > 0 ? false : armPattern
+    if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join })
     words = []
   }
   // At a newline: skip the bodies of the heredocs opened on the line that ends here.
@@ -871,11 +1262,11 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
       quoted = true
     } else if (char === '\\' && index + 1 < command.length) word += command[++index]
     else if (char === '\n') {
-      endSegment()
+      endSegment('\n')
       index = skipHeredocs(index)
     } else if (/\s/.test(char)) endWord()
     else if (char === '$' && command[index + 1] === '(') {
-      endSegment(true)
+      endSegment('$(')
       index += 1
     } else if (char === '<' || char === '>' || (char === '&' && command[index + 1] === '>')) {
       // A file descriptor glued to the redirect (`2>`, `0<<`) is not a word.
@@ -895,7 +1286,16 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
         if (tabs) index += 1
         target = tabs ? 'heredoc-tabs' : 'heredoc'
       } else target = 'file'
-    } else if (SHELL_OPERATORS.includes(char)) endSegment(char === '`')
+    } else if (SHELL_OPERATORS.includes(char)) {
+      // `&&`, `||` and `;;` are one operator each: the first runs the two
+      // commands in sequence, the second runs the right one only when the left
+      // one failed (a timed-out wait does fail, so both are still paid for), and
+      // `;;` closes a `case` arm, so only one arm ever runs.
+      if ((char === '&' || char === '|' || char === ';') && command[index + 1] === char) {
+        index += 1
+        endSegment(char === '&' ? '&&' : char === '|' ? '||' : ';;')
+      } else endSegment(char === '`' || char === ')' || char === '|' || char === '&' ? char : '')
+    }
     else word += char
   }
   endSegment()
@@ -1119,6 +1519,127 @@ function orthancShellCall(
   return { path: leading.join(' ').toLowerCase(), known: false, help }
 }
 
+// One Orthanc call a shell line runs, in the order the shell runs them.
+type ShellCall =
+  // A segment that runs Orthanc where the guard cannot read it (a variable, eval
+  // or interpreter code): what it runs is unknown, so neither the ladder nor a
+  // timer has anything to judge.
+  | { hides: true }
+  | {
+      hides: false
+      /** The manifest entry the words name; null when they name none. */
+      entry: ManifestCommand | null
+      /** Every word after the binary: the positionals and the flags, what cliWait reads. */
+      args: string[]
+      path: string
+      known: boolean
+      help: boolean
+      /** The segment ended at a substitution: the call continues inside it. */
+      split: boolean
+      /** How many times the shell runs this command: over 1 inside a counted loop. */
+      times: number
+      /** How this command relates to the one before it, or 'unknown' when its
+       * arguments continue inside a substitution the guard cannot read. */
+      join: ShellCallJoin
+    }
+
+// Where a command sits against the one before it, for the timer that has to hold
+// them all (hooks/process.ts coverShellWaits): 'seq' and 'fail' both pay for the
+// wait, 'arm' and 'pipe' stand in for one another, 'bg' is not waited for, and
+// 'unknown' is a call whose arguments the guard could not read.
+export type ShellCallJoin = 'seq' | 'fail' | 'arm' | 'pipe' | 'bg' | 'unknown'
+
+// `if … then A; else B; fi` runs one arm: the segment that opens with `else` or
+// `elif` is an alternative to what came before it.
+function joinOf(segment: Segment, index: number, segments: readonly Segment[]): ShellCallJoin {
+  if (segment.split) return 'unknown'
+  if (segment.join === 'bg') return 'bg'
+  const before = index > 0 ? segments[index - 1]! : undefined
+  if (before?.split) return 'unknown'
+  return before?.join ?? 'seq'
+}
+
+const LOOP_HEADS = new Set(['for', 'while', 'until', 'select'])
+// A `for x in a b c` list the guard can count; `$(ls)`, `*.json` and `$@` it cannot.
+const PLAIN_WORD = /^[\w.@:+,-]+$/
+
+/**
+ * How many times each segment's command runs: 1 outside a loop, and inside a
+ * `for … in a b c` body, the count of its literal list (nested loops multiply).
+ * A `while`/`until` body, and a list built from a substitution or a glob, counts
+ * once: the guard cannot say how often it runs, and a wait that runs past the
+ * raised timeout is stopped by the host exactly as it was before this cover.
+ */
+function loopCounts(segments: readonly Segment[]): number[] {
+  const open: number[] = []
+  const counts: number[] = []
+  for (const { words } of segments) {
+    const head = words.find(word => !ASSIGNMENT.test(word)) ?? ''
+    if (LOOP_HEADS.has(basename(head))) {
+      const at = words.indexOf('in')
+      const list = at < 0 ? [] : words.slice(at + 1).filter(word => word !== 'do')
+      open.push(list.length > 0 && list.every(word => PLAIN_WORD.test(word)) ? list.length : 1)
+      counts.push(1)
+      continue
+    }
+    // Only a `done` in command position closes a body: `checks wait rid done` is
+    // an argument, and treating it as the terminator would drop the multiplier.
+    const closes = basename(words[0]) === 'done'
+    counts.push(closes ? 1 : open.reduce((product, count) => product * count, 1))
+    if (closes) open.splice(-1, 1)
+  }
+  return counts
+}
+
+/** The Orthanc calls a Bash command runs, unreadable ones marked where they sit. */
+function shellCalls(command: string, manifest: readonly ManifestCommand[]): ShellCall[] {
+  const segments = commandSegments(command)
+  // The first words of the manifest paths: what can follow `orthanc` as a call.
+  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
+  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
+  const assignments = new Map<string, string[]>()
+  for (const word of segments.flatMap(segment => segment.words)) {
+    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
+    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
+  }
+  const calls: ShellCall[] = []
+  const counts = loopCounts(segments)
+  segments.forEach((segment, index) => {
+    const { words } = segment
+    if (hidesOrthanc(segment, command, assignments, groups)) {
+      calls.push({ hides: true })
+      return
+    }
+    const start = orthancStart(segment, groups)
+    if (start < 0) return
+    const call = orthancShellCall(words, start, manifest)
+    calls.push({
+      hides: false,
+      entry: manifest.find(entry => entry.path === call.path) ?? null,
+      args: words.slice(start + 1),
+      ...call,
+      split: segment.split,
+      times: counts[index] ?? 1,
+      join: joinOf(segment, index, segments),
+    })
+  })
+  return calls
+}
+
+/**
+ * What the Orthanc calls a Bash command runs, as the manifest describes them,
+ * with the words after the binary and how often the shell runs each. The Bash
+ * tool holds its own timer over them;
+ * register.tsx turns these into waits and covers that timer (hooks/process.ts).
+ * A command with no readable Orthanc call, or one the guard cannot read, brings
+ * nothing: the guard answers those before the timer is read.
+ */
+export function shellOrthancCalls(command: string, manifest: readonly ManifestCommand[]): { command: ManifestCommand; args: string[]; times: number; join: ShellCallJoin }[] {
+  return shellCalls(command, manifest).flatMap(call =>
+    call.hides || !call.known || call.help || call.entry === null ? [] : [{ command: call.entry, args: call.args, times: call.times, join: call.join }],
+  )
+}
+
 // Bash may read through Orthanc; every Orthanc write goes through orthanc_cli,
 // where the branch rule and the ladder see its arguments as data, not shell.
 function shellClassification(
@@ -1135,24 +1656,11 @@ function shellClassification(
     isDestructive: false,
     error,
   })
-  const segments = commandSegments(command)
-  // The first words of the manifest paths: what can follow `orthanc` as a call.
-  const groups = new Set(manifest.map(entry => entry.path.toLowerCase().split(/\s+/)[0] ?? ''))
-  // Every value the line assigns to each variable, at any position (`export X=…`, `env X=… cmd`).
-  const assignments = new Map<string, string[]>()
-  for (const word of segments.flatMap(segment => segment.words)) {
-    const assigned = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(word)
-    if (assigned) assignments.set(assigned[1]!, [...(assignments.get(assigned[1]!) ?? []), assigned[2]!])
-  }
-  for (const segment of segments) {
-    const { words } = segment
-    if (hidesOrthanc(segment, command, assignments, groups)) {
+  for (const call of shellCalls(command, manifest)) {
+    if (call.hides) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    const start = orthancStart(segment, groups)
-    if (start < 0) continue
-    const call = orthancShellCall(words, start, manifest)
-    if (call.path === '' && !call.help && segment.split) {
+    if (call.path === '' && !call.help && call.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
     if (call.help || call.path === '' || call.path === 'repository clone') continue
@@ -1161,10 +1669,16 @@ function shellClassification(
     }
     // Before the read short-circuit, and with no second gate behind it: Bash is
     // the one lane where a secret could still be piped in.
-    if (manifest.some(entry => entry.path === call.path && isCredentialCommand(entry)))
+    if (call.entry !== null && isCredentialCommand(call.entry))
       return refuse(call.path, `'orthanc ${call.path}' needs a credential the operator types, so neither Bash nor orthanc_cli runs it. ${CREDENTIAL_HINT}`)
-    const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
-    if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
+    // The other direction, and Bash prints what a command prints straight back to
+    // the agent: the two operator-only commands answer with a value, so they are
+    // refused here too, ahead of the same read short-circuit.
+    const operatorOnly = operatorOnlyReason(call.path)
+    if (operatorOnly !== null) return refuse(call.path, operatorOnly)
+    // The manifest entry this call names, read once: the wait timer below
+    // (shellOrthancCalls) judges the same entry the ladder judged here.
+    if (classifyOrthancCommand(call.path, manifest) === 'read' && call.entry?.operatorApproval === undefined) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
   }
   return null
@@ -1265,7 +1779,9 @@ function mcpAllWords(inner: string): string[] {
 export function classifyMcpIntent(inner: string): 'read' | 'write' | 'unknown' {
   const coarse = inner.toLowerCase().split(/[^a-z]+/)
   const words = mcpAllWords(inner)
-  if (words.some(word => WRITE_WORDS.has(word))) return 'write'
+  // A destructive word outranks a read word: `get_uninstall_plan` names an
+  // uninstall, and a read that reads as a write only costs a refusal.
+  if (words.some(word => WRITE_WORDS.has(word)) || destructiveTermIn(inner) !== null) return 'write'
   if (words.some(word => AMBIGUOUS_WORDS.has(word))) return 'unknown'
   if (coarse.some(word => READ_WORDS.has(word))) return 'read'
   return 'unknown'
@@ -1277,7 +1793,9 @@ function mcpIntentError(tool: string, intent: 'read' | 'write' | 'unknown'): str
   return `${tool} is a Foundry call the guard cannot read, so nothing runs. A name with plain separated words (list_objects) reads; a camelCase name does not. Orthanc is the write path: orthanc_cli with --branch.`
 }
 
-/** A Foundry call the guard cannot read: blocked in every mode, so it never runs blind. */
+/** A Foundry call the guard will not run and asks no one about: one it cannot
+ * read, or one that belongs to the operator. Blocked in every mode; `error` is
+ * what the agent sees, so it names the call and where it does run. */
 function unreadableCall(input: unknown, workingBranch: string | null, error: string): GateClassification {
   return {
     command: null,
@@ -1312,6 +1830,10 @@ export function classifyCall(
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
     if (resolved.path === '' || resolved.path === 'repository clone') return null
+    // Before the read short-circuit: these two are `read-only` in the manifest,
+    // and what they print or write is the whole point of the call.
+    const operatorOnly = operatorOnlyReason(resolved.path)
+    if (operatorOnly !== null) return unreadableCall(input, workingBranch, operatorOnly)
     // A read whose entry also asks for the operator is not let through as a read.
     if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
     // orthanc reads the last --profile it is given, so one in the args would move
@@ -1333,17 +1855,36 @@ export function classifyCall(
     const inner = foundryMcp.inner
     const intent = classifyMcpIntent(inner)
     if (intent === 'read') return null
+    const mcpWord = destructiveTermIn(inner)
     return {
       command: null,
       kind: 'mutation',
       isBranchScoped: false,
       hasWorkingBranch: branchIsWorking(workingBranch),
       targetsProtected: targetsProtected(input),
-      isDestructive: mcpAllWords(inner).includes('delete'),
+      // Read by name too, so a tool named for one of the destructive acts is judged
+      // as destructive, not only one whose name says `delete` (destructive.test.ts D10).
+      isDestructive: mcpWord !== null || mcpAllWords(inner).includes('delete'),
       error: mcpIntentError(tool, intent),
     }
   }
   return null
+}
+
+/** The fix the agent can actually apply, in the flag this command takes: a
+ * scenario has no --branch, and telling it to pass one sends it back to the
+ * same ask (the loop guard is off in yolo). A write that takes no branch at all
+ * gets no branch advice. */
+function workBranchFix(command: string | null): string {
+  if (command !== null && BASE_BRANCH_WRITES.has(command)) return 'otherwise pass --base-branch <global branch RID>, or create one with \'global-branch create agent/<name>\''
+  if (command !== null && (MAIN_WRITES.has(command) || MAIN_ONLY_WRITES.has(command))) return ''
+  return 'otherwise pass a work branch'
+}
+
+/** The yolo ask for a scenario: the fork writes neither main nor its base, so
+ * what the operator is approving is the choice of main as that base. */
+function scenarioBaseReason(command: string): string {
+  return `'${command}' is a scenario based on main: its --base-branch is missing, or is not one global branch RID. The scenario writes neither main nor that base, so the call to approve is which branch the work forks from; ${workBranchFix(command)}.`
 }
 
 export function ladderDecision(
@@ -1379,17 +1920,30 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
+      reason:
+        (classification.command !== null && BASE_BRANCH_WRITES.has(classification.command)
+          ? `yolo mode: ${scenarioBaseReason(command)}`
+          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`) +
+        (classification.destructiveWhy ? ` It is also destructive (${classification.destructiveWhy}).` : ''),
     }
   }
-  if (mode === 'yolo') return { outcome: 'run', reason: 'yolo mode: nothing else asks; work stays on branches that are not main' }
+  if (mode === 'yolo')
+    return {
+      outcome: 'run',
+      reason: classification.destructiveWhy
+        ? `yolo mode: nothing else asks; this write is destructive (${classification.destructiveWhy}) and runs with no ask`
+        : 'yolo mode: nothing else asks; work stays on branches that are not main',
+    }
   if (classification.isDestructive) {
-    return { outcome: 'ask', reason: `destructive mutation '${command}' asks in every mode but yolo${note}` }
+    // Both claims are kept: outside yolo a write that is destructive *and* names
+    // main asks once, and the operator reads why it cannot be waved through.
+    const also = classification.targetsProtected ? ', and it writes main' : ''
+    return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${also}${note}` }
   }
   if (classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology)${note}`,
+      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology).${workBranchFix(classification.command) === '' ? '' : ` ${workBranchFix(classification.command)}.`}${note}`,
     }
   }
   if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval` }
@@ -1402,17 +1956,21 @@ export function ladderDecision(
 export function modeGuidance(mode: ApprovalMode): string {
   return (
     'Branch rule: agent work happens on branches, never on a production main. Every ontology write ' +
-    'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>); ' +
+    'passes --branch <global branch RID> (ri.branch..branch.…; create one with global-branch create agent/<name>; `ontology scenario create` spells its branch --base-branch); ' +
     'dataset, stream and build writes pass --branch <work branch>; code goes to a work branch and a pull request. ' +
     'Writes without a branch, merges and default-branch pushes are blocked in every mode. ' +
-    'A write that names main, master or HEAD as its branch, or works on main only, asks the operator in every mode. ' +
+    'A write that names main, master or HEAD as its branch, or works on main only, or is an ontology scenario based on main, asks the operator in every mode. ' +
     (mode === 'yolo'
-      ? 'Foundry approval mode: yolo. Nothing asks the operator except a write on main: deletes and --force writes run at once, ' +
+      ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
         'and the loop guard is off. A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
-        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch. ' +
+        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
+        'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
+        `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
+        'when a value a flag takes names such an act, either among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`) or spelled in caps the way Orthanc spells an enumerated value, ' +
+        'or when it is given --force. ' +
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
