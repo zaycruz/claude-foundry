@@ -21,17 +21,17 @@ says so instead of falling back to REST.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard judges
   each mutation) and `yolo`. Outside `yolo`, a destructive change asks, as do
-  release tags, protected branches, and a call repeated three times. A change is
-  destructive when its command name, or one of its flags, says something is left
-  gone or overwritten — `marketplace installation uninstall`,
+  release tags and protected branches, and a call repeated three times is blocked. A
+  change is destructive when its command name, or one of its flags, says something is
+  left gone or overwritten — `marketplace installation uninstall`,
   `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
   given `--force`, or when the value of one of its flags is an act — one Orthanc
   lists among that flag's accepted values (`--transaction-type DELETE`), or one
   spelled in caps the way Orthanc spells its enumerated values.
-  The rule reads the name and anything that looks like a flag. A branch name, a
-  positional, and a value such as `keep-outputs` or `delete-me` ask nothing. An
-  argument that starts with a hyphen looks like a flag, so it asks: reading too
-  much costs a prompt, reading too little costs the ask. The words,
+  The rule reads the name and anything that looks like a flag. A positional and a value
+  that names no act ask nothing, such as `--mode keep-outputs` or
+  `--branch delete-me`. An argument that starts with a hyphen looks like a flag, so it
+  asks: reading too much costs a prompt, reading too little costs the ask. The words,
   and what each one leaves, are `DESTRUCTIVE_WORDS` in `hooks/policy.ts`; the
   approval prompt builds its own wording from that table. In `yolo` only a write
   on main asks: destructive writes run at once, and the loop guard is off. A

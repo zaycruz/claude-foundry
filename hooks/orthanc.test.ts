@@ -14,10 +14,10 @@
 //  T8  Commands that do not wait lose the 300 s floor.
 //  T9  Flags written inside the command string (F16) are not seen.
 //  T10 An older manifest without flag defaults breaks the derivation.
-//  T11 A manifest without args loses the flags it does carry.
-//  T12 An enumerated option keeps the values it accepts. That list is the only
-//      source the destructive value lane has for a declared act, so it is pinned
-//      here at the parser as well as where it is read.
+//  T11 A manifest without args loses the flags it does carry, and an enumerated
+//      option loses the values it accepts. That list is the only source the
+//      destructive value lane has for a declared act, so it is pinned at the
+//      parser as well as where it is read.
 //  T12 $.process.run kills its child at ten minutes whatever timeoutMs says,
 //      so any timer over 600 s is still cut (found after the first fix).
 //  T13 The streamed run never ends: a silent child outlives its deadline, or
@@ -113,7 +113,7 @@ test('T9: flags inside the command string count once resolved', async () => {
   expect(seconds(cliTimeoutMs(CHECKS_WAIT, resolved.args))).toBe(1750)
 })
 
-test('T10 T11 T12: the manifest keeps flag defaults and enumerated values; without them only explicit values count', async () => {
+test('T10 T11: the manifest keeps flag defaults and enumerated values; without them only explicit values count', async () => {
   const parsed = manifestFrom({
     schema_version: 'foundry-agent-v1',
     data: {
