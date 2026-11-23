@@ -1,0 +1,89 @@
+name: v-full
+
+# The orthanc release job opens a pull request that is red by design: it moves
+# .claude-plugin/plugin.json and hooks/orthanc-snapshot.json alone, and only the
+# operator's `node scripts/orthanc-tie.mjs refresh` finishes it (docs/RELEASE.md,
+# F10). `check` is what catches that merge, and nothing else runs it: the hooks
+# sandbox refuses `node:fs` in a test, so no test can read
+# hooks/orthanc-snapshot.json and the T8 comparison lives in the script alone.
+# PR #39 (orthanc v0.7.13) merged unfinished that way and left main red. So CI
+# runs the script itself, with the plugin's own validate and test suite, on
+# every pull request and on every push to main. Each check is its own job so a
+# failure names the thing that broke. The script is not restated here; CI only
+# calls it, so it can never drift from the one the operator runs.
+#
+# Actions are pinned to full commit SHAs (a tag is mutable; a SHA is not), so a
+# compromised or retagged upstream action cannot silently change what runs in a
+# job that has repository contents, as in orthanc-source's ci.yml.
+#
+# Tests and builds do not run on the Mac (zay's global rule, claude-config
+# CLAUDE.md "Where work runs: Proxmox, not this Mac"): every job runs on a
+# GitHub-hosted Linux runner, or on the repository's own Linux runners through
+# the same vars.CI_RUNS_ON switch orthanc-source uses. No job ever runs on
+# macOS, and no secret reaches this workflow.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One run per ref; a new push cancels the previous run for that ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The Claude Code CLI that runs `plugin validate` and `plugin test`, pinned so
+  # a CLI release cannot change the verdict overnight; bump it deliberately,
+  # with the plugin's own release notes.
+  CLAUDE_CODE_VERSION: "2.1.330"
+  # No telemetry, no update check: the runs are offline and reproducible.
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
+jobs:
+  orthanc-tie:
+    name: orthanc-tie
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      # The tie check itself (T1-T10 in scripts/orthanc-tie.mjs). The release
+      # job's pull request is red here until the operator finishes it with
+      # `refresh`; that red is the point (docs/RELEASE.md F10).
+      - run: node scripts/orthanc-tie.mjs check
+
+  plugin-validate:
+    name: plugin-validate
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+      # docs/RELEASE.md step 3, the same three commands the operator runs.
+      - run: claude plugin validate .
+
+  plugin-test:
+    name: plugin-test
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"ubuntu-24.04"') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Install Claude Code
+        run: npm install -g "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+      # The plugin's own suite: 830 tests across 25 files, offline. It stays
+      # green on an unfinished release-job pull request; the tie check above is
+      # what catches that one.
+      - run: claude plugin test .
