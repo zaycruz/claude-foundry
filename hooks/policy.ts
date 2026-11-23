@@ -54,6 +54,17 @@ const BRANCH_REQUIRED_PATHS = new Set([
   'ontology link-type-create',
   'ontology link-type-upsert',
   'ontology link-type-delete',
+  // The schema writes orthanc 0.7.10 (#181) added beyond object, link and action
+  // types, and the branch index of 0.7.7. Each one takes a branch and never
+  // writes main (`--branch … required, never main`), so a call that names none
+  // is an incomplete call, not a write with a default.
+  'ontology interface-upsert',
+  'ontology interface-delete',
+  'ontology shared-property-upsert',
+  'ontology shared-property-delete',
+  'ontology type-group-upsert',
+  'ontology type-group-delete',
+  'ontology branch-index',
   'ontology action-type-upsert',
   'ontology action-type-update',
   'ontology action-type-set-function-version',
