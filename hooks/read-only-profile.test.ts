@@ -741,6 +741,16 @@ test('Q19: a descending or stepped range and a negated set reach the store too',
     'mv ~/.c[!O]nfig /tmp/',
     // The home directory's own segment is matched as written too.
     'rm -rf /home/[!T]ester/.config/foundry',
+    // The rest of bash's bracket grammar: `!` inside a set is a member, `[=f=]` and
+    // `[.f.]` are the character f, and a `]` first in the set is a member.
+    'rm -rf ~/.config/[f!!]oundry',
+    'rm -rf ~/.config/[[=f=]]oundry',
+    'rm -rf ~/.config/[[.f.]]oundry',
+    'rm -rf ~/.config/[![=F=]]oundry',
+    'rm -rf ~/.config/f[!]]undry',
+    // A group bash leaves as written does not stop the groups after it.
+    'rm -rf ~/.config/{}/../foundr{x,y}',
+    'rm -rf ~/a{x}b/../.config/foundr{x,y}',
   ]) {
     const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
     if (deny === '') denied.push(command)

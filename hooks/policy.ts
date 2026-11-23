@@ -1665,93 +1665,137 @@ const NAME_LIMIT_FLAG = /^-(?:i?name|path|i?regex)(?:$|=)/i
 const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/
 
 /** `foundr*`, `found?y` and `[f]oundry` name `foundry` once the shell expands them. A
- * bracket class is matched as one, because `rm -rf ~/.config/[f]oundry` is the oldest
- * way to write a path so that a plain text search misses it. */
-/** POSIX classes the guard knows, as regex pieces inside a character class. An
- * unknown or negated class is read as "any character", which refuses more. */
-const POSIX_CLASS: Record<string, string> = {
-  alpha: 'a-zA-Z',
-  alnum: 'a-zA-Z0-9',
-  ascii: '\\x00-\\x7f',
-  blank: ' \\t',
-  cntrl: '\\x00-\\x1f\\x7f',
-  digit: '0-9',
-  graph: '!-~',
-  lower: 'a-z',
-  print: ' -~',
-  punct: '\\W',
-  space: ' \\t\\n\\r\\v\\f',
-  upper: 'A-Z',
-  xdigit: '0-9a-fA-F',
+ * bracket expression is read with bash's grammar, because `rm -rf ~/.config/[f]oundry`
+ * is the oldest way to write a path so that a plain text search misses it. */
+type CodeRange = [number, number]
+
+/** POSIX classes as code point ranges (bash's ASCII ranges, `globasciiranges`). */
+const POSIX_CLASS: Record<string, CodeRange[]> = {
+  alpha: [[65, 90], [97, 122]],
+  alnum: [[48, 57], [65, 90], [97, 122]],
+  ascii: [[0, 127]],
+  blank: [[9, 9], [32, 32]],
+  cntrl: [[0, 31], [127, 127]],
+  digit: [[48, 57]],
+  graph: [[33, 126]],
+  lower: [[97, 122]],
+  print: [[32, 126]],
+  punct: [[33, 47], [58, 64], [91, 96], [123, 126]],
+  space: [[9, 13], [32, 32]],
+  upper: [[65, 90]],
+  word: [[48, 57], [65, 90], [95, 95], [97, 122]],
+  xdigit: [[48, 57], [65, 70], [97, 102]],
 }
 
-/** A bracket expression as a regex character class: `[f]`, `[a-z]`, `[!x]` and
- * `[[:alpha:]]`. The terminator is the first `]` that is not inside a POSIX class, so
- * `[[:alpha:]]` ends after the class, not inside it. */
-function bracketExpression(pattern: string, from: number): { body: string; end: number } | undefined {
-  const POSIX_TOKEN = /^\[:([\^]?[a-z]+):\]/
-  let scan = from
-  while (scan < pattern.length) {
-    const token = POSIX_TOKEN.exec(pattern.slice(scan))
-    if (token !== null) {
-      scan += token[0].length
-      continue
-    }
-    if (pattern[scan] === ']') break
-    scan += 1
-  }
-  if (scan >= pattern.length) return undefined
-  let cursor = from
+/** One bracket expression from just after its `[`, as bash reads it: an optional `!` or
+ * `^`; a `]` first in the set is a member; `\x` is the character x; `a-b` is a range
+ * (empty when a > b); `[:name:]` is a class, `[=c=]` and `[.c.]` are the character c,
+ * and either can end a range. A name the guard does not know (`[:foo:]`,
+ * `[.hyphen.]`) is read as "any character" in a plain set and as nothing in a negated
+ * one, so it only ever matches more. Undefined when the `]` that closes it is missing:
+ * bash then reads the `[` as itself. */
+function bracketClass(pattern: string, start: number): { negate: boolean; ranges: CodeRange[]; any: boolean; end: number } | undefined {
+  let cursor = start
   let negate = false
-  let set = ''
-  while (cursor < scan) {
-    const token = POSIX_TOKEN.exec(pattern.slice(cursor))
-    if (token !== null) {
-      const name = token[1]!
-      set += name.startsWith('^') ? '\\S\\s' : (POSIX_CLASS[name] ?? '\\S\\s')
-      cursor += token[0].length
-      continue
-    }
-    if (pattern.slice(cursor, cursor + 2) === '!!') {
-      negate = true
-      cursor += 2
-      continue
-    }
-    const member = pattern[cursor]!
-    set += /[-a-zA-Z0-9_]/.test(member) ? member : `\\${member}`
+  if (pattern[cursor] === '!' || pattern[cursor] === '^') {
+    negate = true
     cursor += 1
   }
-  if (set === '') return undefined
-  return { body: negate ? `[^${set}]` : `[${set}]`, end: scan }
+  const ranges: CodeRange[] = []
+  let any = false
+  // One member at the cursor: a single code point, a class, or an unknown name.
+  const member = (): { point?: number; classRanges?: CodeRange[]; unknown?: boolean; next: number } | undefined => {
+    const character = pattern[cursor]
+    if (character === undefined) return undefined
+    if (character === '[') {
+      const kind = pattern[cursor + 1]
+      if (kind === ':' || kind === '=' || kind === '.') {
+        const close = pattern.indexOf(`${kind}]`, cursor + 2)
+        if (close >= 0) {
+          const name = pattern.slice(cursor + 2, close)
+          const next = close + 2
+          if (kind === ':') return POSIX_CLASS[name] === undefined ? { unknown: true, next } : { classRanges: POSIX_CLASS[name], next }
+          const points = [...name]
+          return points.length === 1 ? { point: points[0]!.codePointAt(0)!, next } : { unknown: true, next }
+        }
+      }
+    }
+    if (character === '\\' && cursor + 1 < pattern.length) return { point: pattern.codePointAt(cursor + 1)!, next: cursor + 2 }
+    const point = pattern.codePointAt(cursor)!
+    return { point, next: cursor + String.fromCodePoint(point).length }
+  }
+  let first = true
+  while (cursor < pattern.length) {
+    if (pattern[cursor] === ']' && !first) return { negate, ranges, any, end: cursor }
+    first = false
+    const low = member()
+    if (low === undefined) return undefined
+    cursor = low.next
+    if (low.point !== undefined && pattern[cursor] === '-' && pattern[cursor + 1] !== ']' && cursor + 1 < pattern.length) {
+      cursor += 1
+      const high = member()
+      if (high === undefined) return undefined
+      cursor = high.next
+      if (high.point !== undefined) {
+        if (low.point <= high.point) ranges.push([low.point, high.point])
+      } else if (high.unknown === true) any = true
+      else {
+        ranges.push([low.point, low.point], [45, 45], ...(high.classRanges ?? []))
+      }
+      continue
+    }
+    if (low.point !== undefined) ranges.push([low.point, low.point])
+    else if (low.classRanges !== undefined) ranges.push(...low.classRanges)
+    else any = true
+  }
+  return undefined
 }
+
+const codeUnit = (point: number) => `\\u${Math.min(point, 0xffff).toString(16).padStart(4, '0')}`
+
+/** A bracket expression as a regex character class. */
+function bracketRegex(set: { negate: boolean; ranges: CodeRange[]; any: boolean }): string {
+  const body = set.ranges.map(([low, high]) => (low === high ? codeUnit(low) : `${codeUnit(low)}-${codeUnit(high)}`)).join('')
+  // An unknown name adds nothing to a negated set, and everything to a plain one.
+  if (set.negate) return body === '' ? '[\\s\\S]' : `[^${body}]`
+  if (set.any) return '[\\s\\S]'
+  return body === '' ? '[^\\s\\S]' : `[${body}]`
+}
+
+/** Compiled patterns, so a brace word with hundreds of names compiles each once. */
+const GLOB_CACHE = new Map<string, [RegExp, RegExp]>()
 
 function globMatches(pattern: string, name: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern.toLowerCase() === name.toLowerCase()
-  let body = ''
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index]!
-    if (character === '*') body += '.*'
-    else if (character === '?') body += '.'
-    else if (character === '[') {
-      let from = index + 1
-      let negate = false
-      if (pattern[from] === '!' || pattern[from] === '^') {
-        negate = true
-        from += 1
-      }
-      if (pattern[from] === ']') from += 1
-      const bracket = bracketExpression(pattern, from)
-      if (bracket === undefined) body += '\\['
-      else {
-        body += negate ? `[^${bracket.body.slice(1, -1)}]` : bracket.body
-        index = bracket.end
-      }
-    } else body += /[.+^${}()|[\]\\]/.test(character) ? `\\${character}` : character
-  }
+  const [exact, folded] = GLOB_CACHE.get(pattern) ?? globRegexes(pattern)
   // bash matches a glob against the real name case by case, so `[!F]oundry` names
   // `foundry`; a case-insensitive disk (macOS) can also resolve a differently-cased
   // name. Either match counts, which never refuses less than bash would.
-  return new RegExp(`^${body}$`).test(name) || new RegExp(`^${body}$`, 'i').test(name)
+  return exact.test(name) || folded.test(name)
+}
+
+function globRegexes(pattern: string): [RegExp, RegExp] {
+  let body = ''
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index]!
+    if (character === '*') body += '[\\s\\S]*'
+    else if (character === '?') body += '[\\s\\S]'
+    else if (character === '\\' && index + 1 < pattern.length) {
+      index += 1
+      body += codeUnit(pattern.codePointAt(index)!)
+    } else if (character === '[') {
+      const set = bracketClass(pattern, index + 1)
+      if (set === undefined) body += '\\['
+      else {
+        body += `(?:${bracketRegex(set)})`
+        index = set.end
+      }
+    } else body += codeUnit(pattern.codePointAt(index)!)
+  }
+  const compiled: [RegExp, RegExp] = [new RegExp(`^${body}$`), new RegExp(`^${body}$`, 'i')]
+  if (GLOB_CACHE.size > 8192) GLOB_CACHE.clear()
+  GLOB_CACHE.set(pattern, compiled)
+  return compiled
 }
 
 /** bash brace expansion: `mv ~/.config/foundry{,.bak}` and
@@ -1782,11 +1826,15 @@ function expandBraces(word: string, budget: { left: number }): string[] | undefi
       break
     }
   }
-  if (close < 0) return [word]
-  const body = word.slice(open + 1, close)
-  const parts = body.includes(',') ? splitTopLevel(body, ',') : rangeParts(body)
+  const parts = close < 0 ? undefined : braceParts(word.slice(open + 1, close))
   if (parts === 'overflow') return undefined
-  if (parts === undefined || parts.length === 0) return [word]
+  // A group bash does not expand (`{x}`, `{}`, an unclosed `{`) stays as written, and
+  // expansion goes on after its `{`: `a{x}b{1,2}` is `a{x}b1 a{x}b2` and
+  // `{foundr{x,y}}` is `{foundrx} {foundry}`.
+  if (parts === undefined) {
+    const rest = expandBraces(word.slice(open + 1), budget)
+    return rest === undefined ? undefined : rest.map(tail => `${word.slice(0, open + 1)}${tail}`)
+  }
   if (parts.length > budget.left) return undefined
   const out: string[] = []
   for (const part of parts) {
@@ -1797,6 +1845,14 @@ function expandBraces(word: string, budget: { left: number }): string[] | undefi
     out.push(...nested)
   }
   return out
+}
+
+/** The pieces of one brace group as bash splits it: two or more comma-separated parts
+ * at its top level, or a sequence. Undefined when bash leaves the group as written. */
+function braceParts(body: string): string[] | 'overflow' | undefined {
+  const parts = splitTopLevel(body, ',')
+  if (parts.length >= 2) return parts
+  return rangeParts(body)
 }
 
 /** The word as a shape, when listing its names would cost more than the answer is worth:
@@ -1833,7 +1889,7 @@ function braceShape(word: string): string {
 /** `?` per character of the shortest name in a group, and a `*` when they differ. */
 function groupShape(body: string): string | undefined {
   if (body.includes('{') || body.includes('/')) return undefined
-  if (!body.includes(',')) {
+  if (splitTopLevel(body, ',').length < 2) {
     const range = rangeSpec(body)
     if (range === undefined) return undefined
     if (range.count <= BigInt(BRACE_BUDGET)) {
@@ -2001,12 +2057,27 @@ function bareNamesStore(token: string, dir: string): boolean {
   return globMatches(token, storeBase) || MARK_FILE_NAMES.some(name => globMatches(token, name))
 }
 
+const REACHING = new WeakMap<Set<string>, string[]>()
+
+/** The directories a command works in that can lead to the store. */
+function reachingDirs(mentioned: Set<string>, cwd: string, dir: string): string[] {
+  const known = REACHING.get(mentioned)
+  if (known !== undefined) return known
+  const found = [...mentioned, cwd].filter(where => pathReachesStore(where, dir))
+  REACHING.set(mentioned, found)
+  return found
+}
+
 /** Where a token was written from: an absolute or `$`-prefixed path stands on its own;
  * a relative one resolves at each directory the command says it is working in, which is
  * how `cd ~ && rm -rf .config` names `~/.config`. */
-function storePaths(token: string, cwd: string, home: string, mentioned: Set<string>): string[] {
+function storePaths(token: string, cwd: string, home: string, mentioned: Set<string>, dir: string): string[] {
   if (/^(?:\/|~|\$)/.test(token)) return [resolvedPath(token, cwd, home)]
-  return [...mentioned, cwd].map(where => resolvedPath(`${where.replace(/\/+$/, '')}/${token}`, cwd, home))
+  // Without a `..`, `<where>/<token>` keeps every segment of `<where>`, so it can reach
+  // the store only from a directory that does. Filtering the directories first keeps a
+  // word of thousands of names from being tried against thousands of directories.
+  const climbs = token.split('/').includes('..')
+  return (climbs ? [...mentioned, cwd] : reachingDirs(mentioned, cwd, dir)).map(where => resolvedPath(`${where.replace(/\/+$/, '')}/${token}`, cwd, home))
 }
 
 /** Whether one word reaches the mark store, anything under it, or a directory holding
@@ -2023,7 +2094,7 @@ function namesStore(token: string, cwd: string, home: string, dir: string, menti
   // to the shell as `tar -C <store>`, and a path can sit inside the argument of a
   // function call (`glob("~/...")`) rather than be the whole word.
   const spellings = [path, path.replace(/^--?[A-Za-z0-9_.+-]+=/, ''), ...pathPieces(path)].filter(spelling => spelling !== '')
-  return spellings.some(spelling => storePaths(spelling, cwd, home, mentioned).some(where => pathReachesStore(where, dir)))
+  return spellings.some(spelling => storePaths(spelling, cwd, home, mentioned, dir).some(where => pathReachesStore(where, dir)))
 }
 
 /** The path-shaped pieces inside a word: what a shell would pass to `open` when the

@@ -163,7 +163,8 @@ above it (`~/.config`, `~`), `mv`, `find ... -delete` whose name pattern can mat
 the mark or the directory, a glob on any part of the path
 (`rm ~/.config/*/profile-settings.json`) including a bracket class
 (`rm -rf ~/.config/[f]oundry`, the POSIX kind, `~/.config/[[:alpha:]]oundry`, and a
-negated set, `~/.config/[!F]oundry`, matched case by case as bash matches it) or a
+negated set, `~/.config/[!F]oundry`, matched case by case as bash matches it, read
+with bash's whole bracket grammar: `[=f=]`, `[.f.]`, a leading `]`, `!` as a member) or a
 brace expansion of any size (`mv ~/.config/foundry{,.bak}`,
 `rm -rf ~/.config/foundr{a..z}` — bash's 25th name is the store — and every sequence
 bash expands: descending, stepped and zero-padded, `foundr{z..a}`,
