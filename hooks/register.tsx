@@ -101,6 +101,11 @@ import {
   ORTHANC_CLI,
   ORTHANC_HELP,
   parseApprovalMode,
+  canonicalProfileName,
+  profileReadOnlyMark,
+  profileStoreWriteReason,
+  readOnlyStackGate,
+  clearsReadOnlyMark,
   resolveOrthancCommand,
   rulesWriteReason,
   touchesFoundryTool,
@@ -108,6 +113,8 @@ import {
   branchesIn,
   STORED_BRANCH_RUNS,
   storedBranchReads,
+  type StackMark,
+  wouldWriteOnStack,
 } from './policy'
 import {
   domainPatterns,
@@ -322,7 +329,20 @@ async function renderHelp($: EngineInterface, input: { group?: string; command?:
   const commands = loaded.commands
   const notes = manifestCache.takeNotes()
   const withNotes = (text: string) => (notes.length === 0 ? text : `${notes.join('\n')}\n\n${text}`)
-  if (!input.command) return withNotes(renderListing(commands, input))
+  if (!input.command) {
+    // Say it in the first lines: an agent that reads the command surface learns
+    // here that a write on such a stack will never run.
+    const marked = (await listProfiles($)).filter(profile => profile.readOnly)
+    const stacks =
+      marked.length === 0
+        ? []
+        : [
+            `Read-only stacks: ${marked.map(profile => profile.name).join(', ')} (orthanc configure list: read_only true).`,
+            'orthanc_cli refuses every write on them before it asks anyone; reads and plans (the same call with --apply left off) run. Only the operator clears the mark.',
+            '',
+          ]
+    return withNotes([...stacks, renderListing(commands, input)].join('\n'))
+  }
   const path = normalizeCommand(input.command)
   const command = commands.find(entry => entry.path === path)
   if (command === undefined) return withNotes(`Unknown Orthanc command '${path}'. Use orthanc_help with query to search commands.`)
@@ -377,16 +397,47 @@ async function approvalMode($: EngineInterface): Promise<ApprovalMode> {
   return parseApprovalMode(asString(await $.store.get('approvalMode'))) ?? DEFAULT_APPROVAL_MODE
 }
 
-type Profile = { name: string; host: string; isDefault: boolean; status: string }
+type Profile = { name: string; host: string; isDefault: boolean; status: string; readOnly: boolean }
 
-async function listProfiles($: EngineInterface): Promise<Profile[]> {
-  const envelope = await runOrthanc($, ['configure', 'list'], undefined, 30_000)
-  return listItems(envelope, 'profiles').map(entry => ({
+const profilesFrom = (envelope: Envelope): Profile[] =>
+  listItems(envelope, 'profiles').map(entry => ({
     name: asString(entry.name),
     host: asString(entry.host),
     isDefault: entry.is_default === true,
     status: asString(entry.status),
+    // v0.7.8 reports read_only per profile (orthanc configure profile set <name> --read-only).
+    readOnly: profileReadOnlyMark(entry) === true,
   }))
+
+async function listProfiles($: EngineInterface): Promise<Profile[]> {
+  return profilesFrom(await runOrthanc($, ['configure', 'list'], undefined, 30_000))
+}
+
+/**
+ * What `configure list` says about the stack a call would run on, read afresh:
+ * the operator marks a stack read-only in their own terminal, mid-session. A
+ * list that failed, or a mark that is not a true/false, is `readOnly: null`, and
+ * readOnlyStackGate turns that into a question rather than a blind write.
+ */
+async function stackMark($: EngineInterface): Promise<StackMark> {
+  const wanted = profileArg(await currentScope($))
+  const envelope = await runOrthanc($, ['configure', 'list'], undefined, 30_000)
+  if (isErrorEnvelope(envelope)) return { name: wanted ?? 'default', readOnly: null }
+  const rows = listItems(envelope, 'profiles')
+  // Match the way orthanc matches a mark: canonical name (RO3). The stack is the one
+  // /profile picked, or the default when nothing was picked, which is what orthanc
+  // picks too. A named stack with no row is not the default stack, so its mark is
+  // unknown and the gate asks instead of borrowing another stack's answer.
+  const named = wanted === undefined ? undefined : rows.find(found => canonicalProfileName(asString(found.name)) === canonicalProfileName(wanted))
+  if (wanted !== undefined && named === undefined) return { name: wanted, readOnly: null }
+  const entry = named ?? rows.find(found => found.is_default === true)
+  // No rows at all: nothing is configured, and an env-credential run has no profile
+  // for a mark to belong to (orthanc skips those, RO6/RO21), so there is no mark.
+  if (rows.length === 0) return { name: wanted ?? 'default', readOnly: false }
+  // Rows, but no default and nothing picked: the stack is not identifiable, so the
+  // mark is unknown and the gate asks rather than answering "writable".
+  if (entry === undefined) return { name: wanted ?? 'default', readOnly: null }
+  return { name: asString(entry.name), readOnly: profileReadOnlyMark(entry) }
 }
 
 async function activateProfile($: EngineInterface, profile: Profile): Promise<FoundryScope> {
@@ -531,6 +582,16 @@ async function sessionCwd($: EngineInterface): Promise<string> {
 async function homeDir($: EngineInterface): Promise<string> {
   try {
     return (await $.env.get('HOME'))?.trim() ?? ''
+  } catch {
+    return ''
+  }
+}
+
+// Orthanc resolves its config dir from XDG_CONFIG_HOME when the operator set it
+// (profiles.rs config_dir), so the mark-store guard has to resolve it the same way.
+async function xdgConfigHome($: EngineInterface): Promise<string> {
+  try {
+    return (await $.env.get('XDG_CONFIG_HOME'))?.trim() ?? ''
   } catch {
     return ''
   }
@@ -1013,7 +1074,13 @@ async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigi
   let proposal: string | null = null
   if (parsed.kind === 'start') {
     branchName = fdeBranchName(parsed.goal, new Date())
-    const envelope = await runOrthanc($, branchCreateArgs(branchName, scope.ontology.rid, parsed.goal), scope.profile, 120_000)
+    const create = branchCreateArgs(branchName, scope.ontology.rid, parsed.goal)
+    // The plugin's own write: a read-only stack is refused here, with the call,
+    // not by orthanc after it started.
+    const gate = readOnlyStackGate(await stackMark($), 'global-branch create', create.slice(2), await loadManifest($).catch(() => []))
+    if (gate !== null && (gate.outcome === 'block' || !(await askOperator($, gate.reason))))
+      return `${gate.reason} FDE mode stays off.`
+    const envelope = await runOrthanc($, create, scope.profile, 120_000)
     const rid = branchRidFrom(envelope)
     if (rid === null) return `global-branch create ${branchName} failed, so FDE mode stays off: ${errorsOf(envelope)}`
     branchRid = rid
@@ -1195,7 +1262,9 @@ async function pickerSource(
       items: profiles.map(profile => ({
         key: profile.name,
         label: profile.name,
-        hint: [profile.host, profile.status, profile.name === scope.profile ? 'active' : ''].filter(Boolean).join(' · '),
+        hint: [profile.host, profile.status, profile.readOnly ? 'read-only' : '', profile.name === scope.profile ? 'active' : '']
+          .filter(Boolean)
+          .join(' · '),
       })),
     }
   }
@@ -1255,7 +1324,11 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const profile = (await listProfiles($)).find(entry => entry.name === chosen[0]?.key)
     if (profile === undefined) return 'No stack selected.'
     const next = await activateProfile($, profile)
-    return `Foundry stack: ${next.profile}${next.ontology ? `, ontology ${next.ontology.name}` : ''}.`
+    return `Foundry stack: ${next.profile}${next.ontology ? `, ontology ${next.ontology.name}` : ''}.${
+      profile.readOnly
+        ? ' It is marked read-only (orthanc configure list: read_only true): orthanc_cli runs reads, plans (a mutation with --apply left off) and local commands; no write runs, in any approval mode.'
+        : ''
+    }`
   }
   if (picker.kind === 'ontology') {
     const pick = chosen[0]
@@ -1481,7 +1554,7 @@ async function setupChecks($: EngineInterface): Promise<{ checks: Check[]; scope
   checks.push({ label: 'profiles', ok: profiles.length > 0, detail: profiles.map(profile => `${profile.name} (${profile.status || '?'})`).join(', ') || 'none', fix: '/auth <name> to create one.' })
   const scope = await currentScope($)
   const active = profiles.find(profile => profile.name === scope.profile)
-  checks.push({ label: 'stack', ok: active !== undefined, detail: active ? `${active.name} · ${active.host}` : 'none active', fix: '/profile' })
+  checks.push({ label: 'stack', ok: active !== undefined, detail: active ? `${active.name} · ${active.host}${active.readOnly ? ' · read-only' : ''}` : 'none active', fix: '/profile' })
   if (active) {
     const probe = await runOrthanc($, ['ontology', 'list'], active.name, 60_000)
     checks.push({
@@ -1672,6 +1745,10 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   if (rootReason) return { deny: rootReason }
   const rulesReason = rulesWriteReason(tool, input, await sessionCwd($), await homeDir($))
   if (rulesReason) return { deny: rulesReason }
+  // orthanc keeps the read_only mark in profile-settings.json: an agent that
+  // rewrites it clears a mark past both this gate and orthanc's own.
+  const profileStoreReason = profileStoreWriteReason(tool, input, await sessionCwd($), await homeDir($), await xdgConfigHome($))
+  if (profileStoreReason) return { deny: profileStoreReason }
   if (tool === 'Bash' && typeof input.command === 'string') {
     if (gitPushNamesFoundry(input.command)) return { deny: FOUNDRY_GIT_PUSH_REASON }
     const directories = gitPushDirectories(input.command)
@@ -1729,6 +1806,29 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
       note.outcome = 'block'
       note.reason = 'timeout-over-cap'
       return { result: serialize(overCapFailure(command, wait)), context: ['orthanc_cli refused the call before it ran; read the error for a way that fits.'] }
+    }
+  }
+  // A stack the operator marked read-only (`orthanc configure profile set <name>
+  // --read-only`, v0.7.8) runs no write. The mark is read here, before the ladder
+  // and before orthanc starts, so the refusal names the call and asks no one; a
+  // mark that cannot be read asks instead, and the clear of the mark is the
+  // operator's. What runs is what orthanc's own gate runs: reads, plans (the same
+  // mutation with --apply left off) and local commands.
+  if (tool === ORTHANC_CLI && manifest.length > 0) {
+    const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
+    // The clear of the mark is a local command, so wouldWriteOnStack is false for
+    // it; the gate still has to see it, or a manifest without the shipped
+    // operator_approval mark would clear the operator's mark unasked.
+    if (resolved.path !== '' && (wouldWriteOnStack(resolved.path, resolved.args, manifest) || clearsReadOnlyMark(resolved.path, resolved.args))) {
+      const gate = readOnlyStackGate(await stackMark($), resolved.path, resolved.args, manifest)
+      if (gate !== null) {
+        note.foundry = true
+        note.command = resolved.path
+        note.outcome = gate.outcome
+        note.reason = gate.reason
+        if (gate.outcome === 'block') return { deny: gate.reason }
+        if (!(await askOperator($, gate.reason))) return { deny: `Operator declined or no one could be asked: ${gate.reason}` }
+      }
     }
   }
   let failed = false

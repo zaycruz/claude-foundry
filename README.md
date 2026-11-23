@@ -238,9 +238,84 @@ the same one or clearing it keeps them. An `orthanc_cli` write that passes
 `--profile` is refused in every mode: orthanc reads the last `--profile` it is
 given, so the write would leave the stack `/profile` picked. A read may name
 another stack. `configure use` and `configure set-default` are refused too,
-because they change the stack a later session starts on. `/namespace` steers
-discovery only; the gate does not deny writes outside it, in FDE mode or out
-(FDE mode keeps the namespace in scope and locks the picker until `/fde end`).
+because they change the stack a later session starts on. A stack the operator
+marked read-only (orthanc v0.7.8: `orthanc configure profile set <name>
+--read-only`, also `configure profile create --read-only`) runs no write in any
+approval mode: `orthanc_cli` reads the profile's `read_only` mark from
+`configure list` and refuses before the approval ladder and before orthanc
+starts, naming the exact call and the mark. What does run is what orthanc's own
+gate runs: reads, plans and local commands, so an agent can still preview a
+change on such a stack. A plan is the same call with `--apply` left off: it is a
+plain flag, and leaving it off is how orthanc asks for a plan. A mutation whose manifest entry has no `--apply` flag writes the
+moment orthanc starts it, so it is refused, and the refusal says so instead of
+telling the agent to plan. `configure profile set <name> --no-read-only`, which
+clears the mark, asks the operator in every mode, `yolo` included, whoever the
+mark is on: the question names the stack the call names. The plugin writes
+nothing into orthanc's config directory (`~/.config/foundry`, or
+`$XDG_CONFIG_HOME/foundry`), where `profile-settings.json` keeps the mark. File
+writes there are refused. A shell command that names the store, a file in it, or a
+directory above it (`~/.config`, `~`) runs only when it is a known reader: `cat`,
+`ls`, `stat`, `wc`, `head`, `tail`, `grep`, `jq`, `diff`, a checksum, `echo`,
+`printf`, `test`, a text filter such as `cut`, `tr` or `sort`, a `find` that uses
+only tests and print actions, or a `git` subcommand that writes only the
+repository (`log`, `diff`, `status`, `add`, `commit`, and the like). The reader
+must be called by its bare name or from a standard `bin` directory (not
+`/tmp/cat`), with no variable set for it (`GIT_EXTERNAL_DIFF=…`, `LESSOPEN=…`,
+`PATH=…`), and with no flag that writes a file or runs a program, in any
+abbreviation GNU accepts (`sort -o`, `sort --out=`, `less -o`, `less +cmd`,
+`find -fprint`, `git diff --ou=`, `git -c`). Everything else is refused. That
+includes a command the list does not know (`curl -o`, `wget -O`, `ex`, `vim -es`,
+`gio trash`, `sqlite3`), a wrapper (`sudo`, `env`, `nice`, `time`, `xargs`), and a
+redirect into the store, with or without a command word (`> profile-settings.json`
+after a `cd`). When the store, or a path in it, appears anywhere on the line,
+including in a heredoc or a here-string, every command on the line must be a
+reader. A pipe, a loop, `read`, `mapfile` or a command substitution can carry the
+path from one command to another
+(`ls -d <store> | while read d; do rm -rf "$d"; done`). A directory above the store
+has the same rule when a pipe, a command substitution or a loop's words carry it
+(`echo ~/.config | xargs rm -rf`, `for d in ~; do rm -rf "$d/.config"; done`).
+Elsewhere on the line it does not, so `cd ~ && npm test` runs. A redirect to a
+path the guard cannot read (`: > "$f"`) counts as a write. The
+guard spells each word as bash would, in these ways. It expands globs on any part of the
+path, with bash's whole bracket grammar (`[!F]`, `[[:alpha:]]`, `[=f=]`, a leading
+`]`), matched case by case and also case-free for macOS. It reads extglob groups
+(`+(f)oundry`, `!(x)`) as any text. It expands every brace sequence bash expands,
+in any direction, step or padding (`foundr{a..z}`, `foundr{z..a..2}`, `{01..10}`).
+It joins quoted pieces (`fo""undry`, `foundr$'y'`, `foundr$"y"`), drops backslashes,
+joins a word across a backslash-newline (`foun\<newline>dry`) as bash does, and
+expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
+`$XDG_CONFIG_HOME`, `$PWD`, `$OLDPWD`, `$(pwd)` and the variables the line sets,
+also with bash's operators (`${HOME:-x}`, `${HOME%/}`). It follows indirect ones
+(`${!h}`, `${!h:-x}`, `${!h%/}` with `h=HOME`), a nameref (`declare -n r=HOME`,
+`local -n`, `typeset -n`), including a target assigned later, and variables set by
+`read` from a here-string or heredoc or built by `printf -v`, with its options
+read as bash reads them (`printf -v d -- …`). The default of an unknown variable
+(`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. Inside a longer
+word, these count as any text there, the empty text included: an unknown variable,
+a positional parameter, a command substitution, and an operator the guard does not
+compute exactly (a substring, a replacement, a case change, a pattern trim). So
+`foundr${NOPE}y`, `foundr$1y`, `foundr$(:)y`, `foundr$(tr a y <<< a)` and
+`foundr${HOME:0:0}y` all name the store. A
+substitution that runs `echo`, `printf` or `pwd` counts as what it prints. It resolves relative names after a `cd`, and reads the
+path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
+mark (`find ~ -name "profile-*.png" -delete`) still runs. The guard reads the
+command line, not a running shell, so it has these limits. It does not catch a path
+built at run time inside a script
+(`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`). It does not catch
+a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`)
+or a command substitution whose output only the run shows (`rm -rf $(cat list)`).
+It also does not catch a path that a file the line reads supplies
+(`xargs rm -rf < list`, `source script.sh`). The rule also refuses more than it must: a command that is not a reader
+and only mentions the store (`npm run x -- --note ~/.config/foundry`) is refused,
+and so is a `cp` of the store out. A brace
+list past 4096 names is read as a shape rather than enumerated, so a command that
+would remove thousands of directories is refused even when
+none of its names is the store. A stack `configure list` says nothing about is unknown, not
+writable: the write goes to the operator and never runs blind, while reads and
+plans are not held up. `/profile` and `orthanc_help` say which stacks are
+read-only. `/namespace` steers discovery only; the gate does not deny writes
+outside it, in FDE mode or out (FDE mode keeps the namespace in scope and locks
+the picker until `/fde end`).
 
 ## FDE mode
 
