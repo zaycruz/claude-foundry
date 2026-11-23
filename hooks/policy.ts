@@ -1137,7 +1137,31 @@ function shellClassification(
   return null
 }
 
-const PALANTIR_MCP = /^mcp__palantir(-mcp)?__/
+// A Foundry MCP server, in any spelling the operator typed into their config: the
+// name says palantir or foundry (`Palantir`, `palantir-mcp`, `foundry_tools`). The
+// tracer already reads this shape (`register.tsx` touchesFoundry: a write outside
+// Orthanc is traced); a gate narrower than the trace lets the same call run with no
+// ladder, no branch rule and no refusal — measured on e01f1dd, `mcp__Palantir__delete_object`
+// and `mcp__foundry_tools__delete_object` ran in all four modes.
+const FOUNDRY_MCP_NAME = /(?:^|[^a-z])(?:palantir|foundry)(?:[^a-z]|$)/i
+const MCP_PREFIX = 'mcp__'
+
+/** `mcp__<server>__<tool>` as its two parts; null when the name is not an MCP tool. */
+export function mcpToolParts(tool: string): { server: string; inner: string } | null {
+  if (!tool.startsWith(MCP_PREFIX)) return null
+  const rest = tool.slice(MCP_PREFIX.length)
+  const split = rest.indexOf('__')
+  if (split < 1 || split + 2 > rest.length) return null
+  return { server: rest.slice(0, split), inner: rest.slice(split + 2) }
+}
+
+/** True for an MCP tool that reaches Foundry: its server or its own name says so. */
+export function foundryMcpTool(tool: string): { inner: string } | null {
+  const parts = mcpToolParts(tool)
+  if (parts === null) return null
+  return FOUNDRY_MCP_NAME.test(parts.server) || FOUNDRY_MCP_NAME.test(parts.inner) ? { inner: parts.inner } : null
+}
+
 const WRITE_WORDS = new Set(['add', 'apply', 'build', 'create', 'delete', 'deploy', 'edit', 'install', 'post', 'publish', 'put', 'remove', 'rename', 'set', 'submit', 'update', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
@@ -1198,8 +1222,12 @@ export function classifyCall(
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
   if (tool === 'Bash' && typeof input.command === 'string') return shellClassification(input.command, manifest, workingBranch)
-  if (PALANTIR_MCP.test(tool)) {
-    const inner = tool.replace(PALANTIR_MCP, '')
+  // The plugin's own discovery tool reads only the manifest; it is named under the
+  // plugin's own server, which is a Foundry name.
+  if (tool === ORTHANC_HELP) return null
+  const foundryMcp = foundryMcpTool(tool)
+  if (foundryMcp !== null) {
+    const inner = foundryMcp.inner
     if (classifyMcpIntent(inner) === 'read') return null
     return {
       command: null,
