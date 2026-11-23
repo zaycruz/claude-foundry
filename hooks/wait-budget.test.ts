@@ -89,9 +89,11 @@
 //  B9 A wait past even orthanc_cli's cap is refused in Bash too, and says the
 //      flag that is too big there; a wait that fits orthanc_cli is also given
 //      the --timeout that would fit Bash.
-//  B11 Waits that run instead of each other (`||`, `if … else`) or alongside
-//      each other (a pipeline) are not added up, and a job left running by `&`
-//      has no foreground wait at all (B12).
+//  B11 Only what genuinely cannot both happen is priced as the larger of two:
+//      the legs of a pipeline run together, and a `case` chooses between its arms.
+//      `a || b` and `if wait A; then …; else wait B; fi` add up - a wait that
+//      times out exits 1, so the retry after `||` runs - and a job left running
+//      by `&` has no foreground wait at all (B12).
 //  B13 A wait the guard cannot price — arguments inside a substitution, a
 //      --timeout holding a variable — raises nothing and refuses nothing: it is
 //      the caller's own number, not one to invent a default for.
