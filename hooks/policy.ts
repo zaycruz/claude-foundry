@@ -2965,12 +2965,31 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     const words = segment.words
     const at = words.indexOf('printf')
     if (at < 0) continue
-    const flag = words[at + 1] ?? ''
-    const name = flag === '-v' ? words[at + 2] : flag.startsWith('-v') ? flag.slice(2) : undefined
+    let index = at + 1
+    let name: string | undefined
+    while (index < words.length && words[index]!.startsWith('-') && words[index] !== '-') {
+      const option = words[index]!
+      index += 1
+      if (option === '--') break
+      if (option === '-v') name = words[index++]
+      else if (option.startsWith('-v')) name = option.slice(2)
+    }
     if (name === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue
-    const rest = words.slice(at + (flag === '-v' ? 3 : 2))
+    const rest = words.slice(index)
     const args = rest.slice(1).map(arg => arg.replace(/^~(?=\/|$)/, homeText))
     assigned.set(name, (rest[0] ?? '').replace(/%%|%[-+ #0-9.]*[a-zA-Z]/g, conversion => (conversion === '%%' ? '%' : (args.shift() ?? ''))))
+  }
+  // A nameref (`declare -n r=HOME`, `local -n`, `typeset -n`) reads the variable it
+  // names.
+  const namerefs = new Set<string>()
+  for (const segment of segments) {
+    const [first, ...rest] = segment.words
+    if (first === undefined || !['declare', 'local', 'typeset'].includes(first)) continue
+    if (!rest.some(word => /^-[A-Za-z]*n/.test(word))) continue
+    for (const word of rest) {
+      const assign = ASSIGNMENT_WORD.exec(word)
+      if (assign?.[1] !== undefined) namerefs.add(assign[1])
+    }
   }
   // Where `~+` and `~-` can point: the session's directory, home, and every directory
   // the line moves into.
@@ -2983,8 +3002,10 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     })
   // What a name can hold. `PWD` and `OLDPWD` (and `$(pwd)`) can be any directory
   // the line visits, or home.
-  const values = (name: string): string[] | undefined =>
-    name === 'HOME'
+  const values = (name: string, depth = 0): string[] | undefined =>
+    namerefs.has(name) && depth < 8 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(assigned.get(name) ?? '')
+      ? values(assigned.get(name)!, depth + 1)
+      : name === 'HOME'
       ? [homeText]
       : name === 'XDG_CONFIG_HOME'
         ? [config]
@@ -3042,11 +3063,13 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     const any = word.length > whole.length ? '*' : ''
     const tails = parameters(word.slice(end + 1))
     const inner = word.slice(start + 2, end)
-    const indirect = /^!([A-Za-z_][A-Za-z0-9_]*)$/.exec(inner)
+    // `${!NAME…}` reads the variable NAME holds, with any operator after it
+    // (`${!h:-x}`, `${!h%/}`). One the guard cannot follow is unknown.
+    const indirect = /^!([A-Za-z_][A-Za-z0-9_]*)([\s\S]*)$/.exec(inner)
     const pointed = indirect === null ? undefined : assigned.get(indirect[1]!)
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])?([\s\S]*)$/.exec(
-      pointed !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(pointed) ? pointed : inner,
-    )
+    const target =
+      indirect === null ? inner : pointed !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(pointed) ? `${pointed}${indirect[2]}` : undefined
+    const match = target === undefined ? null : /^([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])?([\s\S]*)$/.exec(target)
     const known = match === null ? undefined : values(match[1]!)
     const op = match?.[2] ?? ''
     const operand = match?.[3] ?? ''
@@ -3062,7 +3085,13 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
         if (op === ':+' || op === '+') choices.push({ text: operand, open: true })
         else if (op.startsWith('%') || op.startsWith('#')) choices.push({ text: trimmed(value, op, operand), open: false }, { text: value, open: false })
         else choices.push({ text: value, open: false })
+        // `${p@P}` expands prompt escapes (`\w` is the working directory).
+        if (op === '@' && operand === 'P') for (const where of [homeText, ...visited]) choices.push({ text: where, open: false })
       }
+      // An operator the guard does not compute exactly (a substring `${HOME:0:0}`, a
+      // replacement, a case change, a trim by a pattern, a transform) can leave any
+      // text inside a longer word, the empty text included.
+      if (!['', ':-', '-', ':=', '=', ':?', '?', ':+', '+'].includes(op)) choices.push({ text: any, open: false })
     }
     const results = new Set<string>()
     for (const choice of choices)

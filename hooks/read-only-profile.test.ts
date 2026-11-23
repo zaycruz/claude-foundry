@@ -863,6 +863,15 @@ test('Q20: a command that is not known to only read cannot meet the store', asyn
     'rm -rf ~/.con\\\nfig/foundry',
     'rm -rf ~/.config/foundr$(tr a y <<< a)',
     'rm -rf ~/.config/$(basename /x/foundry)',
+    'h=HOME; rm -rf ${!h:-x}/.config/foundry',
+    'h=HOME; rm -rf ${!h%/}/.config/foundry',
+    'declare -n r=HOME; rm -rf $r/.config/foundry',
+    'typeset -n r=HOME; rm -rf "${r}/.config/foundry"',
+    'printf -v d -- "%s/.config" ~; rm -rf "$d"',
+    'rm -rf ~/.config/foundr${PWD:0:0}y',
+    'rm -rf ~/.config/foundr${HOME:0:0}y',
+    'rm -rf ~/.config/foundr${HOME#$HOME}y',
+    'p=Y; rm -rf ~/.config/foundr${p,}',
   ]) {
     const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
     if (deny === '') denied.push(command)

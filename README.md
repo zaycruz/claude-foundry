@@ -261,12 +261,16 @@ It joins quoted pieces (`fo""undry`, `foundr$'y'`, `foundr$"y"`), drops backslas
 joins a word across a backslash-newline (`foun\<newline>dry`) as bash does, and
 expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
 `$XDG_CONFIG_HOME`, `$PWD`, `$OLDPWD`, `$(pwd)` and the variables the line sets,
-also with bash's operators (`${HOME:-x}`, `${HOME%/}`), indirect ones (`${!h}` with
-`h=HOME`), and a variable that `printf -v` builds. The default of an unknown variable
-(`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. An unknown
-variable, a positional parameter or a command substitution inside a longer word
-counts as any text there, the empty text included, so `foundr${NOPE}y`,
-`foundr$1y`, `foundr$(:)y` and `foundr$(tr a y <<< a)` all name the store. A
+also with bash's operators (`${HOME:-x}`, `${HOME%/}`). It follows indirect ones
+(`${!h}`, `${!h:-x}`, `${!h%/}` with `h=HOME`), a nameref (`declare -n r=HOME`,
+`local -n`, `typeset -n`), and a variable that `printf -v` builds, with its options
+read as bash reads them (`printf -v d -- …`). The default of an unknown variable
+(`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. Inside a longer
+word, these count as any text there, the empty text included: an unknown variable,
+a positional parameter, a command substitution, and an operator the guard does not
+compute exactly (a substring, a replacement, a case change, a pattern trim). So
+`foundr${NOPE}y`, `foundr$1y`, `foundr$(:)y`, `foundr$(tr a y <<< a)` and
+`foundr${HOME:0:0}y` all name the store. A
 substitution that runs `echo`, `printf` or `pwd` counts as what it prints. It resolves relative names after a `cd`, and reads the
 path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
 mark (`find ~ -name "profile-*.png" -delete`) still runs. The guard reads the
