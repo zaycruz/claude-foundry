@@ -657,9 +657,12 @@ test('the term table reads the 0.7.11 surface by what each write leaves gone', a
   for (const [path, destructive] of SURFACE) {
     expect({ path, term: destructiveTermIn(path) !== null }).toEqual({ path, term: destructive })
   }
-  // The table above lists every destructive-named command of the pinned
-  // surface, so a re-pin that adds one fails here rather than quietly leaving
-  // the table shorter than the surface it claims to cover.
+  // What this assertion can and cannot catch. It fails when the list above and
+  // the count below drift apart. It cannot notice the snapshot changing: the
+  // list is written here, and no hooks test may open a file in the plugin, so a
+  // re-pin that ships a new destructive name fails nothing until someone lists
+  // it. The recount command beside SURFACE_TRUE is the check, and FND-11's
+  // release step is where it belongs.
   expect(SURFACE.filter(([, destructive]) => destructive).length).toBe(SURFACE_TRUE)
 })
 
