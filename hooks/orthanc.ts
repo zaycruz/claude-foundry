@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag } from './policy'
+import { DENIED_COMMANDS, type ManifestCommand, type ManifestFlag, operatorOnlyReason } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -254,6 +254,10 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
   if (isCredentialCommand(command)) {
     lines.push('This credential-input command is not executable through orthanc_cli; the operator runs it in a terminal.')
   }
+  // Named on the page the agent is reading, so it does not spend a call finding
+  // out that the refusal was coming.
+  const operatorOnly = operatorOnlyReason(command.path)
+  if (operatorOnly !== null) lines.push(`Refused through orthanc_cli and Bash: ${operatorOnly}`)
   return lines.join('\n')
 }
 
