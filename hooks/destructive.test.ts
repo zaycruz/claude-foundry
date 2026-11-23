@@ -1,0 +1,851 @@
+// The destructive rule reads what a write leaves gone, not one word.
+//
+// hooks/policy.ts read a single word: a mutation was destructive when the last
+// word of its command path was `delete`. Measured on the released orthanc
+// 0.7.11 agent-manifest the pin ties to (541 commands, 260 of them mutation or
+// local), 26 of those writes name an erasure in another word. 15 asked nobody
+// outside yolo — `marketplace installation uninstall` ("the plan previews what
+// is deleted"), `streams stream reset` ("Clear all records from the stream on a
+// branch"), `dataset transactions abort` ("discard its changes"), `devops draft
+// abort` ("Drop a draft"), `alias clear` ("Delete all saved aliases"), `alias
+// remove`, the two `project …remove…`, `repository imports remove`,
+// `dev-console scope remove`, `media-sets input-schema remove`,
+// `connectivity code-import remove-importer`, `data-health check replace`,
+// `orchestration schedules replace`, `admin org replace`: in `auto` one fell to
+// the guard model, in `allow-edits` it ran at once. The other 11 asked only
+// with the `--apply` their `operator_approval` condition names, so the same
+// call without it ran.
+//
+// Also measured, so the list below stays on real commands and not on the names
+// a report guessed: `orchestration job discard` and `ontology resource purge`
+// are in no orthanc manifest, and `repository checks rerun` has no
+// `--discard-passes`.
+//
+// Ways this can fail, written before the code:
+//  D1  A destructive name the guard does not know gets no ask outside yolo — the
+//      bug. Each named verb of the surface, and a verb no command uses yet
+//      (`purge`), so a rename is covered before the next pin.
+//  D2  The widening asks in yolo too, breaking zay's rule of 2026-11-17: "no
+//      approvals are necessary for anything on the branch, only main".
+//  D3  The widening sweeps in ordinary writes, so `set`, `update`, `add`,
+//      `close`, `cancel`, `pause`, `restore`, `rename`, `reopen` and `rerun`
+//      start asking in allow-edits and the operator stops reading the prompt.
+//  D4  The widening sweeps in a read: an entry the manifest calls `read-only`
+//      whose name holds a destructive word asks.
+//  D5  A flag that holds a destructive word but erases nothing asks:
+//      `orchestration builds create --abort-on-failure` is a routine build, and
+//      `--no-remove-check` denies the removal rather than claiming it.
+//      `--keep-data` carries no word of the table and asks for none.
+//  D6  A flag that does erase is missed: `--remove`, `--remove-check`,
+//      `--remove-resource`, `--delete-project`, `--delete-object-type`, in any
+//      case, as `=value`, at any position. So is an enum value that names the
+//      act the way Orthanc writes an enum: `--transaction-type DELETE`.
+//  D7  The rule only reads a path the manifest lists: the same words as a path
+//      it does not list, the verb first rather than last, or the path split
+//      across `command` and `args`, run unasked.
+//  D8  The rule reads a word it should not: a branch name, a positional or a
+//      flag value that happens to spell a destructive word asks.
+//  D9  A block loosens: a destructive name on a call the branch rule blocks
+//      runs, or the destructive reason replaces the block.
+//  D10 The widening drops what the rule already read: `--force`, and a path
+//      whose destructive word is not the whole last word
+//      (`resource permanently-delete`). The Palantir MCP lane reads the same
+//      words as the orthanc lane.
+//  D11 The words the operator is told fall behind the words the guard reads, so
+//      a prompt that says "deletes ask" fires for a revoke and reads as a bug.
+//      Pinned for all four cues as well: the model is told the rule to predict
+//      what stops, and a cue left out of it predicts a run where the operator
+//      sees a dialog.
+//  D12 The ask, and the line the debug log keeps, do not say which of the four
+//      the guard read: a word in the command name, a flag that names what the
+//      write removes, an enum value that names it, or `--force`. After the
+//      widening those are four different claims about the write, and
+//      `data-health check-group update --remove-check …` would read the same as
+//      `project remove-orgs`. Also pinned: when two hold at once, the name wins,
+//      because it is the claim about the command rather than about an argument.
+//
+// Through the real hook, on a synthetic stack:
+//  E1  In allow-edits and auto an uninstall asks the operator, names the
+//      command in the question, does not run when declined or when no one can
+//      be asked, and runs when approved.
+//  E2  In those modes the widening costs no question where nothing is erased:
+//      a build with `--abort-on-failure` and a check-group update that adds or
+//      negates a check.
+//  E3  In yolo an uninstall, a stream reset and a delete run with no dialog.
+//
+// Synthetic stack and RIDs only.
+import type { On } from 'claude-code'
+import { expect, test } from 'claude-code/testing'
+
+import { manifestFrom } from './orthanc'
+import {
+  classifyCall,
+  classifyMcpIntent,
+  destructiveTermIn,
+  DESTRUCTIVE_WORDS,
+  ladderDecision,
+  type ManifestCommand,
+  modeGuidance,
+} from './policy'
+
+const CLI = 'mcp__foundry__orthanc_cli'
+const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
+const approve = { action: 'approve', reason: 'ok' } as const
+const GLOBAL = 'ri.branch..branch.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+
+// kind as orthanc 0.7.11 declares each, read from the released agent-manifest.
+const MANIFEST: ManifestCommand[] = [
+  { path: 'admin group member remove', kind: 'mutation' },
+  { path: 'admin marking replace', kind: 'mutation' },
+  { path: 'admin org replace', kind: 'mutation' },
+  { path: 'alias clear', kind: 'local' },
+  { path: 'alias list', kind: 'local' },
+  { path: 'alias remove', kind: 'local' },
+  { path: 'automate pause', kind: 'mutation' },
+  { path: 'branch-protection repo unprotect', kind: 'mutation' },
+  { path: 'connectivity code-import remove-importer', kind: 'mutation' },
+  { path: 'connectivity sync list', kind: 'read-only' },
+  { path: 'data-health check replace', kind: 'mutation' },
+  { path: 'data-health check-group update', kind: 'mutation' },
+  { path: 'dataset branches create', kind: 'mutation' },
+  { path: 'dataset create', kind: 'mutation', flags: [{ flag: '--parent-folder', takesValue: true }, { flag: '--apply', takesValue: false }] },
+  { path: 'dataset files delete', kind: 'mutation' },
+  { path: 'dataset schema set', kind: 'mutation' },
+  // The options and the accepted values Orthanc 0.7.11 declares for this command,
+  // measured from the release manifest (measured 2026-11-22): the value lane reads
+  // against them, so this fixture is the difference between a declared enum and a
+  // word the guard can only guess at.
+  {
+    path: 'dataset transactions start',
+    kind: 'mutation',
+    flags: [
+      { flag: '--branch', takesValue: true },
+      { flag: '--transaction-type', takesValue: true, values: ['APPEND', 'UPDATE', 'SNAPSHOT', 'DELETE'] },
+      { flag: '--apply', takesValue: false },
+    ],
+  },
+  { path: 'dataset transactions abort', kind: 'mutation' },
+  { path: 'dev-console scope remove', kind: 'mutation' },
+  { path: 'devops draft abort', kind: 'mutation' },
+  { path: 'devops draft set', kind: 'mutation' },
+  { path: 'devops product undeprecate', kind: 'mutation' },
+  { path: 'global-branch close', kind: 'mutation' },
+  { path: 'global-branch remove-repo', kind: 'mutation' },
+  { path: 'global-branch remove-resources', kind: 'mutation' },
+  { path: 'global-branch rename', kind: 'mutation' },
+  { path: 'global-branch reopen', kind: 'mutation' },
+  { path: 'global-branch roles set', kind: 'mutation' },
+  { path: 'global-proposal close', kind: 'mutation' },
+  { path: 'marketplace installation create', kind: 'mutation' },
+  { path: 'marketplace installation uninstall', kind: 'mutation' },
+  { path: 'marketplace installation upgrade', kind: 'mutation' },
+  { path: 'marketplace job cancel', kind: 'mutation' },
+  { path: 'media-sets input-schema remove', kind: 'mutation' },
+  { path: 'ontology object-type-delete', kind: 'mutation' },
+  { path: 'orchestration builds cancel', kind: 'mutation' },
+  { path: 'orchestration builds create', kind: 'mutation' },
+  { path: 'orchestration schedules replace', kind: 'mutation' },
+  { path: 'orchestration schedules unpause', kind: 'mutation' },
+  { path: 'project imports remove', kind: 'mutation' },
+  { path: 'project remove-orgs', kind: 'mutation' },
+  { path: 'proposal close', kind: 'mutation' },
+  { path: 'proposal request-review', kind: 'mutation' },
+  { path: 'repository checks cancel', kind: 'mutation' },
+  { path: 'repository checks required remove', kind: 'mutation' },
+  { path: 'repository checks rerun', kind: 'mutation' },
+  { path: 'repository imports remove', kind: 'mutation' },
+  { path: 'resource delete', kind: 'mutation' },
+  // A name no orthanc has: 0.7.11 has no read-only command whose name carries a
+  // table word (measured: 0 of 281), so the case below that a read named like a
+  // removal still asks nothing can only be pinned on an invented name. It is
+  // forward cover for the day one ships, not a claim about this surface.
+  { path: 'resource delete-impact', kind: 'read-only' },
+  { path: 'resource permanently-delete', kind: 'mutation' },
+  // Orthanc marks this command `operator_approval` with `--apply` (and scopes the
+  // mark to any branch): the destructive rule and the governance-control ask both
+  // apply to it. The fixture leaves the scope out; it only widens when the mark
+  // applies.
+  { path: 'resource remove-markings', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] } },
+  { path: 'resource restore', kind: 'mutation' },
+  { path: 'resource-role revoke', kind: 'mutation' },
+  { path: 'solution-design edge remove', kind: 'mutation' },
+  { path: 'solution-design node remove', kind: 'mutation' },
+  { path: 'sql cancel', kind: 'mutation' },
+  { path: 'streams stream reset', kind: 'mutation' },
+  { path: 'warehouse snapshot purge', kind: 'mutation' },
+  { path: 'workshop module revert', kind: 'mutation' },
+  { path: 'workshop module update', kind: 'mutation' },
+]
+
+const DATASET = 'ri.foundry.main.dataset.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+const MODULE = 'ri.workshop.main.module.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+const REPO = 'ri.stemma.main.repository.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+const INSTALLATION = 'ri.marketplace.main.installation.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+const SCHEDULE = 'ri.scheduler.main.schedule.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+const WORK_BRANCH = 'agent-nightly'
+/** A schedule action on a work branch: `orchestration schedules replace` needs
+ * one, or the branch rule blocks it before the ladder. */
+const ACTION = JSON.stringify({ type: 'build', target: { type: 'manual', targetRids: [DATASET] }, branchName: WORK_BRANCH })
+
+/** [command, args] for every write the guard must mark destructive on 0.7.11,
+ * plus the words no 0.7.11 command uses yet. `dataset files delete` and
+ * `resource permanently-delete` are what the rule already read; the rest is the
+ * gap. Each asks outside yolo and runs in yolo. */
+const DESTRUCTIVE: [string, string[]][] = [
+  ['marketplace installation uninstall', [INSTALLATION, '--mode', 'delete']],
+  ['streams stream reset', [DATASET, '--branch', 'agent-x']],
+  ['dataset transactions abort', [DATASET, 'ri.foundry.main.transaction.1']],
+  ['devops draft abort', ['ri.devops.main.draft.1']],
+  ['alias clear', []],
+  ['alias remove', ['mk']],
+  ['admin org replace', ['acme', 'Acme Holdings']],
+  ['data-health check replace', ['ri.health.main.check.1', '--spec', 's.yaml']],
+  ['orchestration schedules replace', [SCHEDULE, ACTION, '--apply']],
+  ['project imports remove', ['ri.compass.main.project.1', '--import', 'ri.magritte..source.1']],
+  ['project remove-orgs', ['ri.compass.main.project.1', '--org', 'acme']],
+  ['repository imports remove', [REPO, '--branch', 'agent-x', '--source', 'ri.magritte..source.1']],
+  ['dev-console scope remove', ['ri.workshop.main.module.1', '--object-type', 'Vessel']],
+  ['media-sets input-schema remove', ['ri.mediaset.main.mediaset.1', '--format', 'video/x-msvideo']],
+  ['connectivity code-import remove-importer', [REPO, '--source', 'ri.magritte..source.1']],
+  ['resource remove-markings', ['ri.compass.main.folder.1', '--marking', 'restricted']],
+  ['resource-role revoke', ['ri.compass.main.folder.1', '--role', 'OWNER', '--principal', 'u:zay']],
+  ['branch-protection repo unprotect', [REPO, 'agent-x']],
+  ['workshop module revert', ['ri.workshop.main.module.1', '--version', '3']],
+  ['solution-design node remove', ['ri.diagram.main.diagram.1', '--node', 'n1']],
+  ['solution-design edge remove', ['ri.diagram.main.diagram.1', '--edge', 'e1']],
+  ['admin group member remove', ['ri.group.main.g1', '--user', 'zay']],
+  ['admin marking replace', ['marking-1', 'Restricted']],
+  ['global-branch remove-repo', [GLOBAL, REPO]],
+  ['global-branch remove-resources', [GLOBAL, DATASET]],
+  ['repository checks required remove', [REPO, '--branch', 'agent-x', '--check', 'ci/publish']],
+  // The word sits in the enum value, not the name: `--transaction-type DELETE`
+  // erases the rows a transaction wrote, and the pinned entry names neither a
+  // destructive word nor an operator_approval.
+  ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type', 'DELETE', '--apply']],
+  ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type=DELETE', '--apply']],
+  // The shell keeps the quotes on the value alone, so the value is unquoted on
+  // its own before it is read: this form is the one a quoting shell produces.
+  ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type=\'DELETE\'', '--apply']],
+  // A verb no 0.7.11 command uses: a rename into the table is read at once.
+  // These four are the names the parity cycle (FND-17) reported; measured
+  // against the released 0.7.11 manifest none of them is a command today, so
+  // they pin the table rather than the surface.
+  ['warehouse snapshot purge', [DATASET]],
+  ['orchestration job discard', ['ri.jemma.main.build.1']],
+  ['ontology resource purge', ['ri.compass.main.folder.1']],
+  ['connectivity sync repair', ['ri.magritte..source.1']],
+  // What the rule already read, so the widening cannot quietly drop it.
+  ['dataset files delete', [DATASET, '--branch', 'agent-x', '--path', 'a.csv']],
+  ['resource delete', ['ri.compass.main.folder.1']],
+  ['resource permanently-delete', ['ri.compass.main.folder.1']],
+  // `ontology object-type-delete` is left to foundry.test.ts:56, which pins
+  // the same ladder outcome; `resource permanently-delete` covers the word in
+  // the middle of a hyphenated name.
+]
+
+/** Writes the ladder must keep running in allow-edits: an ordinary change, or a
+ * stop or a recovery that erases nothing. The third item is the branches read
+ * from a stored schedule or import (`orchestration schedules unpause` starts one,
+ * so the guard reads its branch from the schedule). */
+const ORDINARY: [string, string[], readonly string[]?][] = [
+  ['dataset create', ['people']],
+  ['dataset schema set', [DATASET, '--branch', 'agent-x', '--schema', 's.json']],
+  ['workshop module update', ['ri.workshop.main.module.1', '--branch', 'agent-x']],
+  ['automate pause', ['ri.automate.main.automation.1', '--branch', 'agent-x']],
+  ['orchestration schedules unpause', [SCHEDULE], [WORK_BRANCH]],
+  ['proposal close', ['ri.pull-request.main.pull-request.1']],
+  ['global-proposal close', ['ri.proposal.main.proposal.1']],
+  ['global-branch close', [GLOBAL]],
+  ['global-branch reopen', [GLOBAL]],
+  ['global-branch rename', [GLOBAL, 'agent-old', 'agent-new']],
+  ['marketplace job cancel', ['ri.marketplace.main.job.1']],
+  ['orchestration builds cancel', ['ri.jemma.main.build.1']],
+  ['repository checks cancel', [REPO, '--branch', 'agent-x']],
+  ['sql cancel', ['ri.sql.main.query.1']],
+  ['repository checks rerun', [REPO, '--branch', 'agent-x', '--all']],
+  ['resource restore', ['ri.compass.main.folder.1']],
+  ['devops product undeprecate', ['ri.devops.main.product.1']],
+  ['marketplace installation create', ['ri.marketplace.main.version.1']],
+  ['marketplace installation upgrade', [INSTALLATION, '--mode', 'keep-outputs']],
+  ['devops draft set', ['ri.devops.main.draft.1', '--resource', 'ri.compass.main.folder.1']],
+  // A stop is no erasure: `compute manage --action stop` halts a running
+  // module, which `--action start` undoes. Orthanc wants --yes for it.
+  ['compute manage', ['--deployed-app-rid', 'ri.foundry.main.deployed-app.1', '--branch', 'agent-x', '--action', 'stop', '--yes']],
+]
+
+const outcomes = (command: string, args: string[], stored?: readonly string[]) =>
+  MODES.map(mode => ladderDecision(mode, classifyCall(CLI, { command, args }, MANIFEST, 'agent/x', stored)!, approve).outcome)
+const isDestructive = (command: string, args: string[], stored?: readonly string[]) =>
+  classifyCall(CLI, { command, args }, MANIFEST, 'agent/x', stored)?.isDestructive
+
+for (const [command, args] of DESTRUCTIVE) {
+  test(`D1 D2: '${command}' asks outside yolo and runs in yolo`, async () => {
+    expect(isDestructive(command, args)).toBe(true)
+    expect({ command, outcomes: outcomes(command, args) }).toEqual({ command, outcomes: ['ask', 'ask', 'ask', 'run'] })
+  })
+}
+
+for (const [command, args, stored] of ORDINARY) {
+  test(`D3: '${command}' is no ask in allow-edits`, async () => {
+    expect({ command, destructive: isDestructive(command, args, stored) }).toEqual({ command, destructive: false })
+    expect({ command, outcomes: outcomes(command, args, stored) }).toEqual({ command, outcomes: ['ask', 'run', 'run', 'run'] })
+  })
+}
+
+// `resource delete-impact` is the invented half (see the fixture);
+// `connectivity sync list` is a real read-only entry on 0.7.11.
+test('D4: a read-only entry named like a removal never reaches the ladder', async () => {
+  expect(classifyCall(CLI, { command: 'resource delete-impact', args: ['ri.compass.main.folder.1'] }, MANIFEST, 'agent/x')).toBe(null)
+  expect(classifyCall(CLI, { command: 'connectivity sync list', args: ['ri.magritte..source.1'] }, MANIFEST, 'agent/x')).toBe(null)
+})
+
+test('D5: a flag whose name holds a destructive word but erases nothing is no ask', async () => {
+  for (const args of [
+    ['--branch', 'agent-x', '--abort-on-failure'],
+    ['--abort-on-failure', '--branch', 'agent-x'],
+    ['--ABORT-ON-FAILURE', '--branch', 'agent-x'],
+    ['--abort-on-failure=true', '--branch', 'agent-x'],
+  ]) {
+    expect({ args, destructive: isDestructive('orchestration builds create', args) }).toEqual({ args, destructive: false })
+    expect({ args, outcomes: outcomes('orchestration builds create', args) }).toEqual({ args, outcomes: ['ask', 'run', 'run', 'run'] })
+  }
+  for (const args of [['--no-remove-check', 'ri.health.main.check.1'], ['--remove-check', 'ri.health.main.check.1', '--keep-data']]) {
+    const negated = classifyCall(CLI, { command: 'data-health check-group update', args: [args[0]!, ...args.slice(1)] }, MANIFEST, 'agent/x')
+    expect({ args, destructive: negated?.isDestructive }).toEqual({ args, destructive: args[0] !== '--no-remove-check' })
+  }
+})
+
+test('D6: a flag that erases asks, in any case, as =value, at any position', async () => {
+  for (const [command, args] of [
+    ['data-health check-group update', ['ri.health.main.group.1', '--remove-check', 'ri.health.main.check.1']],
+    ['devops draft set', ['ri.devops.main.draft.1', '--remove-resource', 'ri.compass.main.folder.1']],
+    ['global-branch roles set', [GLOBAL, '--principal', 'u:zay', '--remove']],
+    ['proposal request-review', ['ri.proposal.main.proposal.1', '--remove', 'u:zay']],
+    ['marketplace installation uninstall', [INSTALLATION, '--delete-project']],
+  ] as [string, string[]][]) {
+    expect({ command, args, destructive: isDestructive(command, args) }).toEqual({ command, args, destructive: true })
+    expect({ command, args, outcomes: outcomes(command, args) }).toEqual({ command, args, outcomes: ['ask', 'ask', 'ask', 'run'] })
+  }
+  // The same flags spelled with a value, in another case, with other words first.
+  for (const args of [
+    ['--remove-check=ri.health.main.check.1', 'ri.health.main.group.1'],
+    ['ri.health.main.group.1', '--REMOVE-CHECK=ri.health.main.check.1'],
+    ['ri.health.main.group.1', '--add-check', 'ri.health.main.check.2', '--remove-check', 'ri.health.main.check.1'],
+  ]) {
+    expect({ args, destructive: isDestructive('data-health check-group update', args) }).toEqual({ args, destructive: true })
+  }
+  // The fifth flag that carries a word, `--delete-object-type`, belongs to
+  // `global-branch deploy` and `proposal merge`, and the branch rule reaches
+  // both of those first. Pinned on a neutral command, because the flag rule
+  // reads the flag name and not the command that carries it.
+  expect(isDestructive('dataset schema set', [DATASET, '--branch', 'agent-x', '--delete-object-type', 'Vessel'])).toBe(true)
+  // A flag a later orthanc could add (`--discard-passes`, reported by FND-17 and
+  // not on 0.7.11) is read the day it appears, on a command whose own name is
+  // no claim.
+  expect(isDestructive('repository checks rerun', [REPO, '--branch', 'agent-x', '--discard-passes'])).toBe(true)
+})
+
+test('D7: the words are read when the manifest does not list them, and when they split across command and args', async () => {
+  const unknown: ManifestCommand[] = [{ path: 'marketplace installation list', kind: 'read-only' }]
+  expect(classifyCall(CLI, { command: 'catalog archive destroy', args: ['ri.compass.main.folder.1'] }, unknown, 'agent/x')?.isDestructive).toBe(true)
+  // A name that puts the verb first, as no 0.7.11 command does.
+  expect(classifyCall(CLI, { command: 'remove resource', args: ['ri.compass.main.folder.1'] }, unknown, 'agent/x')?.isDestructive).toBe(true)
+  expect(destructiveTermIn('remove resource') === null).toBe(false)
+  expect(classifyCall(CLI, { command: 'marketplace', args: ['installation', 'uninstall', INSTALLATION] }, MANIFEST, 'agent/x')?.isDestructive).toBe(true)
+  expect(classifyCall(CLI, { command: 'MARKETPLACE Installation Uninstall', args: [INSTALLATION] }, MANIFEST, 'agent/x')?.isDestructive).toBe(true)
+  expect(outcomes('marketplace', ['installation', 'uninstall', INSTALLATION])).toEqual(['ask', 'ask', 'ask', 'run'])
+})
+
+test('D8: a branch name, a positional or a flag value spelling a destructive word is no ask', async () => {
+  for (const [command, args] of [
+    ['dataset create', ['remove']],
+    ['dataset create', ['--branch', 'delete-me']],
+    ['dataset create', ['--branch', 'agent-x', '--description', 'a delete of the old rows']],
+    ['marketplace installation upgrade', [INSTALLATION, '--mode', 'keep-outputs']],
+    ['orchestration builds create', ['--branch', 'agent-x', '--job', 'revert']],
+    // A branch-creation path is never destructive, whatever its argument says:
+    // policy.ts answers it before the rule runs. D14 pins the caps-value cost of
+    // reading an enum, on a command the rule does reach.
+  ] as [string, string[]][]) {
+    expect({ command, args, destructive: isDestructive(command, args) }).toEqual({ command, args, destructive: false })
+  }
+})
+
+test('D9: the branch rule still blocks a destructive write; the ask does not loosen a block', async () => {
+  const blocked = MODES.map(mode =>
+    ladderDecision(mode, classifyCall(CLI, { command: 'repository imports remove', args: [REPO, '--allow-default-branch', '--source', 'ri.magritte..source.1'] }, MANIFEST, 'agent/x')!, approve).outcome,
+  )
+  expect(blocked).toEqual(['block', 'block', 'block', 'block'])
+  // A destructive name does not make an unreadable branch run, or ask instead
+  // of block: the schedule action must name the branch its builds write.
+  const branchless = MODES.map(mode =>
+    ladderDecision(mode, classifyCall(CLI, { command: 'orchestration schedules replace', args: [SCHEDULE, '{"type":"build"}', '--apply'] }, MANIFEST, 'agent/x')!, approve).outcome,
+  )
+  expect(branchless).toEqual(['block', 'block', 'block', 'block'])
+  // A write naming main asks in yolo too: the destructive rule does not make it run.
+  const onMain = classifyCall(CLI, { command: 'streams stream reset', args: [DATASET, '--branch', 'master'] }, MANIFEST, 'agent/x')
+  expect(MODES.map(mode => ladderDecision(mode, onMain!, approve).outcome)).toEqual(['ask', 'ask', 'ask', 'ask'])
+  // A branch creation is pre-authorized: `dataset branches create` erases nothing.
+  const created = classifyCall(CLI, { command: 'dataset branches create', args: [DATASET, '--name', 'agent-x'] }, MANIFEST, 'agent/x')
+  expect(created?.isDestructive).toBe(false)
+})
+
+test('D10: --force still asks, the ask reason names the command, and the MCP lane reads the same words', async () => {
+  const forced = classifyCall(CLI, { command: 'dataset create', args: ['people', '--force'] }, MANIFEST, 'agent/x')
+  expect(forced?.isDestructive).toBe(true)
+  for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
+    expect(ladderDecision(mode, forced!, approve).reason).toContain('destructive mutation')
+  }
+  expect(ladderDecision('yolo', forced!, approve).outcome).toBe('run')
+  expect(modeGuidance('yolo')).toContain('--force')
+  // A widened name carries the same reason, so the operator sees the same kind
+  // of ask for an uninstall as for a delete.
+  const uninstalled = classifyCall(CLI, { command: 'marketplace installation uninstall', args: [INSTALLATION] }, MANIFEST, 'agent/x')
+  expect(ladderDecision('allow-edits', uninstalled!, approve).reason).toContain("destructive mutation 'marketplace installation uninstall'")
+  // A Palantir MCP write is blocked either way; the words say whether it reads
+  // as destructive too, and a name mixing a read verb with a destructive word
+  // is not let through as a read. At the base only `delete` and `remove` named a
+  // write here, so a tool named for any other act of the table answered 'read' and
+  // came back with no classification at all.
+  const mcpDelete = classifyCall('mcp__palantir__delete_object', {}, MANIFEST, 'agent/x')
+  const mcpUninstall = classifyCall('mcp__palantir__marketplace-uninstall', {}, MANIFEST, 'agent/x')
+  expect([mcpDelete?.isDestructive, mcpUninstall?.isDestructive]).toEqual([true, true])
+  expect(classifyCall('mcp__palantir__get_object', {}, MANIFEST, 'agent/x')).toBe(null)
+  expect([classifyMcpIntent('get_object'), classifyMcpIntent('get_uninstall_plan'), classifyMcpIntent('search_reset_history')]).toEqual([
+    'read',
+    'write',
+    'write',
+  ])
+})
+
+test('D11: the words the operator is told match the words the guard reads', async () => {
+  // One plain form per word in the table, and every one of them in both
+  // guidance sentences: an operator told the rule asks for "a delete" would not
+  // know why an uninstall or a revoke asked.
+  expect(DESTRUCTIVE_WORDS.map(([term]) => destructiveTermIn(`orthanc group ${term}`))).toEqual(DESTRUCTIVE_WORDS.map(([term]) => term))
+  for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
+    const guidance = modeGuidance(mode)
+    for (const [, form] of DESTRUCTIVE_WORDS) expect({ mode, form, said: guidance.includes(form) }).toEqual({ mode, form, said: true })
+    // And all four cues, not three: the model reads this sentence to predict
+    // whether a call will stop, and a rule it is not told reads as a hang. The
+    // value cue went missing once the value lane was added, so it is pinned here.
+    for (const cue of ['name', 'flag', 'value', '--force']) expect({ mode, cue, said: guidance.includes(cue) }).toEqual({ mode, cue, said: true })
+  }
+})
+
+// Every one of the 51 command names in the pinned hooks/orthanc-snapshot.json
+// that carries a word from the table, each read against that command's own
+// description in the released agent-manifest, plus the names a reader could
+// mistake for one. The table is copied rather than read because the plugin
+// sandbox allows no file read from a test (`node:fs` is refused in a hooks
+// module, measured here). SURFACE_TRUE notices a table trimmed below the count
+// it claims; it cannot notice the snapshot itself changing, because nothing in a
+// test can open that file. The recount belongs to the re-pin step of the release
+// flow (board task FND-11), not to this suite. The command:
+//
+//   jq -r '.commands[].path' hooks/orthanc-snapshot.json
+//     | grep -Ei '(^|[- _])(delete|remove|uninstall|purge|discard|clear|reset|revert|replace|repair|overwrite|truncate|abort|revoke|unprotect|destroy|wipe|erase)([- _]|$)'
+//     | wc -l
+const SURFACE_TRUE = 51
+const SURFACE: [string, boolean][] = [
+  ['admin group delete', true],
+  ['admin group member remove', true],
+  ['admin marking replace', true],
+  ['admin org replace', true],
+  ['alias clear', true],
+  ['alias remove', true],
+  ['auth delete', true],
+  ['automate delete', true],
+  ['branch-protection project policy delete', true],
+  ['branch-protection repo unprotect', true],
+  ['configure delete', true],
+  ['connectivity code-import remove-importer', true],
+  ['connectivity import delete', true],
+  ['data-health check delete', true],
+  ['data-health check replace', true],
+  ['data-health check-group delete', true],
+  ['dataset branches delete', true],
+  ['dataset files delete', true],
+  ['dataset transactions abort', true],
+  ['dev-console scope remove', true],
+  ['devops draft abort', true],
+  ['global-branch remove-repo', true],
+  ['global-branch remove-resources', true],
+  ['marketplace installation uninstall', true],
+  ['media-sets input-schema remove', true],
+  ['models deployment delete', true],
+  ['ontology action-type-delete', true],
+  ['ontology interface-delete', true],
+  ['ontology link-type-delete', true],
+  // The name reads as no claim; the enum value is what asks (D6/D12).
+  ['dataset transactions start', false],
+  ['ontology object-type-delete', true],
+  ['ontology object-type-guarded-delete', true],
+  ['ontology shared-property-delete', true],
+  ['ontology type-group-delete', true],
+  ['orchestration schedules delete', true],
+  ['orchestration schedules replace', true],
+  ['project imports remove', true],
+  ['project remove-orgs', true],
+  ['repository branch delete', true],
+  ['repository checks required remove', true],
+  ['repository imports remove', true],
+  ['resource delete', true],
+  ['resource permanently-delete', true],
+  ['resource remove-markings', true],
+  ['resource-role revoke', true],
+  ['solution-design delete', true],
+  ['solution-design edge remove', true],
+  ['solution-design node remove', true],
+  ['space delete', true],
+  ['streams stream reset', true],
+  ['workshop module delete', true],
+  ['workshop module revert', true],
+  ['admin group member add', false],
+  ['automate pause', false],
+  ['automate unmute', false],
+  ['configure profile set', false],
+  ['dataset schema set', false],
+  ['dataset transactions commit', false],
+  ['devops draft publish', false],
+  ['devops product undeprecate', false],
+  ['global-branch close', false],
+  ['global-branch deploy', false],
+  ['global-branch mark-inactive', false],
+  ['global-branch reopen', false],
+  ['marketplace installation create', false],
+  ['marketplace installation upgrade', false],
+  ['marketplace job cancel', false],
+  ['orchestration builds cancel', false],
+  ['orchestration builds create', false],
+  ['orchestration schedules unpause', false],
+  ['proposal close', false],
+  ['proposal request-review', false],
+  ['repository checks cancel', false],
+  ['repository checks required set', false],
+  ['repository checks rerun', false],
+  ['repository pull-request close', false],
+  ['resource restore', false],
+  ['streams stream publish', false],
+  ['streams stream publish-batch', false],
+  ['workshop module update', false],
+]
+
+test('D12: the ask and the log name which of the four the guard read', async () => {
+  const byName = classifyCall(CLI, { command: 'marketplace installation uninstall', args: [INSTALLATION, '--mode', 'delete'] }, MANIFEST, 'agent/x')
+  const byFlag = classifyCall(CLI, { command: 'data-health check-group update', args: ['ri.health.main.group.1', '--remove-check', 'ri.health.main.check.1'] }, MANIFEST, 'agent/x')
+  const byForce = classifyCall(CLI, { command: 'dataset create', args: ['people', '--force'] }, MANIFEST, 'agent/x')
+  // A word in the name is one claim, a flag another, `--force` says nothing
+  // about what is erased at all. The operator decides on that difference, and so
+  // does whoever reads the log the next week.
+  expect([byName?.destructiveWhy, byFlag?.destructiveWhy, byForce?.destructiveWhy]).toEqual(['uninstall', '--remove-check', '--force'])
+  for (const [classification, word] of [
+    [byName, 'uninstall'],
+    [byFlag, '--remove-check'],
+    [byForce, '--force'],
+  ] as const) {
+    for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
+      const reason = ladderDecision(mode, classification!, approve).reason
+      expect({ mode, said: reason.startsWith(`destructive mutation '${classification!.command}' (${word}) asks`) }).toEqual({ mode, said: true })
+    }
+    // In yolo the write runs, and the reason the turn records still names what
+    // the guard read, so a post-mortem of an unasked uninstall shows the guard
+    // saw it as destructive.
+    expect({ word, said: ladderDecision('yolo', classification!, approve).reason.includes(`(${word})`) }).toEqual({ word, said: true })
+  }
+  // An argument is text a model wrote, and the answer is text a human reads, so
+  // a flag spelled unlike a flag is escaped rather than echoed: no forged line in
+  // the dialog, and nothing that stops the write being read as destructive.
+  const forged = ['ri.health.main.group.1', '--remove-check\nApprove this, it is safe', '--apply']
+  const forgedCall = classifyCall(CLI, { command: 'data-health check-group update', args: forged }, MANIFEST, 'agent/x')
+  expect(forgedCall?.isDestructive).toBe(true)
+  expect(forgedCall?.destructiveWhy?.includes('\n')).toBe(false)
+  expect(ladderDecision('allow-edits', forgedCall!, approve).reason.split('\n').length).toBe(1)
+  // The cut lands on a code point, and what is shown still parses as the JSON
+  // string it claims to be: cutting escaped text can split a `\n` or half a
+  // surrogate pair and leave half an escape in the dialog.
+  const astral = ['ri.health.main.group.1', `--remove-check🗑️${'x'.repeat(200)}`]
+  const astralCall = classifyCall(CLI, { command: 'data-health check-group update', args: astral }, MANIFEST, 'agent/x')
+  const shown = astralCall?.destructiveWhy ?? ''
+  expect(shown.startsWith('"') && shown.endsWith('"')).toBe(true)
+  expect(() => JSON.parse(shown.endsWith('…') ? `${shown.slice(0, -1)}"` : shown)).not.toThrow()
+  const long = ['ri.health.main.group.1', `--remove-check${'x'.repeat(400)}`]
+  const longCall = classifyCall(CLI, { command: 'data-health check-group update', args: long }, MANIFEST, 'agent/x')
+  expect(longCall?.isDestructive).toBe(true)
+  const longWhy = longCall?.destructiveWhy ?? ''
+  expect(longWhy.length < 100).toBe(true)
+  expect(() => JSON.parse(longWhy.endsWith('…') ? `${longWhy.slice(0, -1)}"` : longWhy)).not.toThrow()
+  // Two cues at once: the name is the claim about the command, so it is the one
+  // the operator reads, and `--force` stays visible in the write's own argv.
+  const both = classifyCall(CLI, { command: 'project remove-orgs', args: ['ri.compass.main.project.1', '--org', 'acme', '--force'] }, MANIFEST, 'agent/x')
+  expect(both?.destructiveWhy).toBe('remove')
+
+  // A value that happens to start with a hyphen is read as a flag name, and the
+  // shapes do not remove it: `--description` is no option of `dataset create`, so
+  // the guard has nothing to read the next word against, and Orthanc may take that
+  // word as the value or refuse it. The ask is the safe direction, pinned so the
+  // limit stays a known one. A declared option does not change it: `--description`
+  // is no option of this command, and a value that starts with a hyphen is read as
+  // an option either way, in the `--flag value` and the `--flag=value` spelling
+  // alike (D14).
+  const hyphenValue = classifyCall(CLI, { command: 'dataset create', args: ['people', '--description', '-remove the old rows'] }, MANIFEST, 'agent/x')
+  expect(hyphenValue?.isDestructive).toBe(true)
+
+  // Destructive and marked `operator_approval` by Orthanc: with the marked flag
+  // given, the question still names the governance control (foundry.test.ts A1
+  // is the same shape); without it, the destructive rule is what asks.
+  const marked = classifyCall(CLI, { command: 'resource remove-markings', args: ['ri.compass.main.folder.1', '--marking', 'restricted', '--apply'] }, MANIFEST, 'agent/x')
+  expect(marked?.isDestructive).toBe(true)
+  expect(ladderDecision('allow-edits', marked!, approve).reason).toContain('governance control')
+  const unmarked = classifyCall(CLI, { command: 'resource remove-markings', args: ['ri.compass.main.folder.1', '--marking', 'restricted'] }, MANIFEST, 'agent/x')
+  expect(ladderDecision('allow-edits', unmarked!, approve).reason).toContain("destructive mutation 'resource remove-markings' (remove)")
+
+  // Destructive and naming main: one ask, both claims in it, because the second
+  // is the reason a "yes" would be wrong.
+  const onMain = classifyCall(CLI, { command: 'streams stream reset', args: [DATASET, '--branch', 'master'] }, MANIFEST, 'agent/x')
+  expect(ladderDecision('allow-edits', onMain!, approve).reason).toContain("destructive mutation 'streams stream reset' (reset) asks in every mode but yolo, and it writes main")
+  // In yolo the main-targeting ask wins, and it carries the destructive cue too.
+  const yoloMain = ladderDecision('yolo', onMain!, approve)
+  expect(yoloMain.outcome).toBe('ask')
+  expect(yoloMain.reason).toContain('It is also destructive (reset)')
+
+  // A value the command declares is read whatever case it is written in, and a
+  // value outside the declaration is not: `--transaction-type` accepts APPEND,
+  // UPDATE, SNAPSHOT, DELETE, so both spellings of the erasing one ask and the
+  // default one does not.
+  for (const value of ['DELETE', 'delete', 'Delete']) {
+    const declared = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', value, '--apply'] }, MANIFEST, 'agent/x')
+    expect({ value, destructive: declared?.isDestructive }).toEqual({ value, destructive: true })
+    expect({ value, why: declared?.destructiveWhy }).toEqual({ value, why: '--transaction-type=DELETE' })
+  }
+  for (const value of ['APPEND', 'append', 'SNAPSHOT', 'keep-outputs']) {
+    const other = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', value] }, MANIFEST, 'agent/x')
+    expect({ value, destructive: other?.isDestructive }).toEqual({ value, destructive: false })
+  }
+  // The cue names the flag and the value, both validated pieces, so the operator
+  // can see which word asked and the log cannot be forged from the value.
+  const enumAsk = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', 'DELETE'] }, MANIFEST, 'agent/x')
+  expect(enumAsk?.destructiveWhy).toBe('--transaction-type=DELETE')
+  expect(ladderDecision('allow-edits', enumAsk!, approve).reason).toContain("destructive mutation 'dataset transactions start' (--transaction-type=DELETE)")
+
+  // An ordinary write keeps the plain yolo reason: the extra words are only for
+  // a write the guard read as destructive.
+  const plain = classifyCall(CLI, { command: 'dataset create', args: ['people'] }, MANIFEST, 'agent/x')
+  expect(plain?.destructiveWhy).toBe(undefined)
+  expect(ladderDecision('yolo', plain!, approve).reason).toBe('yolo mode: nothing else asks; work stays on branches that are not main')
+})
+
+test('D13: the flag census, measured on the v0.7.11 release binary', async () => {
+  // Every flag of the pinned orthanc whose name carries a word from the table,
+  // read off `orthanc --agent agent-manifest` on the v0.7.11 release (the command
+  // is in policy.ts beside the table — the pinned snapshot carries no flags).
+  // The verdict column is what the guard answers for that real command and flag
+  // (`isDestructive`, not the ladder's whole answer), so the census is data in the
+  // suite rather than prose in a comment.
+  const CENSUS: [string, string, boolean][] = [
+    ['data-health check-group update', '--remove-check', true],
+    ['devops draft set', '--remove-resource', true],
+    ['global-branch deploy', '--delete-object-type', true],
+    ['global-branch roles set', '--remove', true],
+    ['marketplace installation uninstall', '--delete-project', true],
+    ['orchestration builds create', '--abort-on-failure', false],
+    ['proposal merge', '--delete-object-type', true],
+    ['proposal request-review', '--remove', true],
+  ]
+  for (const [command, flag, destructive] of CENSUS) {
+    const args = command === 'global-branch roles set' ? [GLOBAL, '--principal', 'u:zay', flag] : [command.startsWith('marketplace') ? INSTALLATION : 'ri.x.main.thing.1', flag]
+    expect({ command, flag, destructive: isDestructive(command, args) }).toEqual({ command, flag, destructive })
+  }
+})
+
+test('the term table reads the 0.7.11 surface by what each write leaves gone', async () => {
+  for (const [path, destructive] of SURFACE) {
+    expect({ path, term: destructiveTermIn(path) !== null }).toEqual({ path, term: destructive })
+  }
+  // What this assertion can and cannot catch. It fails when the list above and
+  // the count below drift apart. It cannot notice the snapshot changing: the
+  // list is written here, and no hooks test may open a file in the plugin, so a
+  // re-pin that ships a new destructive name fails nothing until someone lists
+  // it. The recount command beside SURFACE_TRUE is the check, and FND-11's
+  // release step is where it belongs.
+  expect(SURFACE.filter(([, destructive]) => destructive).length).toBe(SURFACE_TRUE)
+})
+
+// D14 is the same rule read through the seam that supplies the shapes: the
+// manifest below is Orthanc's own JSON, not a hand-built ManifestCommand, so the
+// parser in orthanc.ts is what puts `values` in front of the value lane.
+const LIVE_MANIFEST = manifestFrom({
+  schema_version: 'foundry-agent-v1',
+  data: {
+    commands: [
+      {
+        path: 'dataset transactions start',
+        kind: 'mutation',
+        args: [
+          { kind: 'positional', name: 'dataset_rid', takes_value: true },
+          { kind: 'option', flag: '--branch', takes_value: true },
+          { kind: 'option', flag: '--transaction-type', takes_value: true, default: 'APPEND', values: ['APPEND', 'UPDATE', 'SNAPSHOT', 'DELETE'] },
+          { kind: 'option', flag: '--apply', takes_value: false },
+        ],
+      },
+      {
+        // A command whose option declares nothing: here the guard has only the
+        // spelling to go on, which is why the caps form asks and a name does not.
+        path: 'workshop module publish',
+        kind: 'mutation',
+        args: [
+          { kind: 'positional', name: 'module_rid', takes_value: true },
+          { kind: 'option', flag: '--tag', takes_value: true },
+        ],
+      },
+    ],
+  },
+})
+
+const liveDestructive = (command: string, args: string[]) =>
+  classifyCall(CLI, { command, args }, LIVE_MANIFEST, 'agent/x')?.isDestructive ?? false
+
+test('D14: the shapes that decide the value lane come from Orthanc manifest JSON', async () => {
+  // The parser hop. destructive.test.ts builds ManifestCommand literals elsewhere,
+  // which is not how the runtime gets them: register.tsx reads the agent-manifest
+  // and manifestFrom parses it. Cut the `values` read in orthanc.ts and only this
+  // test can notice, on the one command whose erasure rides on that list.
+  const erased = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', 'delete', '--apply'] }, LIVE_MANIFEST, 'agent/x')
+  expect(erased?.isDestructive).toBe(true)
+  expect(erased?.destructiveWhy).toBe('--transaction-type=DELETE')
+  expect(ladderDecision('allow-edits', erased!, approve).outcome).toBe('ask')
+  expect(liveDestructive('dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type', 'APPEND'])).toBe(false)
+
+  // Where an option declares no values, the caps spelling is all the guard has.
+  // This is the lane that will exist for almost every flag Orthanc ships, so it is
+  // pinned on its own: a name stays a name, and a caps act asks.
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag', 'DELETE'])).toBe(true)
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag', 'delete'])).toBe(false)
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag', 'v1-delete'])).toBe(false)
+
+  // A declared boolean owns no value, so the word after it is not read as one.
+  // Orthanc would refuse `--apply DELETE` as a stray argument, and the guard says
+  // nothing about it: pinned so a change here is a decision, not a drift.
+  expect(liveDestructive('dataset transactions start', [DATASET, '--branch', 'agent-x', '--apply', 'DELETE'])).toBe(false)
+
+  // The two spellings of a hyphen-led value ask alike.
+  expect(liveDestructive('dataset transactions start', [DATASET, '--transaction-type=-DELETE'])).toBe(true)
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag=-delete'])).toBe(true)
+})
+
+// ---------------------------------------------------------------------------
+// E1-E3: through the real hook, on a synthetic stack (the same engine seams
+// yolo.test.ts uses). The widening must reach the operator, and must cost no
+// prompt where it has nothing to say.
+// ---------------------------------------------------------------------------
+type Mode = 'ask-always' | 'allow-edits' | 'auto' | 'yolo'
+const envelope = (data: unknown) =>
+  JSON.stringify({ schema_version: 'foundry-agent-v1', data, errors: [], meta: {}, warnings: [], artifacts: [], pagination: null })
+const E2E_MANIFEST = envelope({
+  commands: [
+    { path: 'configure list', kind: 'local' },
+    { path: 'ontology list', kind: 'read-only' },
+    { path: 'marketplace installation uninstall', kind: 'mutation' },
+    { path: 'streams stream reset', kind: 'mutation' },
+    { path: 'data-health check-group update', kind: 'mutation' },
+    { path: 'orchestration builds create', kind: 'mutation' },
+    { path: 'resource delete', kind: 'mutation' },
+  ],
+})
+
+function rig(on: On, mode: Mode) {
+  const h = { ran: [] as string[], asked: [] as string[], answer: 'Approve' as string | 'throw' }
+  const store = new Map<string, unknown>([['approvalMode', mode]])
+  on('process.run', (_$, e) => {
+    const reply = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    const words = e.argv.slice(1).filter(word => word !== '--agent' && word !== '--non-interactive')
+    const line = words.join(' ')
+    // The stack lookups and the version probe the plugin makes for itself: what
+    // is counted here is a write.
+    if (!['agent-manifest', 'configure list', 'version'].includes(line) && e.argv[0] !== 'git') h.ran.push(line)
+    if (line === 'agent-manifest') return reply(E2E_MANIFEST)
+    if (line === 'version') return reply('orthanc 0.7.11\n')
+    if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
+    if (e.argv[0] === 'git') return reply('origin\thttps://tester.example.com/stemma/git/ri.stemma.main.repository.x/repo.git (push)\n')
+    return reply(envelope({ ran: line }))
+  })
+  const env = new Map<string, string>([['HOME', '/home/tester']])
+  on('env.get', (_$, e) => ({ value: env.get(e.name) }))
+  on('store.get', (_$, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_$, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('fs.stat', () => ({ value: { kind: 'other', size: 0, mtimeMs: 0, isLink: false } as never }))
+  on('fs.read', (_$, e) => {
+    throw new Error(`ENOENT: ${e.path}`)
+  })
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'test: no surface' } }))
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: '{"action":"approve","reason":"routine branch work"}' } }) as never)
+  on('classic.SubagentStart', () => ({}))
+  on('tool.call', (_$, e) => {
+    const call = e as unknown as { tool: string; questions?: { question: string }[] }
+    if (call.tool !== 'AskUserQuestion') return { result: 'ran' } as never
+    const question = call.questions?.[0]?.question ?? ''
+    h.asked.push(question)
+    if (h.answer === 'throw') throw new Error('test: no one to ask')
+    return { result: { questions: call.questions, answers: { [question]: h.answer } } } as never
+  })
+  return h
+}
+
+type Engine = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
+const write = ($: Engine, command: string, args: string[]) => $.tool.call({ tool: CLI, command, args } as never) as Promise<{ deny?: string }>
+const UNINSTALL = [INSTALLATION, '--mode', 'delete', '--apply']
+const BUILD = [JSON.stringify({ type: 'build', target: { type: 'manual', targetRids: [] }, branchName: WORK_BRANCH }), '--branch', WORK_BRANCH, '--abort-on-failure', '--apply']
+
+for (const mode of ['allow-edits', 'auto'] as Mode[]) {
+  test(`E1: in ${mode} mode an uninstall asks the operator by name; declined, or no one to ask, it does not run; approved, it runs`, async ($, on) => {
+    const h = rig(on, mode)
+    for (const answer of ['Decline', 'throw'] as (string | 'throw')[]) {
+      h.answer = answer
+      const before = h.asked.length
+      const wrote = await write($, 'marketplace installation uninstall', UNINSTALL)
+      expect({ answer, denied: typeof wrote.deny === 'string', asked: h.asked.length - before }).toEqual({ answer, denied: true, asked: 1 })
+    }
+    expect(h.asked[0]).toContain("'marketplace installation uninstall'")
+    expect(h.asked[0]).toContain('destructive')
+    expect(h.ran.filter(line => line.startsWith('marketplace installation uninstall'))).toEqual([])
+    h.answer = 'Approve'
+    expect((await write($, 'marketplace installation uninstall', UNINSTALL)).deny).toBe(undefined)
+    expect(h.ran.filter(line => line.startsWith('marketplace installation uninstall'))).toEqual([`marketplace installation uninstall ${UNINSTALL.join(' ')}`])
+  })
+}
+
+for (const mode of ['allow-edits', 'auto'] as Mode[]) {
+  test(`E2: in ${mode} mode the widening asks nothing where nothing is erased`, async ($, on) => {
+    const h = rig(on, mode)
+    h.answer = 'throw'
+    for (const [command, args] of [
+      ['orchestration builds create', BUILD],
+      ['data-health check-group update', ['ri.health.main.group.1', '--no-remove-check', 'ri.health.main.check.1', '--apply']],
+      ['data-health check-group update', ['ri.health.main.group.1', '--add-check', 'ri.health.main.check.1', '--apply']],
+    ] as [string, string[]][]) {
+      const wrote = await write($, command, args)
+      expect({ command, args, deny: wrote.deny }).toEqual({ command, args, deny: undefined })
+    }
+    expect(h.asked).toEqual([])
+    expect(h.ran.length).toBe(3)
+  })
+}
+
+test('E3: in yolo an uninstall, a stream reset and a delete run with no dialog', async ($, on) => {
+  const h = rig(on, 'yolo')
+  h.answer = 'throw'
+  for (const [command, args] of [
+    ['marketplace installation uninstall', UNINSTALL],
+    ['streams stream reset', [DATASET, '--branch', 'agent-x', '--apply']],
+    ['resource delete', ['ri.compass.main.folder.1', '--apply']],
+  ] as [string, string[]][]) {
+    expect({ command, deny: (await write($, command, args)).deny }).toEqual({ command, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
+  expect(h.ran.length).toBe(3)
+})

@@ -192,6 +192,23 @@ export function adoptable(data: unknown, ontologyRid: string): { name: string } 
   return 'The branch has no plain name, and global-branch get returned no branch RID to show instead.'
 }
 
+/**
+ * The branch an ontology listing may read: FDE mode's, and only while its stack
+ * and ontology are the ones in scope. The binding itself survives a later
+ * /ontology or /profile pick (nothing unbinds it); this guard is what stops a
+ * surviving binding naming this ontology's or this stack's types as the branch's.
+ * Null reads the main branch.
+ *
+ * The session's other branch (`workingBranch`) must not be used here: when a
+ * branch creation returns no RID the mod stores its *name* there, and nothing
+ * pairs it with an ontology, so it could ask orthanc for a branch of another
+ * ontology and read that one's types back as this one's.
+ */
+export function readBranch(fde: FdeSession | null, profile: string, ontologyRid: string): { rid: string; name: string } | null {
+  if (fde === null || fde.profile !== profile || fde.ontologyRid !== ontologyRid) return null
+  return { rid: fde.branchRid, name: fde.branchName }
+}
+
 /** The proposal `data` (global-branch get) has open on the branch; null when it has none. */
 export function openProposal(data: unknown): string | null {
   const rid = (data as { branch_record?: Record<string, unknown> } | null)?.branch_record?.active_proposal

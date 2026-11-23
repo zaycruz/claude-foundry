@@ -9,7 +9,7 @@ Apply this order to every Foundry task. Keep each gate fail-closed.
 
 ## Tool roles
 
-Orthanc is the only path for Foundry work. `orthanc_help` discovers its command surface; `orthanc_cli` runs a command in agent mode and returns a `foundry-agent-v1` envelope. Do not call Foundry REST APIs, and do not reach for another CLI when Orthanc has the command. A Palantir MCP server, if one is connected, is a read-only source of official documentation. The official `foundry` CLI is used only for SuperRepo lifecycle work that Orthanc does not cover.
+Orthanc is the only path for Foundry work. `orthanc_help` discovers its command surface; `orthanc_cli` runs a command in agent mode and returns a `foundry-agent-v1` envelope. Do not call Foundry REST APIs, and do not reach for another CLI when Orthanc has the command. A Palantir MCP server, if one is connected, is a read-only source of official documentation. The guard blocks any MCP call whose server or tool name says Palantir or Foundry and whose name does not read with plain separated words (`list_objects`, not `listObjects`), so a refused documentation read is a naming problem, not a permission to use Bash. The official `foundry` CLI is used only for SuperRepo lifecycle work that Orthanc does not cover.
 
 ## Decision flow
 
