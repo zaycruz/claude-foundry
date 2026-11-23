@@ -1785,6 +1785,28 @@
     },
     {
       "auth": "bearer-token",
+      "kind": "mutation",
+      "operator_approval": {
+        "when_all_flags": [
+          "--apply"
+        ]
+      },
+      "operator_approval_scope": "work-branch",
+      "path": "ontology action-type-disable"
+    },
+    {
+      "auth": "bearer-token",
+      "kind": "mutation",
+      "operator_approval": {
+        "when_all_flags": [
+          "--apply"
+        ]
+      },
+      "operator_approval_scope": "work-branch",
+      "path": "ontology action-type-enable"
+    },
+    {
+      "auth": "bearer-token",
       "kind": "read-only",
       "path": "ontology action-type-get"
     },
@@ -3049,7 +3071,7 @@
       "path": "workshop module widgets"
     }
   ],
-  "min_orthanc": "0.7.11",
-  "orthanc_tag": "v0.7.11",
+  "min_orthanc": "0.7.12",
+  "orthanc_tag": "v0.7.12",
   "snapshot_version": 1
 }
