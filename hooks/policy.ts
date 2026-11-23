@@ -3294,6 +3294,13 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
       const assign = ASSIGNMENT_WORD.exec(word)
       if (assign !== null && assign[1] !== undefined) assigned.set(assign[1], assign[2] ?? '')
     }
+  // A value made by a command substitution is unknown on this form of the line: an
+  // unquoted one reads here as empty (`S=$(mktemp -d)` as `S=`, so `$S/` would be the
+  // root), a quoted one as its own text (`d="$(tr a y <<< a)"`). An unknown name inside
+  // a longer word is any text (`foundr$d`); the line with the output put in, where the
+  // guard knows it, is read as another form.
+  for (const match of command.matchAll(/(?:^|[\s;&|({])([A-Za-z_][A-Za-z0-9_]*)=(?=\$\(|`|"\$\(|"`)/g))
+    if (assigned.get(match[1]!) === '' || /\$\(|`/.test(assigned.get(match[1]!) ?? '')) assigned.delete(match[1]!)
   // `printf -v NAME FORMAT ARGS…` assigns too: the format with each `%s`-like
   // conversion filled from the arguments (`printf -v d '%s/.config/foundry' ~`).
   for (const segment of segments) {
@@ -3484,7 +3491,7 @@ function trimmed(text: string, op: string, pattern: string): string {
 function mentionedDirs(segments: readonly string[][], cwd: string, home: string): Set<string> {
   const dirs = new Set<string>([cwd.replace(/\/+$/, '') || '/'])
   const add = (path: string) => {
-    const found = resolvedPath(path.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
+    const found = resolvedPath(path.replace(/\/+$/, ''), cwd, home)
     dirs.add(found)
     const cut = found.lastIndexOf('/')
     if (cut > 0) dirs.add(found.slice(0, cut))
@@ -3496,7 +3503,11 @@ function mentionedDirs(segments: readonly string[][], cwd: string, home: string)
         add(next === undefined || next.startsWith('-') ? (home === '' ? '~' : home) : next)
         return
       }
-      for (const piece of [word, ...pathPieces(word)]) if (piece.includes('/')) add(piece)
+      // A pattern is not a place a command stands in: `rm -f */x.bak` from home does
+      // not work in `~/*`, and resolving the word against its own parent would read it
+      // as `~/*/*/x.bak`, which matches ~/.config/foundry. A pattern that is itself the
+      // store or a directory above it is still met where it is written, by namesStore.
+      for (const piece of [word, ...pathPieces(word)]) if (piece.includes('/') && !GLOB_CHARS.test(piece)) add(piece)
     })
   return dirs
 }
@@ -3527,6 +3538,8 @@ function bareNamesStore(token: string, dir: string): boolean {
 }
 
 const REACHING = new WeakMap<Set<string>, string[]>()
+// Characters that make a word a pattern: `*`, `?`, a bracket, an extglob group.
+const GLOB_CHARS = /[*?[]|[@+!]\(/
 
 /** The directories a command works in that can lead to the store. */
 function reachingDirs(mentioned: Set<string>, cwd: string, dir: string): string[] {
@@ -3554,22 +3567,32 @@ function storePaths(token: string, cwd: string, home: string, mentioned: Set<str
  * stands, so `rm /tmp/profile-settings.json` and `rm -rf $STORE` (an unknown variable)
  * stay free. */
 function namesStore(token: string, cwd: string, home: string, dir: string, mentioned: Set<string>, inside = false): boolean {
-  const written = token.replace(/\\/g, '/')
   // `/` on its own is the root, and the root holds the store; a relative `.` is the
   // working directory, which the resolution below already handles.
-  const path = written.replace(/\/+$/, '') || (written.startsWith('/') ? '/' : '')
+  const path = token.replace(/\/+$/, '') || (token.startsWith('/') ? '/' : '')
   if (path === '') return false
+  // A backslash that is still in the word after quote removal is a character of the
+  // name (`'\(.number)'` in a jq filter, `'s/\(a\)/x/'` in a sed script), not a
+  // directory separator: Linux and macOS have only `/`. A program that reads the word
+  // as a pattern (`find -path '*/.config\/foundry'`) reads `\x` as x, so that
+  // spelling is tried too; it never makes a `/` the word does not have.
+  const unescaped = path.replace(/\\([\s\S])/g, '$1')
   // A `--flag=` prefix is stripped too, because `tar -C=<store>` says the same thing
   // to the shell as `tar -C <store>`, and a path can sit inside the argument of a
   // function call (`glob("~/...")`) rather than be the whole word.
-  const spellings = [path, path.replace(/^--?[A-Za-z0-9_.+-]+=/, ''), ...pathPieces(path)].filter(spelling => spelling !== '')
+  const spellings = [path, unescaped, path.replace(/^--?[A-Za-z0-9_.+-]+=/, ''), ...pathPieces(path)].filter(spelling => spelling !== '')
   return spellings.some(spelling => storePaths(spelling, cwd, home, mentioned, dir).some(where => pathReachesStore(where, dir, inside)))
 }
 
 /** The path-shaped pieces inside a word: what a shell would pass to `open` when the
  * word is a call around a string, rather than a bare path. */
 function pathPieces(word: string): string[] {
-  return [...word.matchAll(/(?<=^|[\s"'`;:()|&<>=,])(?:~|\/)[^\s"'`;:()|&<>]*/g)].map(match => match[0]!)
+  // A piece that is only slashes (`split("/")`, `s|/|_|`, `'/'.join(…)`) is a
+  // separator in a program's text, not the root: a word that is the root on its own
+  // (`rm -rf /`) is still read as the word itself.
+  return [...word.matchAll(/(?<=^|[\s"'`;:()|&<>=,])(?:~|\/)[^\s"'`;:()|&<>]*/g)]
+    .map(match => match[0]!)
+    .filter(piece => !/^\/+$/.test(piece))
 }
 
 export const PROFILE_STORE_WRITE_REASON =
@@ -3690,7 +3713,17 @@ function storeLineForms(command: string, home: string): string[] {
         continue
       }
       const edge = /^$|[\s;|&(<>"]$/
-      const inside = !edge.test(out.slice(-1)) || !edge.test(text[substitution.end + 1] ?? '') && text[substitution.end + 1] !== ')'
+      const endsWord = edge.test(text[substitution.end + 1] ?? '') || text[substitution.end + 1] === ')'
+      // `OUT=$(mktemp)`: an assignment's whole value. Unknown output there makes the
+      // name unknown, as the line as written reads it, not `*`: `curl -o "$OUT"` from
+      // the home directory is not a write to `~/*`. A name used inside a longer word
+      // (`foundr$OUT`) is still read as any text there.
+      if (endsWord && /(?:^|[\s;|&(])[A-Za-z_][A-Za-z0-9_]*=$/.test(out) && output(substitution.body, true) === '*') {
+        out += text.slice(index, substitution.end + 1)
+        index = substitution.end
+        continue
+      }
+      const inside = !edge.test(out.slice(-1)) || !endsWord
       out += output(substitution.body, inside)
       index = substitution.end
     }

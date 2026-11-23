@@ -967,3 +967,119 @@ test('Q9: a command orthanc did not list is refused as a write, and says so', as
   expect(deny).not.toContain('--apply left off')
   expect(ran(h, 'dataset bulk delete')).toEqual([])
 })
+
+// FND-29: plugin v0.7.1 refused harmless Bash reads with the mark-store message,
+// although none of them touch the store (observed 2026-11-23 in one session).
+//
+// Ways this can fail, written before the code:
+//  R1 A jq filter (`--jq '"\(.number)"'`) or a sed expression (`s|/|_|g`,
+//     `s/\(a\)\/b/x/`) is read as a path: a backslash turned into `/`, or a
+//     lone `/` inside the word read as the root, which holds the store.
+//  R2 A redirect into a scratchpad held in a variable the line does not know
+//     (`S=$TMPDIR; … > $S/y.sh`, `S=$(mktemp -d)`) is read as `*/y.sh`, and from
+//     the home directory that `*` is taken to reach ~/.config/foundry.
+//  R3 A read of any file (`ls`, `sed -n`, `cat`, `head`) is refused because
+//     another part of the line was misread as the store.
+//  R4 The fix opens a door: a real write, move, delete or redirect into
+//     ~/.config/foundry/profile-settings.json (spelled plain, ~, $HOME, absolute,
+//     or relative after a cd; by >, >>, sed -i, tee, cp, mv, rm or python) runs.
+test('Q21: reads, jq filters, sed expressions and scratchpad paths run; writes into the mark store do not', async ($, on) => {
+  harness(on, 'yolo')
+  let cwd = '/home/tester'
+  on('session.cwd', () => ({ value: cwd }) as never)
+  const pad = '/home/tester/.cache/claude-tmp/claude-1000/-home-tester-projects-claude-foundry/0f3c/scratchpad'
+  const jq = `--jq '.[]|"\\(.number) \\(.headRefName) \\(.title)"'`
+  const prList = `gh pr list --repo zaycruz/claude-foundry --state open --json number,headRefName,title ${jq}`
+  const runs: string[] = []
+  for (const S of [pad, '$TMPDIR', '"$TMPDIR"', '$(mktemp -d)', '"$CLAUDE_SCRATCH/x"'])
+    runs.push(
+      // The three commands observed in the session that reported the bug.
+      ...(S === pad ? [prList] : []),
+      `${prList} | grep -i -E 'guard|profile' ; S=${S}; ls $S/plugin-tie*.sh; sed -n 1,40p $S/plugin-tie-hand.sh`,
+      `S=${S}; sed -e s/a/b/ $S/x.sh > $S/y.sh; bash $S/y.sh`,
+      // The same shapes, one failure mode each.
+      `S=${S}; echo hi > $S/out.txt`,
+      `S=${S}; printf '%s\\n' x >> "$S/log.txt"`,
+      `S=${S}; cp $S/a.json $S/b.json`,
+      `S=${S}; rm -f $S/*.tmp`,
+    )
+  runs.push(
+    'gh pr list --repo zaycruz/claude-foundry --state open',
+    `gh api repos/x/y/pulls --jq '.[] | "\\(.number)/\\(.head.ref)"'`,
+    `jq -r '.items[] | .path | split("/") | .[0]' data.json > paths.txt`,
+    `sed -i 's|/|_|g' notes.txt`,
+    `sed -e 's/\\(a\\)\\/b/\\1/' in.txt > out.txt`,
+    `awk -F/ '{print $1}' paths.txt > first.txt`,
+    `python3 -c "print('/'.join(['a', 'b']))"`,
+    `tr '\\\\' / < win.txt > unix.txt`,
+    'cp "$SRC/a" "$DEST/b"',
+    'rm -f "$BUILD_DIR/out"/*.o',
+    'cat ~/.config/foundry/profile-settings.json',
+    'head -5 ~/.config/foundry/profile-settings.json | jq .',
+    'ls -la ~/.config/foundry',
+    'echo hi',
+    // A temp file in a variable, and a pattern relative to where the session stands.
+    'OUT=$(mktemp); curl -s https://example.com -o "$OUT"',
+    'S=$(mktemp -d); cp a.txt "$S/a.txt"; ls $S',
+    'rm -f */x.bak',
+    `for f in */package.json; do sed -i 's/1.0/1.1/' "$f"; done`,
+  )
+  const refused: string[] = []
+  for (const where of ['/home/tester', '/home/tester/projects/app', '/'])
+    for (const command of runs) {
+      cwd = where
+      const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+      if (deny !== '') refused.push(`${where}: ${command}`)
+    }
+  // A backslash left in a word is a character of the name, not a `/`: read as one,
+  // `'\*'` was `/*`, every directory under the root.
+  cwd = '/home/tester/projects/app'
+  for (const command of [`grep -rl '\\*' src | xargs sed -i 's/a/b/'`, `rg -l '\\?' | xargs sed -i 's/x/y/'`])
+    if (((await fileTool($, 'Bash', { command })).deny ?? '') !== '') refused.push(`${cwd}: ${command}`)
+  expect(refused).toEqual([])
+
+  const mark = '/home/tester/.config/foundry/profile-settings.json'
+  const writes: string[] = []
+  for (const at of [mark, '~/.config/foundry/profile-settings.json', '$HOME/.config/foundry/profile-settings.json', '"${HOME}/.config/foundry/profile-settings.json"'])
+    writes.push(
+      `echo '{}' > ${at}`,
+      `echo '{}' >> ${at}`,
+      `sed -i 's/locked//' ${at}`,
+      `echo '{}' | tee ${at}`,
+      `cp /tmp/empty.json ${at}`,
+      `mv /tmp/empty.json ${at}`,
+      `mv ${at} /tmp/saved.json`,
+      `rm ${at}`,
+      `rm -f ${at}`,
+    )
+  writes.push(
+    `python3 -c "open('${mark}', 'w').write('{}')"`,
+    `python3 -c "import os; os.remove('$HOME/.config/foundry/profile-settings.json')"`,
+    `python3 -c "import os; os.remove(os.path.expanduser('~/.config/foundry/profile-settings.json'))"`,
+    'cd ~/.config/foundry && sed -i s/locked// profile-settings.json',
+    'cd ~/.config/foundry; > profile-settings.json',
+    'S=$TMPDIR; sed -e s/a/b/ $S/x.sh > ~/.config/foundry/profile-settings.json',
+    `jq '.read_only = []' ${mark} > /tmp/x && mv /tmp/x ${mark}`,
+    'rm -rf ~/.config/foundry',
+    // A pattern program reads `\/` as `/`; cd takes options before its directory; an
+    // unknown output inside a longer word can be any text.
+    "find ~ -path '*/.config\\/foundry/*' -delete",
+    'cd -- ~/.config/foundry && rm profile-settings.json',
+    'cd -P ~/.conf*/foundry && rm profile-settings.json',
+    'd=$(tr a y <<< a); rm -rf ~/.config/foundr$d',
+    'd="$(tr a y <<< a)"; rm -rf ~/.config/foundr$d',
+    'd="`tr a y <<< a`"; rm -rf ~/.config/foundr"$d"',
+  )
+  const ran: string[] = []
+  for (const where of ['/home/tester', '/home/tester/projects/app', '/'])
+    for (const command of writes) {
+      cwd = where
+      const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+      if (!deny.includes('profile-settings.json')) ran.push(`${where}: ${command}`)
+    }
+  // From inside the store, the bare file name is the mark.
+  cwd = '/home/tester/.config/foundry'
+  for (const command of ['sed -i s/locked// profile-settings.json', 'rm profile-settings.json', '> profile-settings.json', 'cp /tmp/e.json profile-settings.json'])
+    if (!((await fileTool($, 'Bash', { command })).deny ?? '').includes('profile-settings.json')) ran.push(`${cwd}: ${command}`)
+  expect(ran).toEqual([])
+})

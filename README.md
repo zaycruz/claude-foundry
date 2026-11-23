@@ -298,8 +298,16 @@ a positional parameter, a command substitution, and an operator the guard does n
 compute exactly (a substring, a replacement, a case change, a pattern trim). So
 `foundr${NOPE}y`, `foundr$1y`, `foundr$(:)y`, `foundr$(tr a y <<< a)` and
 `foundr${HOME:0:0}y` all name the store. A
-substitution that runs `echo`, `printf` or `pwd` counts as what it prints. It resolves relative names after a `cd`, and reads the
-path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
+substitution that runs `echo`, `printf` or `pwd` counts as what it prints. One
+whose output is unknown and that is a variable's whole value (`OUT=$(mktemp)`)
+makes that variable unknown, not empty, so `curl -o "$OUT"` is not a write to `/`
+or `~/*`. It resolves relative names after a `cd`, and reads the
+path inside `bash -c '…'`. A pattern (`*/x.bak`) is not a directory the command
+works in, so `rm -f */x.bak` from home does not read as `~/*/*/x.bak`. A backslash
+that quoting keeps (`--jq '"\(.number)"'`, `sed 's/\(a\)/x/'`) is a character of
+the name, not a `/`, and a lone `/` inside a program's text (`split("/")`,
+`s|/|_|`) is not the root; a program that reads `\/` as `/` in a pattern
+(`find -path '*/.config\/foundry'`) is read that way too. A `find ... -delete` whose name pattern cannot match the
 mark (`find ~ -name "profile-*.png" -delete`) still runs. The guard reads the
 command line, not a running shell, so it has these limits. It does not catch a path
 built at run time inside a script
