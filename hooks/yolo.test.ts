@@ -5,8 +5,12 @@
 // dialogs; FDE keeps its holds), zay answered: "nohting refused but still
 // siloed to a branch that is not main". So in yolo no Foundry call asks the
 // operator, and what is refused is what keeps the agent off main: a write with
-// no branch or naming main, a main-only write, a merge or approval, a push to
-// the default branch. FDE mode, which the operator turns on, keeps its holds.
+// no branch or naming main, a main-only write, a push to the default branch.
+// zay, 2026-11-20: "fde should be able to do everything and anything it wants
+// on a branch and deploy branches, just cant make changes directly against
+// master" — a promotion into main through a proposal is not a direct write to
+// main, so it runs in yolo with no ask too. FDE mode, which the operator turns
+// on, now keeps only the one refusal of a write aimed directly at main.
 //
 // Ways this can fail, written before the code:
 //  Y1  In yolo a delete, or a write with --force, opens a dialog, or does not run
@@ -42,8 +46,8 @@
 //      folder, never force; --force still asks.
 //  Y9  The prompt in yolo still says tags ask, or does not say what stays
 //      refused; the prompt in other modes stops saying tags ask.
-//  Y10 FDE mode loosens in yolo: an apply with no dry run runs. After its dry
-//      run, a bound delete runs without a dialog.
+//  Y10 FDE mode loosens in yolo: an apply with no dry run runs, and a bound
+//      delete, deploy or merge runs without a dialog.
 //  Y11 A credential command (auth store) runs in yolo.
 //  Y12 An Orthanc write in Bash runs in yolo instead of going to orthanc_cli.
 //
@@ -76,10 +80,11 @@
 //      unprotects main, with no ask: in yolo for all of them, in allow-edits
 //      for the ones that are not deletes. Each must ask in every mode; a work
 //      branch runs in yolo with no ask.
-//  Y19 A promotion into main other than a proposal (global-branch deploy, which
-//      deploys a proposal to main; repository pull-request merge) runs in
-//      yolo or allow-edits. Promotions are the operator's: refused in every
-//      mode, asking no one, like proposal merge.
+//  Y19 A promotion into main (proposal merge, accept or approve, global-branch
+//      deploy, repository pull-request merge) is refused in yolo, or asks
+//      there. It runs with no ask (zay, 2026-11-20); outside yolo it follows
+//      the ladder, where the manifest's operator_approval marks ask
+//      (yolo-approval.test.ts O12).
 //  Y20 A schedule or an import carries its branch inside: the action JSON of
 //      orchestration schedules create/replace, or the stored schedule or
 //      import that schedules run/unpause and connectivity import run start.
@@ -100,6 +105,7 @@ const ONT = { rid: 'ri.ontology.main.ontology.d0000000-0000-4000-8000-0000000000
 const REPO = 'ri.stemma.main.repository.e0000000-0000-4000-8000-0000000000e1'
 const COMMIT = '0123456789abcdef0123456789abcdef01234567'
 const TAG = 'refs/tags/1.2.3-tester-20261022'
+const PROPOSAL = 'ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1'
 const MADE = 'ri.branch..branch.b0000000-0000-4000-8000-0000000000f3'
 const GLOBAL = 'ri.branch..branch.b0000000-0000-4000-8000-0000000000f4'
 const FOLDER = 'ri.compass.main.folder.c0000000-0000-4000-8000-0000000000c1'
@@ -354,15 +360,12 @@ test('Y4: branching off master and naming master as a base, fallback or parent s
   expect(h.asked).toEqual([])
 })
 
-test('Y5: in yolo the silo holds: branchless, main-only, merges and default-branch pushes are refused and ask no one', async ($, on) => {
+test('Y5: in yolo the silo holds: branchless, main-only and default-branch pushes are refused and ask no one', async ($, on) => {
   const h = harness(on)
   for (const [command, args] of [
     ['ontology object-type-upsert', ['T', '--apply']],
     ['ontology object-type-delete', ['T', '--apply']],
     ['ontology object-upsert', ['T', '--apply']],
-    ['proposal merge', ['ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply']],
-    ['proposal accept', ['ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply']],
-    ['proposal approve', ['ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply']],
     ['repository push', [REPO, 'HEAD', 'master', '--apply']],
     ['repository push', [REPO, 'HEAD', 'agent-fix', '--allow-default-branch', '--apply']],
   ] as [string, string[]][]) {
@@ -442,7 +445,8 @@ test('Y9: the yolo prompt says nothing asks and what stays refused', async ($, o
   const text = await prompt($)
   expect(text).toContain('Foundry approval mode: yolo')
   expect(text).toContain('Nothing asks the operator except a write on main')
-  expect(text).toContain('Writes without a branch, merges and default-branch pushes are blocked in every mode')
+  expect(text).toContain('Writes without a branch and default-branch pushes are blocked in every mode')
+  expect(text).toContain('A promotion runs with no ask')
   expect(text).toContain('A write that names main or master as its branch asks the operator')
   expect(text.includes('ask the operator in every mode')).toBe(false)
 })
@@ -455,17 +459,33 @@ test('Y9: the auto prompt still says release tags ask', async ($, on) => {
   expect(text).toContain('Release tags (repository tag create --apply) ask the operator in every mode except yolo')
 })
 
-test('Y10: in FDE mode under yolo an apply still needs its dry run; then a bound delete runs with no dialog', async ($, on) => {
+test('Y10: in FDE mode under yolo an apply needs no dry run, and a bound delete runs with no dialog', async ($, on) => {
   const h = harness(on)
+  h.answer = 'throw'
   expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
   expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
   expect(await say($, 'fde', 'on')).toContain('FDE mode on')
-  expect(typeof (await write($, 'ontology object-type-delete', [ONT.rid, 'T', '--apply'])).deny).toBe('string')
-  expect(ran(h, 'ontology object-type-delete')).toEqual([])
-  expect((await write($, 'ontology object-type-delete', [ONT.rid, 'T'])).deny).toBe(undefined)
   expect((await write($, 'ontology object-type-delete', [ONT.rid, 'T', '--apply'])).deny).toBe(undefined)
   expect(h.asked).toEqual([])
   expect(ran(h, 'ontology object-type-delete').filter(call => call.includes('--apply')).length).toBe(1)
+})
+
+test('Y10: in FDE mode under yolo a deploy and a merge run with no ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  expect(await say($, 'profile', 'tester')).toContain('Foundry stack: tester')
+  expect(await say($, 'ontology', ONT.rid)).toContain(ONT.name)
+  expect(await say($, 'fde', 'on')).toContain('FDE mode on')
+  for (const [command, args] of [
+    ['global-branch deploy', [GLOBAL, '--proposal', PROPOSAL, '--apply', '--yes']],
+    ['proposal merge', [PROPOSAL, '--apply', '--yes']],
+    ['proposal accept', [PROPOSAL, '--apply', '--yes']],
+    ['proposal approve', [PROPOSAL, '--apply']],
+  ] as [string, string[]][]) {
+    expect({ command, deny: (await write($, command, args)).deny }).toEqual({ command, deny: undefined })
+    expect(ran(h, `${command} ${args.join(' ')}`)).toEqual([`${command} ${args.join(' ')}`])
+  }
+  expect(h.asked).toEqual([])
 })
 
 test('Y11: a credential command does not run in yolo', async ($, on) => {
@@ -714,18 +734,42 @@ test('Y16: on a command the branch rule does not cover, no spelling of main runs
   expect(checked).toBe(3 * 3 * PREFIXES.length * SUFFIXES.length * 10 * ALL_MODES.length)
 })
 
-for (const mode of ['ask-always', 'allow-edits', 'auto', 'yolo'] as const) {
-  test(`Y19: in ${mode} mode a promotion into main is refused and asks no one`, async ($, on) => {
+const PROMOTIONS_ON_MAIN: [string, string[]][] = [
+  ['global-branch deploy', [GLOBAL, '--proposal', PROPOSAL, '--apply', '--yes']],
+  ['repository pull-request merge', [REPO, '7', '--apply', '--yes']],
+  ['proposal merge', [PROPOSAL, '--apply', '--yes']],
+  ['proposal accept', [PROPOSAL, '--apply', '--yes']],
+  ['proposal approve', [PROPOSAL, '--apply']],
+]
+
+test('Y19: in yolo a promotion into main runs with no ask, even with no one to ask', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const [command, args] of PROMOTIONS_ON_MAIN) {
+    expect({ command, deny: (await write($, command, args)).deny }).toEqual({ command, deny: undefined })
+    expect(ran(h, command)).toEqual([`${command} ${args.join(' ')}`])
+  }
+  expect(h.asked).toEqual([])
+})
+
+// Outside yolo a promotion follows the ladder; this manifest carries no
+// operator_approval marks, so the real-marker ask is yolo-approval.test.ts O12.
+for (const [mode, asks, outcome] of [
+  ['ask-always', 1, 'denied'],
+  ['allow-edits', 0, 'ran'],
+  ['auto', 1, 'denied'],
+] as const) {
+  test(`Y19: in ${mode} mode a promotion ${asks === 1 ? 'asks once, and declined never runs' : 'follows the ladder and runs'}`, async ($, on) => {
     const h = harness(on, mode)
-    for (const [command, args] of [
-      ['global-branch deploy', [GLOBAL, '--proposal', 'ri.branch..proposal.c0000000-0000-4000-8000-0000000000f1', '--apply', '--yes']],
-      ['repository pull-request merge', [REPO, '7', '--apply', '--yes']],
-    ] as [string, string[]][]) {
+    h.answer = 'Decline'
+    for (const [command, args] of PROMOTIONS_ON_MAIN) {
+      const before = h.asked.length
       const wrote = await write($, command, args)
-      expect({ command, denied: typeof wrote.deny === 'string' }).toEqual({ command, denied: true })
+      expect({ command, asks: h.asked.length - before, ran: ran(h, command).length }).toEqual(
+        asks === 1 ? { command, asks: 1, ran: 0 } : { command, asks: 0, ran: 1 },
+      )
+      expect({ command, denied: typeof wrote.deny === 'string' }).toEqual({ command, denied: outcome === 'denied' })
     }
-    expect(h.asked).toEqual([])
-    expect(h.calls.filter(call => !SETUP_CALLS.includes(call))).toEqual([])
   })
 }
 

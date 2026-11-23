@@ -31,32 +31,20 @@ import {
 } from './catalog'
 import {
   adoptable,
-  batchGetArgs,
   branchCreateArgs,
-  COMPASS_FOLDER_RID,
-  foreignRids,
-  goalLabel,
-  takePlan,
   branchRidFrom,
-  contentHash,
   fdeBind,
   fdeBranchName,
   fdeContext,
   fdeHandoff,
   fdeStatus,
-  fileCandidates,
-  hasApply,
+  goalLabel,
   isAgentBranch,
-  namespaceDeny,
-  namespaceScan,
   normalizeFde,
   openProposal,
   parseFdeArgs,
-  planGate,
-  planSignature,
   plainSpace,
-  recordApply,
-  recordPlan,
+  recordWrite,
   spacesOf,
 } from './fde'
 import {
@@ -790,9 +778,7 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 }
 
 // The session's binding, mirrored to the store so the next session can offer /fde resume.
-// A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
-  spaceCache.clear()
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
@@ -800,23 +786,6 @@ async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void>
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
   return normalizeFde(await $.store.get('fdeOpen').catch(() => null))
-}
-
-// rid -> the namespace it is in, for the lookups of one binding. Only a
-// successful batch-get is cached, so a failed one is looked up again, and the
-// operator's answer to a failed check is never remembered.
-const spaceCache = new Map<string, string | null>()
-const SPACE_CACHE_MAX = 10_000
-
-function rememberSpaces(spaces: ReadonlyMap<string, string | null>): void {
-  for (const [rid, spaceRid] of spaces) {
-    // A folder batch-get did not return may exist by the next write: ask again, never remember it as missing.
-    if (spaceRid === null && rid.startsWith(COMPASS_FOLDER_RID)) continue
-    spaceCache.set(rid, spaceRid)
-    if (spaceCache.size <= SPACE_CACHE_MAX) continue
-    const oldest = spaceCache.keys().next().value
-    if (typeof oldest === 'string') spaceCache.delete(oldest)
-  }
 }
 
 /** While bound, the namespace in scope is the session's: nothing may move it. */
@@ -834,51 +803,6 @@ function spacesFrom(envelope: Envelope): FoundryNamespace[] {
 
 const couldNotBind = (ontology: FoundryNamed, namespace: FoundryNamespace, why: string) =>
   `Could not check that the ontology ${ontology.name} is in ${namespace.name} (${why}). FDE mode stays off; try /fde on again.`
-
-/** The RIDs a check could not place, first 20: what the ask and the refusal name. */
-const shownRids = (rids: readonly string[]) =>
-  rids.length <= 20 ? rids.join(', ') : `${rids.slice(0, 20).join(', ')} and ${rids.length - 20} more`
-
-/**
- * Why a write names something outside the bound namespace, or null. A RID this
- * session has not placed costs one batch-get, cached for the binding; a lookup
- * that cannot run asks the operator rather than failing closed, and names what
- * it could not check.
- */
-async function namespaceCheck($: EngineInterface, fde: FdeSession, args: string[], texts: readonly string[]): Promise<string | null> {
-  const scanned = namespaceScan(fde, args, texts)
-  if ('deny' in scanned) return scanned.deny
-  const placed = new Map<string, string | null>()
-  const unchecked: string[] = []
-  const failures: string[] = []
-  for (const rid of scanned.lookup) {
-    if (spaceCache.has(rid)) placed.set(rid, spaceCache.get(rid) ?? null)
-  }
-  for (const argv of batchGetArgs(scanned.lookup.filter(rid => !spaceCache.has(rid)))) {
-    const envelope = await runOrthanc($, argv, fde.profile, 60_000)
-    if (isErrorEnvelope(envelope)) {
-      failures.push(errorsOf(envelope))
-      unchecked.push(...argv.slice(2))
-      continue
-    }
-    const spaces = spacesOf(envelope.data, argv.slice(2))
-    rememberSpaces(spaces)
-    for (const [rid, spaceRid] of spaces) placed.set(rid, spaceRid)
-  }
-  const denied = namespaceDeny(fde, placed)
-  if (denied !== null || failures.length === 0 || fde.namespace === null) return denied
-  const error = failures.join('; ')
-  const shown = shownRids(unchecked)
-  const answer = await $.ui
-    .ask(`FDE mode (${fde.branchName}): the namespace check could not run for ${shown} (${error}). Run this write anyway, unchecked against ${fde.namespace.name}?`, {
-      header: 'FDE',
-      options: ['Run unchecked', 'Do not run'],
-    })
-    .catch(() => null)
-  return answer === 'Run unchecked'
-    ? null
-    : `FDE mode (${fde.branchName}): the namespace check could not run for ${shown} (${error}), and the operator declined or could not be asked, so the call was not run.`
-}
 
 /**
  * The global branch's name when it is an OPEN branch of the ontology, with the
@@ -898,61 +822,21 @@ async function openBranch(
   return typeof fit === 'string' ? { reason: fit, transient: false } : { name: fit.name, proposal: openProposal(envelope.data) }
 }
 
-// FDE mode: pin the call to the session's branch and hold each --apply to its
-// dry run. It only adds checks; the branch rule and the ladder still judge the
-// bound call. Returns the bound input and its plan, or why it is refused.
-const MAX_PINNED_FILE = 20_000_000
-type FdePlan = { signature: string; isApply: boolean; command: string; files: string[] }
-
-async function filesSignature(
-  $: EngineInterface,
-  fde: FdeSession,
-  command: string,
-  args: string[],
-  files: { required: string[]; optional: string[] },
-): Promise<{ signature: string; texts: string[] } | { deny: string }> {
-  const hashes: Record<string, string> = {}
-  const texts: string[] = []
-  for (const file of [...files.required, ...files.optional]) {
-    // Only regular files are read, and only up to a size, so a device or FIFO
-    // argument cannot hang the gate.
-    const stat = await $.fs.stat(file).catch(() => null)
-    if (stat !== null && stat.kind === 'file' && stat.size > MAX_PINNED_FILE) {
-      return { deny: `FDE mode: ${file} is over ${MAX_PINNED_FILE / 1_000_000} MB, too large to check against its dry run, so the call was not run.` }
-    }
-    const text = stat?.kind === 'file' ? await $.fs.read(file).then(String).catch(() => null) : null
-    if (text === null && files.required.includes(file)) return { deny: `FDE mode: could not read ${file} to check it against its dry run, so the call was not run.` }
-    if (text === null) continue
-    const foreign = foreignRids(fde, text)
-    if (foreign) return { deny: `FDE mode: ${foreign}` }
-    hashes[file] = await contentHash(text)
-    texts.push(text)
-  }
-  return { signature: planSignature(command, args, hashes), texts }
-}
-
+// FDE mode binds the call to the session's branch (added when an ontology write
+// names none) and refuses only a write aimed directly at main or master. The
+// branch rule and the ladder still judge the bound call. Returns the bound
+// input, and the command to record when it runs as a mutation.
 async function fdeGate(
   $: EngineInterface,
   fde: FdeSession,
   input: Record<string, unknown>,
   manifest: readonly ManifestCommand[],
-): Promise<{ deny: string } | { input: Record<string, unknown>; plan: FdePlan | null }> {
+): Promise<{ deny: string } | { input: Record<string, unknown>; ran: string | null }> {
   const resolved = resolveOrthancCommand(asString(input.command), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
   const isMutation = resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest) === 'mutation'
-  const bound = fdeBind(fde, resolved.path, resolved.args, (await currentScope($)).profile, isMutation)
+  const bound = fdeBind(fde, resolved.path, resolved.args, isMutation)
   if ('deny' in bound) return bound
-  const next = { ...input, command: resolved.path, args: bound.args }
-  if (!isMutation) return { input: next, plan: null }
-  const files = fileCandidates(bound.args, await sessionCwd($), await homeDir($))
-  const pinned = await filesSignature($, fde, resolved.path, bound.args, files)
-  if ('deny' in pinned) return pinned
-  const signature = pinned.signature
-  const isApply = hasApply(bound.args)
-  const gated = planGate(fde, signature, isApply)
-  if (gated) return { deny: gated }
-  const outside = await namespaceCheck($, fde, bound.args, pinned.texts)
-  if (outside !== null) return { deny: outside }
-  return { input: next, plan: { signature, isApply, command: resolved.path, files: [...files.required, ...files.optional] } }
+  return { input: { ...input, command: resolved.path, args: bound.args }, ran: isMutation ? resolved.path : null }
 }
 
 // A /fde from one of these is the person's own typing: the terminal and Remote
@@ -1091,7 +975,8 @@ async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigi
   return [
     fdeStatus(fde),
     ...(proposal ? [`It has an open proposal (${proposal}): every write here changes what its reviewers see.`] : []),
-    'Ontology writes in this session now go to this branch only, and each --apply needs its dry run first.',
+    'Ontology writes in this session that name no branch go to this one. FDE mode refuses only a write aimed directly at main or master; ' +
+      'everything else on branches — proposals, deploys, merges — the branch rule and the approval ladder judge as usual.',
   ].join('\n')
 }
 
@@ -1636,15 +1521,15 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     return { result: serialize(failed), context: ['orthanc_cli refused the call before it ran; read the error.'] }
   }
   const fde = tool === ORTHANC_CLI ? await fdeState($) : null
-  let plan: FdePlan | null = null
+  let fdeRan: string | null = null
   if (fde !== null) {
     const gated = await fdeGate($, fde, input, manifest)
     if ('deny' in gated) return gated
     input = gated.input
-    plan = gated.plan
+    fdeRan = gated.ran
   }
   // A call over the cap is refused here, before the ladder can ask the operator
-  // to approve it and before an apply takes its dry run. executeCli checks again.
+  // to approve it. executeCli checks again.
   if (tool === ORTHANC_CLI) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
     const command = manifest.find(entry => entry.path === resolved.path)
@@ -1657,23 +1542,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
       return { result: serialize(overCapFailure(command, wait)), context: ['orthanc_cli refused the call before it ran; read the error for a way that fits.'] }
     }
   }
-  // An apply takes its dry run now, in one step, so a parallel twin finds it gone.
-  // If the call then does not run, or fails, the plan is put back.
-  if (plan?.isApply) {
-    const signature = plan.signature
-    let taken = false
-    await update($, fdeAtom, current => {
-      if (current === null) return current
-      const took = takePlan(current, signature)
-      taken = took.taken
-      return took.fde
-    })
-    if (!taken) return { deny: planGate({ ...fde!, plans: [] }, signature, true)! }
-  }
-  let executed = false
   let failed = false
-  let notRun = false
-  try {
   const branch = (await $.state.get(BRANCH)).value ?? null
   const classification = classifyCall(tool, input, manifest, branch, await storedBranches($, tool, input, manifest))
   note.outcome = undefined
@@ -1706,18 +1575,12 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     }
   }
 
-  // The ladder may have waited on the operator: the files the call reads must still be the planned ones.
-  if (plan !== null && plan.files.length > 0) {
-    const args = Array.isArray(input.args) ? input.args.map(String) : []
-    const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
-    if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
-  }
-  executed = true
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
-  if (plan !== null && !failed) {
-    const done = plan
+  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), served.out)) : await next(e)
+  // A bound mutation that ran goes into the session's record, which the handoff reports.
+  if (fdeRan !== null && !failed) {
+    const command = fdeRan
     let latest: FdeSession | null = null
-    await update($, fdeAtom, current => (latest = current === null ? null : done.isApply ? recordApply(current, done.command, done.signature, new Date()) : recordPlan(current, done.signature)))
+    await update($, fdeAtom, current => (latest = current === null ? null : recordWrite(current, command, new Date())))
     if (latest !== null) await $.store.set('fdeOpen', latest)
   }
   if (classification?.kind === 'branch-creation' && classification.command === 'global-branch create') {
@@ -1726,12 +1589,6 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, rid ?? classification.proposedName ?? null)
   }
   return ran
-  } finally {
-    if (plan?.isApply && (!executed || notRun)) {
-      const signature = plan.signature
-      await update($, fdeAtom, current => (current === null ? null : recordPlan(current, signature))).catch(() => undefined)
-    }
-  }
 }
 
 export const register: Register = on => {
@@ -1921,7 +1778,7 @@ export const register: Register = on => {
           <Text color="yellow" bold>
             FDE
           </Text>
-          <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName}${fde.namespace ? ` · ${fde.namespace.name}` : ''} · ${fde.applied.length} applied · ${fde.plans.length} planned · /fde end hands off`}</Text>
+          <Text dimColor>{` ${goalLabel(fde.goal)} · ${fde.branchName}${fde.namespace ? ` · ${fde.namespace.name}` : ''} · ${fde.applied.length} writes · /fde end hands off`}</Text>
         </Box>
       </Box>
     )

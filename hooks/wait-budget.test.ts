@@ -43,8 +43,9 @@
 //  W14 A call over the cap goes up the approval ladder first: the operator
 //      approves a call that is then refused.
 //  W15 A refusal that never reached orthanc (over the cap, a credential
-//      command, an unknown command) counts as maybe-run, so FDE mode drops
-//      the dry run the apply was taken from.
+//      command, an unknown command) counts as maybe-run, so a caller that
+//      treats failures as "may have landed" over-reports (FDE mode's dry-run
+//      hold, before 0.6.5, was such a caller).
 //  W16 An over-cap call caused by --publish-grace or --interval is told to
 //      pass a smaller --timeout.
 //  W17 --detach=false or --apply=false counts as passed; a bad --timeout
