@@ -1632,21 +1632,25 @@ export function rulesWriteReason(tool: string, input: Record<string, unknown>, c
 // dir: `$XDG_CONFIG_HOME/foundry`, else `~/.config/foundry` (src/profile_settings.rs,
 // profiles.rs config_dir), deliberately outside the credential store. The directory
 // is the unit that matters, because the obvious ways to erase a mark name no file at
-// all: `rm -rf <dir>`, `mv <dir> /tmp/x`, `find ~ -name 'profile-*.json' -delete`, a
-// tar or rsync unpacked over it. Both answers below are anchored on the resolved
-// config directory, and the same file name under any other directory is left alone.
-// A write to the filesystem. Matched per command segment, so a verb counts where
-// its target is: `git` alone is not one (it writes the repository it runs in, not the
-// path named beside it), `git clean` and `git checkout` are.
+// all: `rm -rf <dir>`, `mv <dir> /tmp/x`, `rm -rf ~/.config`,
+// `rm ~/.config/*/profile-settings.json`, `find ~ -name 'foundr*' -delete`, a tar or
+// rsync unpacked over it. So the guard anchors on the resolved config directory and on
+// every directory above it, and a path token may carry a glob on any segment. The same
+// file name under any other directory is left alone.
+// A write to the filesystem. Matched per command segment, so a verb counts where its
+// target is: `git` alone is not one (it writes the repository it runs in, not the path
+// named beside it), `git clean` and `git checkout` are. Neither is `find` or `xargs`,
+// which reach the store only through `-delete` or `-exec`: a search that merely names a
+// `profile-*` pattern is a read (`find ~ -name 'profile-*.png'`).
 const SHELL_WRITES_STORE =
-  /(\b(?:rm|rmdir|mv|unlink|shred|truncate|dd|tee|install|touch|chmod|chown|chattr|ln|rsync|scp|sftp|tar|cp|unzip|cpio|ditto|gzip|bzip2|xz|zstd|zip|7z|rar|sed|patch|perl|python[0-9.]*|ruby|node|bun|deno|php|awk|lua|swift|osascript|xargs|find)\b|-delete\b|-exec(?:dir)?\b|\bgit\s+(?:clean|checkout|restore|apply|reset)\b)/i
+  /(\b(?:rm|rmdir|mv|unlink|shred|truncate|dd|tee|install|touch|chmod|chown|chattr|ln|rsync|scp|sftp|tar|cp|unzip|cpio|ditto|gzip|bzip2|xz|zstd|zip|7z|rar|sed|patch|perl|python[0-9.]*|ruby|node|bun|deno|php|awk|lua|swift|osascript)\b|-delete\b|-exec(?:dir)?\b|\bgit\s+(?:clean|checkout|restore|apply|reset)\b)/i
 // `>` writes only where its target is: `cat <store>/profiles.json > /tmp/copy.json`
 // is a read out, `echo x > <store>/profile-settings.json` is a write in.
 const REDIRECTS_TO = />{1,2}\s*("[^"]*"|'[^']*'|[^\s;|&]+)/g
 const MARK_FILE_NAMES = ['profile-settings.json', 'profile-settings.lock']
-// A mark file named by a pattern from any root: `find ~ -name 'profile-*.json' -delete`.
-const SHELL_MARK_NAMED = /(?:profile-settings\.(?:json|lock)|profile-[^\s]*)/i
-const SHELL_SEARCES = /\b(?:find|xargs|rm|rmdir|unlink|shred|truncate|mv)\b/i
+// A search that picks files by name or path pattern, rather than by the directory it
+// was pointed at.
+const NAME_LIMITED = /(?:^|\s)-(?:i?name|path|i?regex)(?:\s|=|$)/i
 
 /** `foundr*` and `found?y` name `foundry` once the shell expands them. */
 function globMatches(pattern: string, name: string): boolean {
@@ -1677,39 +1681,65 @@ function expandedCommand(command: string, home: string, configHome: string): str
   })
 }
 
-/** The directories a command works in: the session's, and each path token and its parent. */
+/** The directories a command works in: the session's, the target of any `cd` it makes,
+ * and the parent of every path it names. */
 function mentionedDirs(tokens: readonly string[], cwd: string, home: string): Set<string> {
   const dirs = new Set<string>([cwd.replace(/\/+$/, '') || '/'])
-  for (const token of tokens) {
-    if (!token.includes('/')) continue
-    const found = normalizedPath(token.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
+  const add = (path: string) => {
+    const found = normalizedPath(path.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
     dirs.add(found)
     const cut = found.lastIndexOf('/')
     if (cut > 0) dirs.add(found.slice(0, cut))
   }
+  tokens.forEach((token, index) => {
+    if (token === 'cd') {
+      const target = tokens[index + 1]
+      if (target !== undefined && !target.startsWith('-')) add(target)
+      return
+    }
+    if (token.includes('/')) add(token)
+  })
   return dirs
 }
 
-/** Whether a token names the mark store, something under it, or a name inside it. A
- * bare `foundry` or `profile-settings.json` counts only where the command (or the
- * session) is standing in the directory that holds it. */
+/** Whether a path pattern names the store, something under it, or a directory holding
+ * it: `rm -rf ~/.config` clears a mark as surely as `rm -rf ~/.config/foundry` does.
+ * Compared segment by segment, so the glob may sit on any one of them
+ * (`rm ~/.config/found?y`, `rm -rf ~/.config/foundr*`, a pattern one segment deeper
+ * than the store). A pattern shorter than the
+ * store path is a directory above it, which is exactly what is refused. */
+function pathReachesStore(pattern: string, dir: string): boolean {
+  const parts = pattern.split('/').filter(part => part !== '' && part !== '.')
+  const target = dir.split('/').filter(part => part !== '' && part !== '.')
+  if (parts.length === 0 || target.length === 0) return false
+  const depth = Math.min(parts.length, target.length)
+  for (let index = 0; index < depth; index += 1) if (!globMatches(parts[index]!, target[index]!)) return false
+  return true
+}
+
+/** Whether a bare token (no directory in it) can be the store directory or one of its
+ * mark files: `foundr*`, `profile-s*`, `profile-settings.json`. */
+function bareNamesStore(token: string, dir: string): boolean {
+  const storeBase = dir.slice(dir.lastIndexOf('/') + 1)
+  return globMatches(token, storeBase) || MARK_FILE_NAMES.some(name => globMatches(token, name))
+}
+
+/** Where a token was written from: an absolute or `$`-prefixed path stands on its own;
+ * a relative one resolves at each directory the command says it is working in, which is
+ * how `cd ~ && rm -rf .config` names `~/.config`. */
+function storePaths(token: string, cwd: string, home: string, mentioned: Set<string>): string[] {
+  if (/^(?:\/|~|\$)/.test(token)) return [normalizedPath(token, cwd, home)]
+  return [...mentioned, cwd].map(where => normalizedPath(`${where.replace(/\/+$/, '')}/${token}`, cwd, home))
+}
+
+/** Whether one token reaches the mark store, anything under it, or a directory holding
+ * it. A name with no directory in it counts only where the command (or the session)
+ * stands, so `rm /tmp/profile-settings.json` and `rm -rf $STORE` (an unknown variable)
+ * stay free. */
 function namesStore(token: string, cwd: string, home: string, dir: string, mentioned: Set<string>): boolean {
   const path = token.replace(/\\/g, '/').replace(/\/+$/, '')
   if (path === '') return false
-  const found = normalizedPath(path, cwd, home)
-  if (found === dir || found.startsWith(`${dir}/`)) return true
-  const cut = found.lastIndexOf('/')
-  const base = found.slice(cut + 1)
-  if (base === '') return false
-  const parent = found.slice(0, cut + 1) || '/'
-  const dirParent = dir.slice(0, dir.lastIndexOf('/'))
-  const storeBase = dir.slice(dir.lastIndexOf('/') + 1)
-  const bare = !path.includes('/')
-  const contextOk = bare
-    ? mentioned.has(dir) || mentioned.has(dirParent)
-    : parent === `${dir}/` || parent === `${dirParent}/` || parent.startsWith(`${dir}/`)
-  if (!contextOk) return false
-  return globMatches(base, storeBase) || MARK_FILE_NAMES.some(file => globMatches(base, file))
+  return storePaths(path, cwd, home, mentioned).some(where => pathReachesStore(where, dir))
 }
 
 export const PROFILE_STORE_WRITE_REASON =
@@ -1722,10 +1752,13 @@ const profileStoreDir = (home: string, configHome = ''): string =>
 /**
  * Why a call must not write into orthanc's config dir, or null. The read-only mark
  * lives only in `profile-settings.json` there, so anything that rewrites or removes
- * that file (or the directory holding it) clears a mark and skips both gates. A verb
- * has to meet the store in the same command segment, so reads that merely name it
- * (`cat`, `ls`, `jq`, `git log --grep`) and a redirect out to another directory are
- * left alone. A copy of the directory is refused: `cp a b` and `cp b a` are one shape.
+ * that file (or the directory holding it, or a directory above it) clears a mark and
+ * skips both gates. A verb has to meet the store in the same command segment, so reads
+ * that merely name it (`cat`, `ls`, `jq`, `git log --grep`, a `find` with no `-delete`)
+ * and a redirect out to another directory are left alone. A copy of the directory is
+ * refused: `cp a b` and `cp b a` are one shape. A path built at run time inside an
+ * interpreter (`python3 -c "os.remove(os.path.join(...))"`) is not caught: this reads a
+ * command line, not a shell.
  */
 export function profileStoreWriteReason(
   tool: string,
@@ -1735,34 +1768,38 @@ export function profileStoreWriteReason(
   configHome = '',
 ): string | null {
   const dir = profileStoreDir(home, configHome)
-  const inside = (path: string) => {
-    const found = normalizedPath(path.replace(/\\/g, '/'), cwd, home).replace(/\/+$/, '')
-    return found === dir || found.startsWith(`${dir}/`)
-  }
+  const inside = (path: string) => pathReachesStore(normalizedPath(path.replace(/\\/g, '/'), cwd, home), dir)
   const paths = [input.file_path, input.notebook_path, input.path].filter((value): value is string => typeof value === 'string')
   if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
   if (tool !== 'Bash' || typeof input.command !== 'string') return null
   const command = expandedCommand(input.command, home, configHome)
   const tokens = command.split(/[\s'"`;|&()<>=,]+/).filter(Boolean)
   const mentioned = mentionedDirs(tokens, cwd, home)
-  const names = (segment: string) => segment.split(/[\s'"`;|&()<>=,]+/).some(token => namesStore(token, cwd, home, dir, mentioned))
+  const names = (segment: string) => {
+    const parts = segment.split(/[\s'"`;|&()<>=,]+/)
+    // A search limited by a name or path pattern reaches the mark only when that
+    // pattern can name it: `find ~ -name 'profile-*.png' -delete` deletes someone
+    // else's screenshots and leaves the mark alone, `find ~ -name 'profile-*.json'
+    // -delete` and `find ~ -name 'foundr*' -delete` do not.
+    if (NAME_LIMITED.test(segment)) return parts.some(token => bareNamesStore(token, dir)) && parts.some(token => namesStore(token, cwd, home, dir, mentioned))
+    return parts.some(token => namesStore(token, cwd, home, dir, mentioned))
+  }
   const writes = (segment: string) =>
     SHELL_WRITES_STORE.test(segment) ||
     [...segment.matchAll(REDIRECTS_TO)].some(([, target]) => namesStore((target ?? '').replace(/^["']|["']$/g, ''), cwd, home, dir, mentioned))
+  // One rule, per segment. It covers the directory itself, anything under it, a
+  // directory above it (`rm -rf ~/.config`), a glob on any segment
+  // (`rm ~/.config/*/profile-settings.json`), the store reached from a search root
+  // above it (`find ~ -name profile-*.json -delete`) and a relative name after a move
+  // into its parent (`cd ~ && rm -rf .config`).
   if (command.split(/&&|\|\||;|\n|\|/).some(segment => names(segment) && writes(segment))) return PROFILE_STORE_WRITE_REASON
-  // The store reached by a search pattern rooted above it: `find ~ -name 'profile-*.json' -delete`.
+  // A pattern naming the mark file or the store directory, with the verb in another
+  // segment: `find ~ -name profile-settings.json | xargs -d '\n' rm`.
   if (
-    SHELL_MARK_NAMED.test(command) &&
-    SHELL_SEARCES.test(command) &&
-    tokens.some(token => {
-      const found = normalizedPath(token.replace(/\\/g, '/').replace(/\/+$/, ''), cwd, home)
-      return found !== '/' && (found === dir || found.startsWith(`${dir}/`) || dir.startsWith(found))
-    })
+    tokens.some(token => bareNamesStore(token, dir)) &&
+    SHELL_WRITES_STORE.test(command) &&
+    tokens.some(token => storePaths(token, cwd, home, mentioned).some(where => pathReachesStore(where, dir)))
   )
-    return PROFILE_STORE_WRITE_REASON
-  // `cd <dir> && rm profile-settings.json`, and the same with the session in that dir:
-  // the working directory says which file, and a bare name elsewhere stays free.
-  if (SHELL_MARK_NAMED.test(command) && SHELL_WRITES_STORE.test(command) && (mentioned.has(dir) || inside(cwd)))
     return PROFILE_STORE_WRITE_REASON
   return null
 }

@@ -599,6 +599,47 @@ test('Q15: a glob, a variable or a cd to the parent cannot reach the mark store'
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
 })
 
+// Review round 4: the guard is anchored on the store directory, but marks are also
+// cleared by removing a directory *above* it, and by a glob on any path segment rather
+// than the last one. Both are refused. A search that picks files by name is a read
+// unless its pattern can name the mark or the store directory.
+test('Q16: removing a parent directory or globbing a middle segment clears nothing', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  for (const command of [
+    // The directory above the store, in the shapes a plain person reaches for.
+    'rm -rf ~/.config',
+    'mv ~/.config ~/.config.bak',
+    'cd ~ && rm -rf .config',
+    'rm -rf ~',
+    // A glob on any segment, not only the last one.
+    'rm ~/.config/*/profile-settings.json',
+    'rm ~/.config/f*/profile-s*',
+    'perl -e \'unlink glob("~/.config/found*/p*")\'',
+    // A search rooted above the store whose pattern can name the mark or the directory.
+    "find ~ -name 'foundr*' -delete",
+    "find ~/.config -name 'p*-settings.json' -delete",
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command)
+  }
+  expect(denied).toEqual([])
+  // Left alone: a search whose pattern cannot name the mark, however broad its root;
+  // work in a sibling directory of the store; a read of the directory itself.
+  for (const command of [
+    'find ~ -name "profile-*.png"',
+    'find ~ -name "profile-*.png" -delete',
+    'find ~/projects -name profile-*.png -delete',
+    'find ~/.config/foundry -name profile-settings.json -print',
+    'ls -la ~/.config',
+    'du -sh ~/.config',
+    'rm -rf ~/project',
+    'mv ~/.bashrc /tmp/x',
+    'cd ~/project && rm -rf dist',
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+})
+
 test('Q15: the stack name in the question cannot put a line in front of the operator', async ($, on) => {
   const h = harness(on, 'yolo')
   // The shape this ask exists for: a manifest that does not mark the clear.

@@ -157,11 +157,19 @@ clears the mark, asks the operator in every mode, `yolo` included, whoever the
 mark is on: the question names the stack the call names. The plugin writes
 nothing into orthanc's config directory (`~/.config/foundry`, or
 `$XDG_CONFIG_HOME/foundry`), where `profile-settings.json` keeps the mark: file
-writes there are refused, as is any shell command that names the directory and
-can change files (`rm -rf`, `mv`, `find -delete`, a glob, an unpacked tar, even a
-`cp` of it out, which is the same shape to anything short of a shell parser) —
-removing that file gets past both gates, so reading it (`cat`, `ls`, `jq`) is
-fine and touching it is the operator's. A stack `configure list` says nothing about is unknown, not
+writes there are refused, and so is any shell command that can change those files
+or remove a directory holding them — `rm -rf` of the directory or of a directory
+above it (`~/.config`, `~`), `mv`, `find ... -delete` whose name pattern can match
+the mark or the directory, a glob on any part of the path
+(`rm ~/.config/*/profile-settings.json`), a variable the command sets to the path,
+a relative name after `cd ~`, an unpacked tar, even a `cp` of the directory out
+(`cp a b` and `cp b a` are the same shape to anything short of a shell parser).
+Removing that file gets past both gates. Reads are left alone: `cat`, `ls`, `jq`, a
+`find` with no `-delete`, and a search that picks files by name
+(`find ~ -name "profile-*.png"`) all run. One limit is stated plainly: the guard
+reads the command line, not a shell, so a path built at run time inside a script
+(`python3 -c "os.remove(os.path.join(os.environ['HOME'], '.config', 'foundry', ...))"`)
+is not caught. A stack `configure list` says nothing about is unknown, not
 writable: the write goes to the operator and never runs blind, while reads and
 plans are not held up. `/profile` and `orthanc_help` say which stacks are
 read-only. Outside FDE mode `/namespace` steers discovery only; the gate does not
