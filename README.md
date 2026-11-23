@@ -41,7 +41,9 @@ says so instead of falling back to REST.
 - **An approval ladder** on every Foundry mutation, through the tools, Bash or a
   Palantir MCP server: `ask-always`, `allow-edits`, `auto` (a Haiku guard judges
   each mutation) and `yolo`. Outside `yolo`, a destructive change asks, as do
-  release tags and protected branches, and a call repeated three times is blocked. A
+  release tags, protected branches and an AI FDE run (`ai-fde run --apply`, whose
+  worker writes with its own tools for the whole run; `yolo` runs it with no ask),
+  and a call repeated three times is blocked. A
   change is destructive when its command name, or one of its flags, says something is
   left gone or overwritten — `marketplace installation uninstall`,
   `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
