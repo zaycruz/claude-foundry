@@ -478,25 +478,33 @@ function argsHaveForce(command: string, args: readonly string[]): boolean {
 const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
 const QUESTION_ARGS_MAX = 600
 
-/** The every-mode question for a call whose manifest entry carries
- * `operator_approval`, or null. `{when_all_flags: [...]}` asks when every
- * listed flag is given (argsNameFlag: any case, `=value`, any order);
- * `"always"` asks on every call. Anything else is unreadable and asks on every
- * call: a condition the guard cannot read never lets a call through. */
-/** `{when_all_flags: [flags]}`, nothing else. ("always" is handled before.) */
-function approvalReadable(value: unknown): boolean {
-  if (value === 'always') return true
+/** An `operator_approval` value the guard reads: `"always"` or
+ * `{when_all_flags: [flags]}`, nothing else. Anything else is null: the guard
+ * then asks on every call (operatorApprovalQuestion), and the manifest
+ * snapshot test fails (orthanc-snapshot.test.ts). */
+export type ApprovalCondition = { kind: 'always' } | { kind: 'flags'; flags: string[] }
+
+export function readApprovalCondition(value: unknown): ApprovalCondition | null {
+  if (value === 'always') return { kind: 'always' }
   const condition = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
   const flags = condition?.when_all_flags
-  return (
+  if (
     condition !== null &&
     Object.keys(condition).length === 1 &&
     Array.isArray(flags) &&
     flags.length > 0 &&
     flags.every(flag => typeof flag === 'string' && APPROVAL_FLAG.test(flag))
-  )
+  ) {
+    return { kind: 'flags', flags: (flags as string[]).map(flag => flag.toLowerCase()) }
+  }
+  return null
 }
 
+/** The every-mode question for a call whose manifest entry carries
+ * `operator_approval`, or null. `{when_all_flags: [...]}` asks when every
+ * listed flag is given (argsNameFlag: any case, `=value`, any order);
+ * `"always"` asks on every call. Anything else is unreadable and asks on every
+ * call: a condition the guard cannot read never lets a call through. */
 export function operatorApprovalQuestion(
   path: string,
   args: readonly string[],
@@ -509,11 +517,12 @@ export function operatorApprovalQuestion(
   const shown = JSON.stringify(args)
   const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
   const ask = (why: string) => `'${path}' ${cut} weakens a governance control: ${why} The operator approves it.`
-  if (value === 'always') return ask("Orthanc's agent manifest marks it operator_approval.")
-  if (!approvalReadable(value)) {
+  const condition = readApprovalCondition(value)
+  if (condition === null) {
     return ask("Orthanc's agent manifest marks it operator_approval in a form the Foundry guard cannot read, so it asks on every call.")
   }
-  const listed = ((value as Record<string, unknown>).when_all_flags as string[]).map(flag => flag.toLowerCase())
+  if (condition.kind === 'always') return ask("Orthanc's agent manifest marks it operator_approval.")
+  const listed = condition.flags
   if (!listed.every(flag => argsNameFlag(args, [flag]))) return null
   return ask(`Orthanc's agent manifest marks it operator_approval when ${listed.join(' ')} are given.`)
 }
@@ -546,17 +555,38 @@ function oneWorkBranchFlag(args: readonly string[], names: readonly string[]): b
   return values.length === 1 && WORK_BRANCH_RID.test(values[0]!)
 }
 
+/** An `operator_approval_scope` value the guard reads (orthanc CONTRACTS.md,
+ * SRC-15): `"always"`, `"work-branch"`, or `{work_branch_flag, flag_aliases?}`
+ * with each flag a `--long-flag`. Anything else, a missing scope included, is
+ * null: the guard reads it as `"always"` and asks, and the manifest snapshot
+ * test fails (orthanc-snapshot.test.ts). */
+export type ApprovalScope = { kind: 'always' } | { kind: 'work-branch' } | { kind: 'flag'; flags: string[] }
+
+export function readApprovalScope(scope: unknown): ApprovalScope | null {
+  if (scope === 'always') return { kind: 'always' }
+  if (scope === 'work-branch') return { kind: 'work-branch' }
+  if (typeof scope !== 'object' || scope === null || Array.isArray(scope)) return null
+  const record = scope as Record<string, unknown>
+  if (!Object.keys(record).every(key => key === 'work_branch_flag' || key === 'flag_aliases')) return null
+  const flag = record.work_branch_flag
+  const aliases = record.flag_aliases ?? []
+  if (typeof flag !== 'string' || !SCOPE_FLAG.test(flag)) return null
+  if (!Array.isArray(aliases) || !aliases.every(alias => typeof alias === 'string' && SCOPE_FLAG.test(alias))) return null
+  return { kind: 'flag', flags: [flag, ...(aliases as string[])] }
+}
+
 /** True only when the entry's operator_approval_scope (orthanc #118) shows
  * that this call lands on one global work branch, never on main:
  * `"work-branch"` with a global branch RID among the positionals and nothing
  * naming main, or `{work_branch_flag, flag_aliases?}` with that flag (or an
- * alias) holding one global branch RID. A missing or unreadable scope, or an
- * unreadable operator_approval, is false: yolo then asks. */
+ * alias) holding one global branch RID. `"always"`, a missing or unreadable
+ * scope, or an unreadable operator_approval, is false: yolo then asks. */
 export function approvalOnWorkBranch(path: string, args: readonly string[], manifest: readonly ManifestCommand[]): boolean {
   const entry = manifest.find(found => found.path === path)
-  if (entry === undefined || !approvalReadable(entry.operatorApproval)) return false
-  const scope = entry.operatorApprovalScope
-  if (scope === 'work-branch') {
+  if (entry === undefined || readApprovalCondition(entry.operatorApproval) === null) return false
+  const scope = readApprovalScope(entry.operatorApprovalScope)
+  if (scope === null || scope.kind === 'always') return false
+  if (scope.kind === 'work-branch') {
     // Every word that is not a flag counts, whatever flag comes before it: the
     // guard does not know which flags take a value (`--yes main`).
     const words = args.filter(arg => !unquote(arg).startsWith('-'))
@@ -566,14 +596,7 @@ export function approvalOnWorkBranch(path: string, args: readonly string[], mani
       !flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue)
     )
   }
-  if (typeof scope !== 'object' || scope === null || Array.isArray(scope)) return false
-  const record = scope as Record<string, unknown>
-  if (!Object.keys(record).every(key => key === 'work_branch_flag' || key === 'flag_aliases')) return false
-  const flag = record.work_branch_flag
-  const aliases = record.flag_aliases ?? []
-  if (typeof flag !== 'string' || !SCOPE_FLAG.test(flag)) return false
-  if (!Array.isArray(aliases) || !aliases.every(alias => typeof alias === 'string' && SCOPE_FLAG.test(alias))) return false
-  return oneWorkBranchFlag(args, [flag, ...(aliases as string[])])
+  return oneWorkBranchFlag(args, scope.flags)
 }
 
 // `main`, `refs/heads/main`, `+refs/heads/main`, `:main`, `./main/` all name main.

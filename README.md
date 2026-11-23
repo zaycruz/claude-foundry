@@ -117,6 +117,13 @@ orthanc --version
 orthanc onboarding        # skipped by the installer if a profile already exists
 ```
 
+Each plugin release names the orthanc versions it supports: `min_orthanc` and
+`orthanc_checked` in `.claude-plugin/plugin.json`. When the installed orthanc is
+older or newer, the session's first lines say so and name the command to run
+(`orthanc update --apply`, or `claude plugin update foundry@claude-foundry`).
+Reads still run either way, and writes the manifest marks for approval still ask.
+How a release moves these fields: [docs/RELEASE.md](docs/RELEASE.md).
+
 The mod runs `orthanc` from `PATH` (or `ORTHANC_BIN`). Add more stacks with
 `orthanc configure profile create`. Tokens stay in the macOS Keychain and never
 pass through Claude: `/auth` prints the command for you to run in your own
@@ -314,7 +321,13 @@ and never changes what a tool call does.
 ```
 claude plugin validate .
 claude plugin test .
+node scripts/orthanc-tie.mjs check
 ```
+
+`orthanc-tie.mjs check` fails when plugin.json, marketplace.json,
+`hooks/orthanc-tie.ts` and the manifest snapshot disagree (a hooks module cannot
+read plugin.json, so `orthanc-tie.ts` mirrors it). `validate` warns that
+`min_orthanc` and `orthanc_checked` are unknown fields; Claude Code ignores them.
 
 `hooks/*.test.ts` cover the ladder, parity, the context view and trace export. For an E2E run
 against your own stack, record real Orthanc output and replay it:
