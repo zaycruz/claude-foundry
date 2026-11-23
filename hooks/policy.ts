@@ -144,6 +144,19 @@ const POSITIONAL_BRANCH_WRITES = new Set([
 // ladder, and a plan (no --apply) starts no worker. FND-24.
 const AGENT_RUNS = new Set(['ai-fde run'])
 
+/** True for an applied AI FDE run, read from the resolved path and the args
+ * together. Orthanc 0.7.11 lists no ai-fde command unless ORTHANC_ENABLE_AI_FDE
+ * is set, so a call spelled `command: 'ai-fde', args: ['run', …]` resolves only
+ * to `ai-fde`: then any `run` word counts, which over-asks rather than letting a
+ * run through unasked (review of #38). */
+function isAgentRun(path: string, args: readonly string[]): boolean {
+  if (!argsNameFlag(args, ['--apply'])) return false
+  const lowered = path.trim().toLowerCase()
+  if (AGENT_RUNS.has(lowered)) return true
+  if (lowered !== 'ai-fde') return false
+  return args.some(arg => unquote(arg).trim().toLowerCase() === 'run')
+}
+
 const PROMOTIONS = new Set(['proposal merge', 'proposal accept', 'proposal approve', 'global-branch deploy', 'repository pull-request merge'])
 export const BRANCH_FLAGS = ['--branch', '-b']
 const BRANCH_VALUE = /^[A-Za-z0-9._/-]+$/
@@ -1349,7 +1362,7 @@ function orthancClassification(
       ...(approval !== null ? { operatorApproval: approval } : {}),
       ...(approvalOnBranch ? { operatorApprovalOnWorkBranch: true as const } : {}),
       ...(PROMOTIONS.has(command) ? { promotion: true as const } : {}),
-      ...(AGENT_RUNS.has(command) && argsNameFlag(args, ['--apply']) ? { agentRun: true as const } : {}),
+      ...(isAgentRun(command, args) ? { agentRun: true as const } : {}),
       ...(refused ? { error: refused } : {}),
     }
   }

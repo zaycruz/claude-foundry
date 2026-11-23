@@ -20,6 +20,7 @@
 //  A6 the direct-main rule does not move: a write naming main or master asks in
 //     yolo too, and with no one to ask it does not run.
 //  A7 Bash still runs no ai-fde run, in any mode.
+//  A8 so does an ai-fde run the manifest does not list, however the path is split.
 // Synthetic stack and RIDs only.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
@@ -72,6 +73,24 @@ test('A1 A2 A3: ai-fde run asks in every mode but yolo, where it runs', () => {
   const asked = ladderDecision('allow-edits', classifyCall(CLI, { command: 'ai-fde run', args: RUNS[1]! }, MANIFEST, 'agent/x')!, approve)
   expect(asked.reason).toContain("'ai-fde run'")
   expect(asked.reason).toContain('every mode but yolo')
+})
+
+// Review of #38: orthanc 0.7.11 lists no ai-fde command unless ORTHANC_ENABLE_AI_FDE
+// is set, so on that manifest `ai-fde run` resolves no entry, and a caller that
+// splits the path (`command: 'ai-fde', args: ['run', …]`) must still be asked.
+test('A8: an ai-fde run the manifest does not list still asks outside yolo, however the path is split', () => {
+  const unlisted = MANIFEST.filter(entry => !entry.path.startsWith('ai-fde'))
+  for (const [command, args] of [
+    ['ai-fde', ['run', 'build the pipeline', '--apply']],
+    ['ai-fde', ['RUN', 'build the pipeline', '--apply']],
+    ['ai-fde run', ['build the pipeline', '--apply']],
+  ] as [string, string[]][]) {
+    const outcomes = MODES.map(mode => {
+      const classification = classifyCall(CLI, { command, args }, unlisted, 'agent/x')
+      return classification === null ? 'read' : ladderDecision(mode, classification, approve).outcome
+    })
+    expect({ command, args, outcomes }).toEqual({ command, args, outcomes: ['ask', 'ask', 'ask', 'run'] })
+  }
 })
 
 test('A4: a plan keeps the ordinary ladder: this rule adds no ask to it', () => {
