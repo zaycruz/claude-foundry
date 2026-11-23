@@ -207,9 +207,12 @@ export function classifyOrthancCommand(
  * future `orthanc remove resource` all count. Measured on the 541 names of
  * 0.7.11, every destructive word sits in the last word of its path, so reading
  * the whole path asks nothing new today and covers a name that puts the verb
- * first. Never read a value, a positional or a branch name: `--mode
+ * first. Values, positionals and branch names carry nothing: `--mode
  * keep-outputs`, `--branch delete-me` and `alias remove delete` say nothing
- * about what the write erases.
+ * about what the write erases. One limit: the guard cannot tell a value from a
+ * flag without Orthanc's argument shapes, so an argument that starts with a
+ * hyphen is read as a flag (`--description "-remove the old rows"` asks).
+ * Reading too much costs a prompt; reading too little costs the ask.
  *
  * `set`, `update`, `add`, `close`, `cancel`, `pause` and `restore` stay out:
  * they change or stop something that is still there, and the `auto` guard
@@ -316,8 +319,11 @@ const SHOWN_FLAG = /^--?[a-z0-9][a-z0-9-]*$/
 const SHOWN_MAX = 80
 
 function displayTrigger(flag: string): string {
-  const shown = SHOWN_FLAG.test(flag) ? flag : JSON.stringify(flag)
-  return shown.length > SHOWN_MAX ? `${shown.slice(0, SHOWN_MAX)}…` : shown
+  // Cut the argument first, on code points, then escape: cutting escaped text
+  // can split a `\n` or a surrogate pair and leave half an escape in the dialog.
+  const chars = Array.from(flag)
+  const cut = chars.length > SHOWN_MAX ? `${chars.slice(0, SHOWN_MAX).join('')}…` : flag
+  return SHOWN_FLAG.test(cut) ? cut : JSON.stringify(cut)
 }
 
 /** One arg as the flag it names, in any case, with or without a `=value`
@@ -1410,7 +1416,9 @@ export function ladderDecision(
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.`,
+      reason:
+        `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; otherwise pass a work branch.` +
+        (classification.destructiveWhy ? ` It is also destructive (${classification.destructiveWhy}).` : ''),
     }
   }
   if (mode === 'yolo')
@@ -1423,7 +1431,7 @@ export function ladderDecision(
   if (classification.isDestructive) {
     // Both claims are kept: outside yolo a write that is destructive *and* names
     // main asks once, and the operator reads why it cannot be waved through.
-    const also = classification.targetsProtected ? ', and it names main as its branch' : ''
+    const also = classification.targetsProtected ? ', and it writes main' : ''
     return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${also}${note}` }
   }
   if (classification.targetsProtected) {

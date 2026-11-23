@@ -25,8 +25,11 @@ says so instead of falling back to REST.
   destructive when its command name, or one of its flags, says something is left
   gone or overwritten — `marketplace installation uninstall`,
   `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
-  given `--force`. The rule reads the name and the flags, never a value, so
-  `--mode keep-outputs` and a branch named `delete-me` ask nothing. The words,
+  given `--force`. The rule reads the name and anything that looks like a flag,
+  never a value or a branch name, so `--mode keep-outputs` and a branch named
+  `delete-me` ask nothing. An argument that starts with a hyphen looks like a
+  flag, so it asks: reading too much costs a prompt, reading too little costs
+  the ask. The words,
   and what each one leaves, are `DESTRUCTIVE_WORDS` in `hooks/policy.ts`; the
   approval prompt builds its own wording from that table. In `yolo` only a write
   on main asks: destructive writes run at once, and the loop guard is off. A

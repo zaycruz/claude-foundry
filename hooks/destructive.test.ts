@@ -33,8 +33,9 @@
 //  D4  The widening sweeps in a read: an entry the manifest calls `read-only`
 //      whose name holds a destructive word asks.
 //  D5  A flag that holds a destructive word but erases nothing asks:
-//      `orchestration builds create --abort-on-failure` is a routine build.
-//      So does a negation (`--no-remove-check`, `--keep-data`).
+//      `orchestration builds create --abort-on-failure` is a routine build, and
+//      `--no-remove-check` denies the removal rather than claiming it.
+//      `--keep-data` carries no word of the table and asks for none.
 //  D6  A flag that does erase is missed: `--remove`, `--remove-check`,
 //      `--remove-resource`, `--delete-project`, `--delete-object-type`, in any
 //      case, as `=value`, at any position.
@@ -136,8 +137,10 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'resource delete', kind: 'mutation' },
   { path: 'resource delete-impact', kind: 'read-only' },
   { path: 'resource permanently-delete', kind: 'mutation' },
-  // Marked by Orthanc the way the real manifest marks it: the destructive rule
-  // and the governance-control ask both apply to this one command.
+  // Orthanc marks this command `operator_approval` with `--apply` (and scopes the
+  // mark to any branch): the destructive rule and the governance-control ask both
+  // apply to it. The fixture leaves the scope out; it only widens when the mark
+  // applies.
   { path: 'resource remove-markings', kind: 'mutation', operatorApproval: { when_all_flags: ['--apply'] } },
   { path: 'resource restore', kind: 'mutation' },
   { path: 'resource-role revoke', kind: 'mutation' },
@@ -346,7 +349,8 @@ test('D9: the branch rule still blocks a destructive write; the ask does not loo
   expect(MODES.map(mode => ladderDecision(mode, onMain!, approve).outcome)).toEqual(['ask', 'ask', 'ask', 'ask'])
   // A branch creation is pre-authorized: `dataset branches create` erases nothing.
   const created = classifyCall(CLI, { command: 'dataset branches create', args: [DATASET, '--name', 'agent-x'] }, MANIFEST, 'agent/x')
-  expect(created?.isDestructive).toBe(false)})
+  expect(created?.isDestructive).toBe(false)
+})
 
 test('D10: --force still asks, the ask reason names the command, and the MCP lane reads the same words', async () => {
   const forced = classifyCall(CLI, { command: 'dataset create', args: ['people', '--force'] }, MANIFEST, 'agent/x')
@@ -511,13 +515,23 @@ test('D12: the ask and the log name which of the three the guard read', async ()
   expect(forgedCall?.isDestructive).toBe(true)
   expect(forgedCall?.destructiveWhy?.includes('\n')).toBe(false)
   expect(ladderDecision('allow-edits', forgedCall!, approve).reason.split('\n').length).toBe(1)
+  // The cut lands on a code point, and what is shown still parses as the JSON
+  // string it claims to be: cutting escaped text can split a `\n` or half a
+  // surrogate pair and leave half an escape in the dialog.
+  const astral = ['ri.health.main.group.1', `--remove-check🗑️${'x'.repeat(200)}`]
+  const astralCall = classifyCall(CLI, { command: 'data-health check-group update', args: astral }, MANIFEST, 'agent/x')
+  const shown = astralCall?.destructiveWhy ?? ''
+  expect(shown.startsWith('"') && shown.endsWith('"')).toBe(true)
+  expect(() => JSON.parse(shown.endsWith('…') ? `${shown.slice(0, -1)}"` : shown)).not.toThrow()
   const long = ['ri.health.main.group.1', `--remove-check${'x'.repeat(400)}`]
   const longCall = classifyCall(CLI, { command: 'data-health check-group update', args: long }, MANIFEST, 'agent/x')
   expect(longCall?.isDestructive).toBe(true)
-  expect((longCall?.destructiveWhy ?? '').length < 100).toBe(true)
-  // A value that happens to start with a hyphen is read as a flag name: the
-  // guard cannot tell a value from a flag without Orthanc's argument shapes, and
-  // reading too much only asks more.
+  const longWhy = longCall?.destructiveWhy ?? ''
+  expect(longWhy.length < 100).toBe(true)
+  expect(() => JSON.parse(longWhy.endsWith('…') ? `${longWhy.slice(0, -1)}"` : longWhy)).not.toThrow()
+  // A value that happens to start with a hyphen is read as a flag name: the guard
+  // cannot tell a value from a flag without Orthanc's argument shapes. The ask is
+  // the safe direction, and pinned here so the limit stays a known one.
   const hyphenValue = classifyCall(CLI, { command: 'dataset create', args: ['people', '--description', '-remove the old rows'] }, MANIFEST, 'agent/x')
   expect(hyphenValue?.isDestructive).toBe(true)
 
@@ -533,7 +547,11 @@ test('D12: the ask and the log name which of the three the guard read', async ()
   // Destructive and naming main: one ask, both claims in it, because the second
   // is the reason a "yes" would be wrong.
   const onMain = classifyCall(CLI, { command: 'streams stream reset', args: [DATASET, '--branch', 'master'] }, MANIFEST, 'agent/x')
-  expect(ladderDecision('allow-edits', onMain!, approve).reason).toContain("destructive mutation 'streams stream reset' (reset) asks in every mode but yolo, and it names main as its branch")
+  expect(ladderDecision('allow-edits', onMain!, approve).reason).toContain("destructive mutation 'streams stream reset' (reset) asks in every mode but yolo, and it writes main")
+  // In yolo the main-targeting ask wins, and it carries the destructive cue too.
+  const yoloMain = ladderDecision('yolo', onMain!, approve)
+  expect(yoloMain.outcome).toBe('ask')
+  expect(yoloMain.reason).toContain('It is also destructive (reset)')
 
   // An ordinary write keeps the plain yolo reason: the extra words are only for
   // a write the guard read as destructive.
@@ -546,8 +564,9 @@ test('D13: the flag census, measured on the v0.7.11 release binary', async () =>
   // Every flag of the pinned orthanc whose name carries a word from the table,
   // read off `orthanc --agent agent-manifest` on the v0.7.11 release (the command
   // is in policy.ts beside the table — the pinned snapshot carries no flags).
-  // The verdict column is what the guard answers for that real command and
-  // flag, so the census is data in the suite rather than prose in a comment.
+  // The verdict column is what the guard answers for that real command and flag
+  // (`isDestructive`, not the ladder's whole answer), so the census is data in the
+  // suite rather than prose in a comment.
   const CENSUS: [string, string, boolean][] = [
     ['data-health check-group update', '--remove-check', true],
     ['devops draft set', '--remove-resource', true],
