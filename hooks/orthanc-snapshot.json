@@ -236,6 +236,10 @@
     },
     {
       "kind": "local",
+      "path": "auth mint"
+    },
+    {
+      "kind": "local",
       "path": "auth store"
     },
     {
@@ -1457,6 +1461,12 @@
     {
       "auth": "bearer-token",
       "kind": "mutation",
+      "operator_approval": {
+        "when_all_flags": [
+          "--apply"
+        ]
+      },
+      "operator_approval_scope": "work-branch",
       "path": "global-branch update"
     },
     {
@@ -1834,6 +1844,23 @@
       "auth": "bearer-token",
       "kind": "read-only",
       "path": "ontology action-validate"
+    },
+    {
+      "auth": "bearer-token",
+      "kind": "mutation",
+      "operator_approval": {
+        "when_all_flags": [
+          "--apply",
+          "--yes"
+        ]
+      },
+      "operator_approval_scope": "work-branch",
+      "path": "ontology branch-conflict-resolve"
+    },
+    {
+      "auth": "bearer-token",
+      "kind": "read-only",
+      "path": "ontology branch-conflicts"
     },
     {
       "auth": "bearer-token",
@@ -2457,6 +2484,17 @@
     },
     {
       "auth": "bearer-token",
+      "kind": "mutation",
+      "operator_approval": {
+        "when_all_flags": [
+          "--apply"
+        ]
+      },
+      "operator_approval_scope": "work-branch",
+      "path": "repository branch update-from-base"
+    },
+    {
+      "auth": "bearer-token",
       "kind": "read-only",
       "path": "repository branch-status"
     },
@@ -3071,7 +3109,7 @@
       "path": "workshop module widgets"
     }
   ],
-  "min_orthanc": "0.7.12",
-  "orthanc_tag": "v0.7.12",
+  "min_orthanc": "0.7.13",
+  "orthanc_tag": "v0.7.13",
   "snapshot_version": 1
 }
