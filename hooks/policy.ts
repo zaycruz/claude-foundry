@@ -293,11 +293,17 @@ export function destructiveTermIn(name: string): string | null {
  * and ask on that. */
 const NON_DESTRUCTIVE_FLAGS = new Set(['--abort-on-failure'])
 
+/** Whether `flag` names what the write removes. A flag shape, not one of the
+ * exemptions, and a word of the table. */
+function isDestructiveFlag(flag: string): boolean {
+  return flag.startsWith('-') && !NON_DESTRUCTIVE_FLAGS.has(flag) && !flag.startsWith('--no-') && destructiveTermIn(flag) !== null
+}
+
 /** The flag whose name says what the write removes, or null: `--remove`,
  * `--remove-check`, `--remove-resource`, `--delete-project`,
  * `--delete-object-type`. */
 function destructiveFlag(args: readonly string[]): string | null {
-  return args.map(flagNameOf).find(flag => flag.startsWith('-') && !NON_DESTRUCTIVE_FLAGS.has(flag) && !flag.startsWith('--no-') && destructiveTermIn(flag) !== null) ?? null
+  return args.map(flagNameOf).find(isDestructiveFlag) ?? null
 }
 
 /** Why a write reads as destructive, in the words the operator is told: a word
