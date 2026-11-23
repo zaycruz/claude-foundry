@@ -162,8 +162,10 @@ or remove a directory holding them — `rm -rf` of the directory or of a directo
 above it (`~/.config`, `~`), `mv`, `find ... -delete` whose name pattern can match
 the mark or the directory, a glob on any part of the path
 (`rm ~/.config/*/profile-settings.json`) including a bracket class
-(`rm -rf ~/.config/[f]oundry`) or a brace expansion
-(`mv ~/.config/foundry{,.bak}`), a variable the command sets to the path, a word
+(`rm -rf ~/.config/[f]oundry`, and the POSIX kind, `~/.config/[[:alpha:]]oundry`) or a
+brace expansion of any size (`mv ~/.config/foundry{,.bak}`,
+`rm -rf ~/.config/foundr{a..z}` — bash's 25th name is the store), a variable the
+command sets to the path, a word
 built out of quoted pieces (`~/.config/fo""undry`), a backslash inside a word, a
 redirect into the store, a path inside `bash -c '…'`, a relative name after `cd ~`
 or a bare `cd`, an unpacked tar, even a `cp` of the directory out
@@ -173,7 +175,9 @@ Removing that file gets past both gates. Reads are left alone: `cat`, `ls`, `jq`
 (`find ~ -name "profile-*.png"`) all run. One limit is stated plainly: the guard
 reads the command line, not a shell, so a path built at run time inside a script
 (`python3 -c "os.remove(os.path.join(os.environ['HOME'], '.config', 'foundry', ...))"`)
-is not caught. A stack `configure list` says nothing about is unknown, not
+is not caught. A brace list past 4096 names is read as a shape rather than
+enumerated, so a command that would remove thousands of directories is refused even when
+none of its names is the store. A stack `configure list` says nothing about is unknown, not
 writable: the write goes to the operator and never runs blind, while reads and
 plans are not held up. `/profile` and `orthanc_help` say which stacks are
 read-only. Outside FDE mode `/namespace` steers discovery only; the gate does not

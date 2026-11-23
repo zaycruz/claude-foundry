@@ -650,6 +650,7 @@ test('Q17: a bracket class, a brace or a quote split cannot hide the store', asy
   for (const command of [
     'rm -rf ~/.config/[f]oundry',
     'rm -rf ~/.[c]onfig',
+    'rm -rf ~/.config/foundr{a..z}',
     'rm ~/.config/foundr[y]/profile-settings.json',
     'mv ~/.config/foundry{,.bak}',
     'rm -rf ~/.config/{foundry,x}',
@@ -675,12 +676,44 @@ test('Q17: a bracket class, a brace or a quote split cannot hide the store', asy
   for (const command of [
     'echo "rm -rf ~/.config/foundry is what the guard stops"',
     'git commit -m "note: rm -rf ~/.config/foundry clears a mark"',
-    'rm -rf ~/.config/foundr{a..z}',
     'rm -rf ~/proj/[d]ist',
     'rm -rf ~/project/{dist,build}',
     'ls -la ~/.config/foundry',
     'jq . ~/.config/foundry/profiles.json | less',
     'xargs -a list.txt rm',
+  ])
+    expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
+})
+
+// Review round 6: a brace list or a range the guard will not enumerate, and a POSIX
+// bracket class. The wide range below is the one Q17 had pinned the wrong way: bash's
+// 25th name for `foundr{a..z}` is `foundry`.
+test('Q18: a wide brace range and a POSIX class reach the store too', async ($, on) => {
+  harness(on, 'yolo')
+  const denied: string[] = []
+  for (const command of [
+    'rm -rf ~/.config/foundr{a..z}',
+    'mv ~/.config/foundr{a..z} /tmp/',
+    'rm -rf ~/.co{a..z}fig',
+    'rm -rf ~/.config/[[:alpha:]]oundry',
+    'rm -rf ~/.config/[[:alpha:]]oundr?',
+    'rm -rf ~/.config/{a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,foundry}',
+    `rm -rf ~/.config/{${['foundry', ...Array.from({ length: 5000 }, (_value, index) => `x${index}`)].join(',')}}`,
+  ]) {
+    const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+    if (deny === '') denied.push(command.slice(0, 60))
+  }
+  expect(denied).toEqual([])
+  // Ranges and classes that cannot name the store, checked against what bash expands
+  // them to, still run.
+  for (const command of [
+    'rm -rf ~/.config/foundr{a..x}',
+    'rm -rf ~/.config/foundq{a..z}',
+    'rm -rf ~/.config/foundr[[:digit:]]',
+    'rm -rf ~/.config/foundry[[:alpha:]]',
+    'rm -rf ~/.config/foundry{0..999999}',
+    'rm -rf ~/.config/foundr{a..z}{a..z}{a..z}',
+    'rm -rf ~/cache{0..999999}',
   ])
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })
 })

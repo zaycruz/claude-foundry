@@ -1660,6 +1660,64 @@ const ASSIGNMENT_WORD = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/
 /** `foundr*`, `found?y` and `[f]oundry` name `foundry` once the shell expands them. A
  * bracket class is matched as one, because `rm -rf ~/.config/[f]oundry` is the oldest
  * way to write a path so that a plain text search misses it. */
+/** POSIX classes the guard knows, as regex pieces inside a character class. An
+ * unknown or negated class is read as "any character", which refuses more. */
+const POSIX_CLASS: Record<string, string> = {
+  alpha: 'a-zA-Z',
+  alnum: 'a-zA-Z0-9',
+  ascii: '\\x00-\\x7f',
+  blank: ' \\t',
+  cntrl: '\\x00-\\x1f\\x7f',
+  digit: '0-9',
+  graph: '!-~',
+  lower: 'a-z',
+  print: ' -~',
+  punct: '\\W',
+  space: ' \\t\\n\\r\\v\\f',
+  upper: 'A-Z',
+  xdigit: '0-9a-fA-F',
+}
+
+/** A bracket expression as a regex character class: `[f]`, `[a-z]`, `[!x]` and
+ * `[[:alpha:]]`. The terminator is the first `]` that is not inside a POSIX class, so
+ * `[[:alpha:]]` ends after the class, not inside it. */
+function bracketExpression(pattern: string, from: number): { body: string; end: number } | undefined {
+  const POSIX_TOKEN = /^\[:([\^]?[a-z]+):\]/
+  let scan = from
+  while (scan < pattern.length) {
+    const token = POSIX_TOKEN.exec(pattern.slice(scan))
+    if (token !== null) {
+      scan += token[0].length
+      continue
+    }
+    if (pattern[scan] === ']') break
+    scan += 1
+  }
+  if (scan >= pattern.length) return undefined
+  let cursor = from
+  let negate = false
+  let set = ''
+  while (cursor < scan) {
+    const token = POSIX_TOKEN.exec(pattern.slice(cursor))
+    if (token !== null) {
+      const name = token[1]!
+      set += name.startsWith('^') ? '\\S\\s' : (POSIX_CLASS[name] ?? '\\S\\s')
+      cursor += token[0].length
+      continue
+    }
+    if (pattern.slice(cursor, cursor + 2) === '!!') {
+      negate = true
+      cursor += 2
+      continue
+    }
+    const member = pattern[cursor]!
+    set += /[-a-zA-Z0-9_]/.test(member) ? member : `\\${member}`
+    cursor += 1
+  }
+  if (set === '') return undefined
+  return { body: negate ? `[^${set}]` : `[${set}]`, end: scan }
+}
+
 function globMatches(pattern: string, name: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern.toLowerCase() === name.toLowerCase()
   let body = ''
@@ -1675,16 +1733,11 @@ function globMatches(pattern: string, name: string): boolean {
         from += 1
       }
       if (pattern[from] === ']') from += 1
-      const close = pattern.indexOf(']', from)
-      if (close < 0) body += '\\['
+      const bracket = bracketExpression(pattern, from)
+      if (bracket === undefined) body += '\\['
       else {
-        const set = pattern
-          .slice(from, close)
-          .split('')
-          .map(member => (/[-a-zA-Z0-9_]/.test(member) ? member : `\\${member}`))
-          .join('')
-        body += negate ? `[^${set}]` : `[${set}]`
-        index = close
+        body += negate ? `[^${bracket.body.slice(1, -1)}]` : bracket.body
+        index = bracket.end
       }
     } else body += /[.+^${}()|[\]\\]/.test(character) ? `\\${character}` : character
   }
@@ -1695,7 +1748,18 @@ function globMatches(pattern: string, name: string): boolean {
  * `rm -rf ~/.config/{foundry,x}` name the store although no word holds it whole. Comma
  * lists and `{a..z}` / `{0..9}` ranges, nested, capped at 16 results; anything odder is
  * left as written. */
-function braceExpansions(word: string, limit = 16): string[] {
+/** How many names a brace word can produce, and the guard's budget for listing them.
+ * Past the budget the varying part is read as a shape instead, which is the safe side. */
+const BRACE_BUDGET = 4096
+
+function braceCandidates(word: string): string[] {
+  const expanded = expandBraces(word, { left: BRACE_BUDGET })
+  return expanded === undefined ? [braceShape(word)] : expanded
+}
+
+/** Every name the word can expand to, or undefined when there are too many. Ranges are
+ * counted before they are built, so a million-item range costs nothing. */
+function expandBraces(word: string, budget: { left: number }): string[] | undefined {
   const open = word.indexOf('{')
   if (open < 0) return [word]
   let close = -1
@@ -1711,14 +1775,57 @@ function braceExpansions(word: string, limit = 16): string[] {
   const body = word.slice(open + 1, close)
   const parts = body.includes(',') ? splitTopLevel(body, ',') : rangeParts(body)
   if (parts === undefined || parts.length === 0) return [word]
+  if (parts.length > budget.left) return undefined
   const out: string[] = []
   for (const part of parts) {
-    for (const expanded of braceExpansions(`${word.slice(0, open)}${part}${word.slice(close + 1)}`, limit)) {
-      out.push(expanded)
-      if (out.length >= limit) return out
-    }
+    const nested = expandBraces(`${word.slice(0, open)}${part}${word.slice(close + 1)}`, budget)
+    if (nested === undefined) return undefined
+    budget.left -= nested.length
+    if (budget.left < 0) return undefined
+    out.push(...nested)
   }
   return out
+}
+
+/** The word as a shape, when listing its names would cost more than the answer is worth:
+ * each brace group becomes as many `?` as its shortest name, plus a `*` when the names
+ * differ in length. So `foundr{a..z}{a..z}{a..z}` reads as `foundr??` (nine characters,
+ * never the seven of `foundry`), while a list of five thousand names that holds the store
+ * still reads as something that can be it. Nested groups and a group spanning a `/` lose
+ * the shape and fall back to a wildcard. */
+function braceShape(word: string): string {
+  let out = ''
+  let depth = 0
+  let group = ''
+  for (const character of word) {
+    if (character === '{') {
+      if (depth === 0) group = ''
+      else group += character
+      depth += 1
+      continue
+    }
+    if (character === '}' && depth > 0) {
+      depth -= 1
+      if (depth === 0) {
+        const shape = groupShape(group)
+        out += shape === undefined ? '*' : shape
+        continue
+      }
+    }
+    if (depth === 0) out += character
+    else group += character
+  }
+  return out
+}
+
+/** `?` per character of the shortest name in a group, and a `*` when they differ. */
+function groupShape(body: string): string | undefined {
+  if (body.includes('{') || body.includes('/')) return undefined
+  const parts = body.includes(',') ? splitTopLevel(body, ',') : rangeParts(body)
+  if (parts === undefined || parts.length === 0) return undefined
+  const lengths = parts.map(part => part.length)
+  const shortest = Math.min(...lengths)
+  return '?'.repeat(shortest) + (Math.max(...lengths) === shortest ? '' : '*')
 }
 
 /** The pieces of `{a,{b,c}}` at the top level of one brace group. */
@@ -1740,22 +1847,25 @@ function splitTopLevel(body: string, separator: string): string[] {
   return parts
 }
 
-/** `{a..d}` and `{2..4}` as their list, or undefined when it is not a range. */
+/** `{a..d}` and `{2..4}` as their list, at any width, or undefined when it is not a
+ * plain range. bash's `01..03` and `{1..9..2}` spellings are left as written rather than
+ * expanded wrong. */
 function rangeParts(body: string): string[] | undefined {
   const match = /^(\S+)\.\.(\S+)$/.exec(body)
   if (match === null) return undefined
   const [, first = '', last = ''] = match
+  if (/^\d+$/.test(first) && /^\d+$/.test(last) && (first.startsWith('0') || last.startsWith('0')) && first.length !== last.length)
+    return undefined
   if (/^-?\d+$/.test(first) && /^-?\d+$/.test(last)) {
-    const from = Number(first)
-    const to = Number(last)
-    const size = Math.abs(to - from) + 1
-    if (size > 16) return undefined
-    return Array.from({ length: size }, (_value, index) => String(from + index * Math.sign(to - from)))
+    const size = Math.abs(Number(last) - Number(first)) + 1
+    if (size > BRACE_BUDGET) return undefined
+    return Array.from({ length: size }, (_value, index) => String(Number(first) + index * Math.sign(Number(last) - Number(first))))
   }
-  if (first.length === 1 && last.length === 1 && first <= last && last.charCodeAt(0) - first.charCodeAt(0) < 16)
-    return Array.from({ length: last.charCodeAt(0) - first.charCodeAt(0) + 1 }, (_value, index) =>
-      String.fromCharCode(first.charCodeAt(0) + index),
-    )
+  if (first.length === 1 && last.length === 1 && /[a-zA-Z]/.test(first) && /[a-zA-Z]/.test(last) && first <= last) {
+    const size = last.charCodeAt(0) - first.charCodeAt(0) + 1
+    if (size > BRACE_BUDGET) return undefined
+    return Array.from({ length: size }, (_value, index) => String.fromCharCode(first.charCodeAt(0) + index))
+  }
   return undefined
 }
 
@@ -1783,8 +1893,8 @@ function runWords(command: string, home: string, configHome: string): { words: s
       })
   const substitute = (word: string) => once(once(word))
   return segments.map(segment => ({
-    words: segment.words.flatMap(word => braceExpansions(substitute(word))),
-    targets: (segment.targets ?? []).flatMap(target => braceExpansions(substitute(target))),
+    words: segment.words.flatMap(word => braceCandidates(substitute(word))),
+    targets: (segment.targets ?? []).flatMap(target => braceCandidates(substitute(target))),
   }))
 }
 
