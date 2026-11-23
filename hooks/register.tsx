@@ -17,6 +17,9 @@ import {
   type CompassKind,
   contextLines,
   emptyScope,
+  entityRows,
+  ENTITY_KINDS,
+  type EntityKind,
   foundryTree,
   hasFocus,
   mergeSelections,
@@ -25,6 +28,8 @@ import {
   OBJECT_QUERY_BEAD,
   objectsQuery,
   ontologyChanged,
+  pickedText,
+  PICKER_RESOURCES,
   RESOURCE_LABELS,
   resourceArgs,
   resourceRows,
@@ -55,6 +60,7 @@ import {
   planGate,
   planSignature,
   plainSpace,
+  readBranch,
   recordApply,
   recordPlan,
   spacesOf,
@@ -68,6 +74,7 @@ import {
   guideEnvelope,
   isErrorEnvelope,
   isOversized,
+  isRecord,
   isUsageError,
   listItems,
   manifestFrom,
@@ -83,7 +90,7 @@ import {
 } from './orthanc'
 import { type BinaryIdentity, binaryIdentity, type LoadedManifest, ManifestCache, named } from './manifest'
 import { MIN_ORTHANC, ORTHANC_CHECKED, orthancVersionWarning, PLUGIN_VERSION } from './orthanc-tie'
-import { PROCESS_RUN_MAX_MS, type ProcessOutput, readToExit } from './process'
+import { PROCESS_RUN_MAX_MS, coverShellWaits, type ProcessOutput, readToExit, shellTimer, shellWaitDenial } from './process'
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -106,6 +113,7 @@ import {
   parseApprovalMode,
   resolveOrthancCommand,
   rulesWriteReason,
+  shellOrthancCalls,
   branchesIn,
   STORED_BRANCH_RUNS,
   storedBranchReads,
@@ -811,9 +819,38 @@ async function fdeState($: EngineInterface): Promise<FdeSession | null> {
 // A new binding looks its RIDs up again: the namespace cache is the binding's.
 async function setFde($: EngineInterface, fde: FdeSession | null): Promise<void> {
   spaceCache.clear()
+  // The store mirror also identifies the outgoing binding after a restart.
+  // Store the new binding first, so a failed scope write cannot leave the old
+  // branch active after the operator has ended or replaced it.
+  const earlier = (await fdeState($)) ?? (await fdeFromEarlier($))
   await $.state.set(FDE, fde)
   await $.state.set(BRANCH, fde?.branchRid ?? null)
   await $.store.set('fdeOpen', fde)
+  if (earlier !== null && (earlier.branchRid !== fde?.branchRid || earlier.profile !== fde?.profile || earlier.ontologyRid !== fde?.ontologyRid)) await dropBranchPicks($, earlier)
+}
+
+/** Remove only picks first selected on this branch. Untagged picks came from main. */
+const withoutBranchPicks = (scope: FoundryScope, branchRid: string): FoundryScope => ({
+  ...scope,
+  resources: { ...scope.resources, ...Object.fromEntries(Object.values(ENTITY_KINDS).map(def => [def.resource, (scope.resources[def.resource] ?? []).filter(item => item.branchRid !== branchRid)])) },
+})
+
+/**
+ * Takes the branch-read picks out of one stack's scope. That stack is not the
+ * active one after a /profile switch, and /profile is allowed while FDE mode is
+ * bound, so the picks are dropped where they were saved (same shape as
+ * storeNamespace, which reaches another stack's record for the same reason).
+ */
+async function dropBranchPicks($: EngineInterface, binding: FdeSession): Promise<void> {
+  const active = await currentScope($)
+  if (active.profile === binding.profile) {
+    if (active.ontology?.rid === binding.ontologyRid) await saveScope($, withoutBranchPicks(active, binding.branchRid))
+    return
+  }
+  const stored = await storedScopes($)
+  const entry = normalizeScope(stored[binding.profile], binding.profile, '')
+  if (entry.ontology?.rid !== binding.ontologyRid) return
+  await $.store.set('scopes', { ...stored, [binding.profile]: { ...withoutBranchPicks(entry, binding.branchRid), updatedAt: new Date().toISOString() } })
 }
 
 async function fdeFromEarlier($: EngineInterface): Promise<FdeSession | null> {
@@ -1115,11 +1152,17 @@ async function fdeCommand($: EngineInterface, args: string, origin: CommandOrigi
 
 // ---------- pickers ----------
 
-type Source = { title: string; isMulti: boolean; items: FoundryPickItem[]; resourceKind?: FoundryResourceKind }
+type Source = { title: string; isMulti: boolean; items: FoundryPickItem[]; resourceKind?: FoundryResourceKind; incomplete?: boolean }
 type PickerOptions = { resourceKind?: FoundryResourceKind; chain?: FoundryPickerKind[] }
 
 const toItems = (resources: readonly FoundryResource[]): FoundryPickItem[] =>
   resources.map(entry => ({ key: entry.rid, label: entry.name, hint: entry.hint }))
+
+/** Orthanc's note on a read, such as part of a branch listing coming from main. */
+const warningNote = (envelope: Envelope): string => {
+  const first = Array.isArray(envelope.warnings) ? envelope.warnings[0] : null
+  return isRecord(first) ? asString(first.message).slice(0, 90) : ''
+}
 
 async function inBatches<T, R>(values: readonly T[], size: number, run: (value: T) => Promise<R>): Promise<R[]> {
   const out: R[] = []
@@ -1127,15 +1170,21 @@ async function inBatches<T, R>(values: readonly T[], size: number, run: (value: 
   return out
 }
 
+/** The folder or project RIDs a Compass walk starts from: the selected projects, else every visible one. */
+async function compassRoots($: EngineInterface, scope: FoundryScope): Promise<string[] | string> {
+  const selected = scope.projects.map(project => project.rid)
+  if (selected.length > 0) return selected
+  const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
+  if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
+  return listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
+}
+
 /** Compass resources of one kind under the selected projects, or every visible project. */
 async function compassSource($: EngineInterface, scope: FoundryScope, kind: CompassKind, query: string): Promise<Source | string> {
   const def = COMPASS_KINDS[kind]
-  let roots = scope.projects.map(project => project.rid)
-  if (roots.length === 0) {
-    const projects = await runOrthanc($, ['project', 'list', ...spaceArgs(scope)], scope.profile, 120_000)
-    if (isErrorEnvelope(projects)) return `project list failed: ${errorsOf(projects)}`
-    roots = listItems(projects, 'projects').map(entry => asString(entry.rid)).filter(Boolean)
-  }
+  const found = await compassRoots($, scope)
+  if (typeof found === 'string') return found
+  const roots = found
   if (roots.length === 0) return `No projects are visible ${scope.namespace ? `in ${scope.namespace.name}` : 'on this stack'}. No selection was saved.`
   const search = kind === 'folders' && !query.trim() ? 'ri.compass.main.folder.' : query
   const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
@@ -1149,6 +1198,85 @@ async function compassSource($: EngineInterface, scope: FoundryScope, kind: Comp
     isMulti: true,
     items: toItems(rows),
     resourceKind: kind,
+  }
+}
+
+/**
+ * `automate list` under the selected projects, or under the namespace in scope.
+ * With neither, one walk with no --folder-rid, which is every space; `--name` is
+ * orthanc's own filter, so the command's argument goes to it and not to the
+ * picker's.
+ */
+async function automateSource($: EngineInterface, scope: FoundryScope, query: string): Promise<Source | string> {
+  const name = query.trim()
+  // One root, '' = no --folder-rid, which walks every space.
+  let roots = ['']
+  if (scope.projects.length > 0) roots = scope.projects.map(project => project.rid)
+  else if (scope.namespace !== null) {
+    const found = await compassRoots($, scope)
+    if (typeof found === 'string') return found
+    if (found.length === 0) return `No projects are visible in ${scope.namespace.name}. No selection was saved.`
+    roots = found
+  }
+  const envelopes = await inBatches(roots, ROOT_CONCURRENCY, root =>
+    runOrthanc($, ['automate', 'list', ...(root === '' ? [] : ['--folder-rid', root]), ...(name === '' ? [] : ['--name', name])], scope.profile, 180_000),
+  )
+  const failed = envelopes.filter(isErrorEnvelope)
+  if (failed.length === envelopes.length && failed[0]) return `automate list failed: ${errorsOf(failed[0])}`
+  const rows = resourceRows(envelopes.flatMap(envelope => rowsOf(envelope, ['automations'])), ['path'])
+  return {
+    // A root whose listing failed shrinks this list instead of failing it, so the
+    // title says when that happened, and the listing is not applied on its own:
+    // the operator sees the short list before picking from it.
+    incomplete: failed.length > 0,
+    title: `Automations${scope.projects.length > 0 ? ' in selected projects' : scope.namespace ? ` in ${scope.namespace.name}` : ''}${failed.length === 0 ? '' : ` (${failed.length} of ${envelopes.length} listings failed)`}`,
+    isMulti: true,
+    items: toItems(rows),
+    resourceKind: 'automations',
+  }
+}
+
+/**
+ * `ontology object-type-list` / `ontology action-type-list` on the ontology in
+ * scope, on the main branch. Orthanc takes `--branch` on both, and the mod does
+ * not pass it here: a bound session picks its link types and interfaces off its
+ * own branch, and a write to a type that is not on the branch is refused by the
+ * branch rule and the plan gate, which judge the call itself.
+ */
+async function typeSource($: EngineInterface, kind: 'object-type' | 'action-type', ontology: FoundryNamed, profile: string): Promise<Source | string> {
+  const isAction = kind === 'action-type'
+  const envelope = await runOrthanc($, ['ontology', isAction ? 'action-type-list' : 'object-type-list', ontology.rid], profile, 120_000)
+  if (isErrorEnvelope(envelope)) return `${isAction ? 'action' : 'object'}-type-list failed: ${errorsOf(envelope)}`
+  return {
+    title: isAction ? 'Action types' : 'Object types',
+    isMulti: true,
+    items: listItems(envelope, isAction ? 'action_types' : 'object_types').map(entry => ({
+      key: asString(entry.api_name),
+      label: asString(entry.display_name) || asString(entry.api_name),
+      hint: asString(entry.api_name),
+    })),
+  }
+}
+
+/**
+ * `ontology link-type-list` / `ontology interface-list` on the ontology in scope,
+ * on FDE mode's branch when the session has one (readBranch), the way
+ * `ontology definition --branch` reads one, so an FDE session picks the types of
+ * its own branch.
+ */
+async function entitySource($: EngineInterface, kind: EntityKind, ontology: FoundryNamed, branch: { rid: string; name: string } | null, profile: string): Promise<Source | string> {
+  const def = ENTITY_KINDS[kind]
+  const envelope = await runOrthanc($, ['ontology', def.list, ontology.rid, ...(branch === null ? [] : ['--branch', branch.rid])], profile, 120_000)
+  const where = branch === null ? '' : ` on ${branch.name}`
+  if (isErrorEnvelope(envelope)) return `${def.list}${where} failed: ${errorsOf(envelope)}`
+  // Orthanc warns when part of a branch read came from main (an interface's members).
+  // The listing carries the note, so the title cannot claim the branch for main's rows.
+  const note = warningNote(envelope)
+  return {
+    title: `${def.label}${where}${note === '' ? '' : ` (orthanc: ${note})`}`,
+    isMulti: true,
+    items: toItems(entityRows(rowsOf(envelope, [def.rows]), def.hintKeys, def.separator)),
+    resourceKind: def.resource,
   }
 }
 
@@ -1213,24 +1341,11 @@ async function pickerSource(
       })),
     }
   }
-  if (scope.ontology === null) return 'No ontology is selected. Run /ontology first.'
-  const isAction = kind === 'action-type'
-  const envelope = await runOrthanc(
-    $,
-    ['ontology', isAction ? 'action-type-list' : 'object-type-list', scope.ontology.rid],
-    scope.profile,
-    120_000,
-  )
-  if (isErrorEnvelope(envelope)) return `${isAction ? 'action' : 'object'}-type-list failed: ${errorsOf(envelope)}`
-  return {
-    title: isAction ? 'Action types' : 'Object types',
-    isMulti: true,
-    items: listItems(envelope, isAction ? 'action_types' : 'object_types').map(entry => ({
-      key: asString(entry.api_name),
-      label: asString(entry.display_name) || asString(entry.api_name),
-      hint: asString(entry.api_name),
-    })),
-  }
+  if (kind === 'automation') return automateSource($, scope, query)
+  const ontology = scope.ontology
+  if (ontology === null) return 'No ontology is selected. Run /ontology first.'
+  if (kind === 'link-type' || kind === 'interface') return entitySource($, kind, ontology, readBranch(await fdeState($), scope.profile, ontology.rid), scope.profile)
+  return typeSource($, kind, ontology, scope.profile)
 }
 
 async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readonly string[]): Promise<string> {
@@ -1246,7 +1361,7 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const pick = chosen[0]
     if (pick === undefined) return 'No ontology selected.'
     await saveScope($, ontologyChanged(scope, { rid: pick.key, name: pick.label }))
-    return `Ontology: ${pick.label}. Projects, types, functions and object instances were cleared.`
+    return `Ontology: ${pick.label}. Projects, types, link types, interfaces, automations, functions and object instances were cleared.`
   }
   if (picker.kind === 'namespace') {
     const bound = await fdeState($)
@@ -1260,18 +1375,26 @@ async function applyPick($: EngineInterface, picker: FoundryPicker, keys: readon
     const next = namespaceChanged(scope, { rid: pick.key, name: pick.label, path: pick.hint })
     await saveScope($, next)
     const dropped = next.projects.length !== scope.projects.length || JSON.stringify(next.resources) !== JSON.stringify(scope.resources)
-    return `Namespace: ${pick.label}.${dropped ? ' Projects and Compass resources picked before were cleared.' : ''}`
+    return `Namespace: ${pick.label}.${dropped ? ' Projects, Compass resources and automations picked before were cleared.' : ''}`
   }
   if (picker.kind === 'project') {
     await saveScope($, { ...scope, projects: chosen.map(item => ({ rid: item.key, name: item.label })) })
     return `Projects: ${chosen.map(item => item.label).join(', ') || 'none'}.`
   }
-  if (picker.kind === 'resource' && picker.resourceKind) {
+  if (picker.resourceKind !== undefined) {
     const kind = picker.resourceKind
     const asResource = (item: FoundryPickItem): FoundryResource => ({ rid: item.key, name: item.label, hint: item.hint })
-    const merged = mergeSelections(scope.resources[kind] ?? [], chosen.map(asResource), picker.items.map(asResource))
+    const existing = scope.resources[kind] ?? []
+    const branch = (picker.kind === 'link-type' || picker.kind === 'interface') && scope.ontology
+      ? readBranch(await fdeState($), scope.profile, scope.ontology.rid) : null
+    const selected = chosen.map(item => {
+      const previous = existing.find(entry => entry.rid === item.key)
+      const branchRid = previous ? previous.branchRid : branch?.rid
+      return { ...asResource(item), ...(branchRid ? { branchRid } : {}) }
+    })
+    const merged = mergeSelections(existing, selected, picker.items.map(asResource))
     await saveScope($, { ...scope, resources: { ...scope.resources, [kind]: merged } })
-    return `${RESOURCE_LABELS[kind]}: ${merged.map(entry => entry.name).join(', ') || 'none'}.`
+    return pickedText(kind, merged)
   }
   const key = picker.kind === 'action-type' ? 'actionTypes' : 'objectTypes'
   await saveScope($, { ...scope, [key]: chosen.map(item => ({ apiName: item.key, displayName: item.label })) })
@@ -1287,7 +1410,7 @@ function preselected(scope: FoundryScope, kind: FoundryPickerKind, resourceKind?
   if (kind === 'project') return scope.projects.map(project => project.rid)
   if (kind === 'object-type') return scope.objectTypes.map(type => type.apiName)
   if (kind === 'action-type') return scope.actionTypes.map(type => type.apiName)
-  if (kind === 'resource' && resourceKind) return (scope.resources[resourceKind] ?? []).map(entry => entry.rid)
+  if (resourceKind) return (scope.resources[resourceKind] ?? []).map(entry => entry.rid)
   return []
 }
 
@@ -1302,12 +1425,13 @@ async function openPicker($: EngineInterface, kind: FoundryPickerKind, source: S
     isMulti: source.isMulti,
     items: source.items,
     chosen: preselected(scope, kind, source.resourceKind),
-    filter: kind === 'resource' ? '' : query,
+    // These listings filter on the argument themselves; the picker starts unfiltered.
+    filter: kind === 'resource' || kind === 'automation' ? '' : query,
     chain,
   }
   const filtered = source.items.filter(item => matches(item, picker.filter))
   const only = filtered.length === 1 ? filtered[0] : undefined
-  if (query !== '' && only) return applyPick($, picker, [...new Set([...picker.chosen, only.key])])
+  if (query !== '' && only && !source.incomplete) return applyPick($, picker, [...new Set([...picker.chosen, only.key])])
   await $.state.set(PICKER, picker)
   const opened = await $.ui.open({ id: PANE, title: source.title, focus: true, closeOnEscape: true })
   if (!opened.isPlaced) {
@@ -1331,7 +1455,7 @@ async function runPicker($: EngineInterface, kind: FoundryPickerKind, args: stri
     if (kind === 'project') await saveScope($, { ...scope, projects: [] })
     if (kind === 'object-type') await saveScope($, { ...scope, objectTypes: [] })
     if (kind === 'action-type') await saveScope($, { ...scope, actionTypes: [] })
-    if (kind === 'resource' && options.resourceKind) {
+    if (options.resourceKind) {
       await saveScope($, { ...scope, resources: { ...scope.resources, [options.resourceKind]: [] } })
     }
     return `Cleared ${options.resourceKind ? RESOURCE_LABELS[options.resourceKind].toLowerCase() : kind} selection.`
@@ -1532,8 +1656,10 @@ async function clearFromTree($: EngineInterface, target: ClearTarget): Promise<v
 async function runEntry($: EngineInterface, entry: CommandEntry, args: string, origin: CommandOrigin | undefined): Promise<string> {
   const action = entry.action
   switch (action.type) {
-    case 'picker':
-      return runPicker($, action.kind, args)
+    case 'picker': {
+      const resourceKind = PICKER_RESOURCES[action.kind]
+      return runPicker($, action.kind, args, resourceKind === undefined ? {} : { resourceKind })
+    }
     case 'resource':
       return runPicker($, 'resource', args, { resourceKind: action.kind })
     case 'blocked':
@@ -1748,8 +1874,45 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     const now = await filesSignature($, fde!, plan.command, args, fileCandidates(args, await sessionCwd($), await homeDir($)))
     if (!('signature' in now) || now.signature !== plan.signature) return { deny: 'FDE mode: a file this call reads changed after it was checked, so the call was not run. Dry-run it again.' }
   }
+  // The wait budget above belongs to orthanc_cli. Bash holds a timer of its own
+  // over whatever Orthanc it runs, and the host moves a command that passes it
+  // to the background, where nobody reads its answer: give the call the time its
+  // own flags ask for (every Orthanc call in the line, one after another), and
+  // where no Bash timeout holds that long, refuse while the answer can still
+  // name the tool that fits (claude-foundry #19).
+  let call: Args<'tool.call'> = e
+  let raisedTo: number | null = null
+  if (tool === 'Bash' && typeof input.command === 'string' && input.run_in_background !== true) {
+    const timer = shellTimer(input.timeout, await $.env.get('BASH_DEFAULT_TIMEOUT_MS'), await $.env.get('BASH_MAX_TIMEOUT_MS'))
+    const waits = shellOrthancCalls(input.command, manifest).map(entry => ({ wait: cliWait(entry.command, entry.args), times: entry.times, join: entry.join }))
+    const cover = coverShellWaits(waits, timer)
+    if (cover.kind === 'over') {
+      note.foundry = true
+      note.outcome = 'block'
+      note.reason = 'bash-wait-over-timer'
+      note.command = cover.total.longest.path
+      return { deny: shellWaitDenial(cover.total, cover.timer) }
+    }
+    if (cover.kind === 'raise') {
+      note.foundry = true
+      note.outcome = 'allow'
+      note.reason = 'bash-wait-raised'
+      note.command = cover.total.longest.path
+      raisedTo = cover.timeoutMs
+      call = { ...e, timeout: cover.timeoutMs }
+    }
+  }
   executed = true
-  const ran = tool === ORTHANC_CLI || tool === ORTHANC_HELP ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out)) : await next(e)
+  const ran =
+    tool === ORTHANC_CLI || tool === ORTHANC_HELP
+      ? await serveTool($, tool, input, snapshot?.loaded).then(served => ((failed = served.failed), (notRun = served.notRun), served.out))
+      : await next(call)
+  // A timeout the model did not ask for is said, not slipped in quietly: the
+  // result it reads carries the number the plugin handed the host.
+  const out =
+    raisedTo === null
+      ? ran
+      : { ...ran, context: [...(Array.isArray(ran.context) ? ran.context : []), `foundry: this Bash call ran with a ${raisedTo / 1000} s timeout, the wait its Orthanc calls ask for.`] }
   if (plan !== null && !failed) {
     const done = plan
     let latest: FdeSession | null = null
@@ -1761,7 +1924,7 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
     const rid = /ri\.branch\.[^"\s,}]+/.exec(text)?.[0]
     if (text !== '' && !text.includes('"errors": [\n')) await $.state.set(BRANCH, rid ?? classification.proposedName ?? null)
   }
-  return ran
+  return out
   } finally {
     if (plan?.isApply && (!executed || notRun)) {
       const signature = plan.signature
