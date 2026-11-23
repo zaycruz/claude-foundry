@@ -18,9 +18,10 @@ says so instead of falling back to REST.
   says `reason: cancelled`; a stop by the timer says `reason: timeout`. The same
   wait typed into `Bash` gets that budget too: the call's `timeout` is raised to
   what its own flags ask for — the waits of the Orthanc calls in one command,
-  added up when the shell runs them one after another (`a && b`, `;`, a counted
-  `for` loop), the larger of the two when they run instead of or alongside each
-  other (`a || b`, a pipeline), nothing for a job left running by `&` — up to the
+  added up when the shell can run them one after another (`a && b`, `;`, a counted
+  `for` loop, and `a || b`, because a wait that times out exits 1 and the retry
+  runs), the larger of the two only where they genuinely cannot both happen (a
+  pipeline, the arms of a `case`), nothing for a job left running by `&` — up to the
   shell's own limits (`BASH_DEFAULT_TIMEOUT_MS` 120 s, `BASH_MAX_TIMEOUT_MS` 600 s
   by default). A line that cannot fit is refused before it starts and given
   `orthanc_cli`, a `--timeout` that fits, and `run_in_background: true`; a line

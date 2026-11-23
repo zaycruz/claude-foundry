@@ -748,12 +748,14 @@ function stdinReader(words: readonly string[]): 'shell' | 'interpreter' | null {
 }
 
 /** One simple command: its words; fed: a heredoc or here-string feeds its stdin; split: it ended at an unquoted $( or backquote. */
-// The operator that ended a segment: 'alt' for `||` or a `case` arm's `;;`, the
-// next command runs only when this one failed or was the arm chosen; 'pipe' for
-// `|`, the next command runs alongside this one;
-// 'bg' for `&`, this command is left running and the line answers at once.
+// The operator that ended a segment: 'fail' for `||`, the next command runs only
+// when this one failed - which is what a wait that timed out does, so both are
+// still paid for; 'arm' for a `case` arm's `;;` and the pattern that opens the
+// next, the arms run instead of each other and only one is ever chosen; 'pipe'
+// for `|`, the next command runs alongside this one; 'bg' for `&`, this command
+// is left running and the line answers at once.
 // Absent: the next command runs after this one (`&&`, `;`, a newline).
-export type ShellJoin = 'alt' | 'pipe' | 'bg'
+export type ShellJoin = 'fail' | 'arm' | 'pipe' | 'bg'
 
 export type Segment = { words: string[]; fed: boolean; split: boolean; join?: ShellJoin }
 
@@ -806,7 +808,7 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
   // its words are not the whole call; `join` says how the next command relates
   // to this one ('alt' for ||, 'pipe' for |, 'bg' for a job left running).
   // After `;;` the next words are the next `case` arm's pattern, up to its `)`:
-  // they run nothing, so the arm they name stays an alternative to the last.
+  // they run nothing, and the arm they name runs instead of the arm before it.
   let armPattern = false
   const endSegment = (operator: '\n' | '$(' | '`' | '<(' | '&&' | '||' | ';;' | '|' | '&' | '' = '') => {
     endWord()
@@ -816,7 +818,7 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     // the arm before it.
     const arm = operator === ')' && armPattern
     const join: ShellJoin | undefined =
-      operator === '||' || operator === ';;' || arm ? 'alt' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
+      operator === '||' ? 'fail' : operator === ';;' || arm ? 'arm' : operator === '|' ? 'pipe' : operator === '&' ? 'bg' : undefined
     armPattern = operator === ';;' ? true : operator === ')' ? false : words.length > 0 ? false : armPattern
     if (words.length > 0) segments.push({ words, fed: false, split: operator === '$(' || operator === '`', join })
     words = []
@@ -889,7 +891,8 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
     } else if (SHELL_OPERATORS.includes(char)) {
       // `&&`, `||` and `;;` are one operator each: the first runs the two
       // commands in sequence, the second runs the right one only when the left
-      // one failed, and `;;` closes a `case` arm, so only one arm ever runs.
+      // one failed (a timed-out wait does fail, so both are still paid for), and
+      // `;;` closes a `case` arm, so only one arm ever runs.
       if ((char === '&' || char === '|' || char === ';') && command[index + 1] === char) {
         index += 1
         endSegment(char === '&' ? '&&' : char === '|' ? '||' : ';;')
@@ -1143,19 +1146,19 @@ type ShellCall =
     }
 
 // Where a command sits against the one before it, for the timer that has to hold
-// them all (hooks/process.ts coverShellWaits).
-export type ShellCallJoin = 'seq' | 'alt' | 'pipe' | 'bg' | 'unknown'
+// them all (hooks/process.ts coverShellWaits): 'seq' and 'fail' both pay for the
+// wait, 'arm' and 'pipe' stand in for one another, 'bg' is not waited for, and
+// 'unknown' is a call whose arguments the guard could not read.
+export type ShellCallJoin = 'seq' | 'fail' | 'arm' | 'pipe' | 'bg' | 'unknown'
 
 // `if … then A; else B; fi` runs one arm: the segment that opens with `else` or
 // `elif` is an alternative to what came before it.
 function joinOf(segment: Segment, index: number, segments: readonly Segment[]): ShellCallJoin {
   if (segment.split) return 'unknown'
   if (segment.join === 'bg') return 'bg'
-  const head = basename(segment.words[0])
-  if (head === 'else' || head === 'elif') return 'alt'
   const before = index > 0 ? segments[index - 1]! : undefined
   if (before?.split) return 'unknown'
-  return before?.join === 'alt' || before?.join === 'pipe' ? before.join : 'seq'
+  return before?.join ?? 'seq'
 }
 
 const LOOP_HEADS = new Set(['for', 'while', 'until', 'select'])

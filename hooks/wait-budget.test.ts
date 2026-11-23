@@ -527,7 +527,7 @@ test('B1: a Bash call that waits gets the time its own flags ask for', async () 
   expect(coverShellWaits([{ wait, times: 1 }], DEFAULT_SHELL)).toEqual({
     kind: 'raise',
     timeoutMs: 550_000,
-    total: { totalMs: 550_000, calls: 1, longest: wait, serial: true },
+    total: { totalMs: 550_000, calls: 1, longest: wait, serial: true, onFailure: false },
     timer: DEFAULT_SHELL,
   })
   expect(shellWaits('orthanc repository checks wait ri.r v1 --timeout 300')).toEqual([550])
@@ -557,7 +557,7 @@ test('B2: the cover reads the shell\'s limits, and leaves a call that has enough
   const timer = shellTimer(undefined, '30000', '60000')
   expect(coverShellWaits([{ wait, times: 1 }], timer)).toEqual({
     kind: 'over',
-    total: { totalMs: 550_000, calls: 1, longest: wait, serial: true },
+    total: { totalMs: 550_000, calls: 1, longest: wait, serial: true, onFailure: false },
     timer,
   })
 })
@@ -617,7 +617,7 @@ test('B6: one command line runs its Orthanc waits one after another, so they add
   expect(coverShellWaits(shellCovers(fits), DEFAULT_SHELL)).toEqual({
     kind: 'raise',
     timeoutMs: 570_000,
-    total: { totalMs: 570_000, calls: 2, longest: cliWait(CHECKS_WAIT, ['ri.b', 'v1', '--timeout', '50']), serial: true },
+    total: { totalMs: 570_000, calls: 2, longest: cliWait(CHECKS_WAIT, ['ri.b', 'v1', '--timeout', '50']), serial: true, onFailure: false },
     timer: DEFAULT_SHELL,
   })
   // Two 450 s waits are 900 s of waiting, whatever each one costs alone: this is
@@ -663,22 +663,30 @@ test('B10: a counted loop pays its wait once per word', async () => {
   }
 })
 
-test('B11: waits that do not run in sequence are not added up', async () => {
-  // `a || b` runs the right-hand call only when the left failed; the legs of a
-  // pipeline run together: the timer is the larger of the two, not their sum.
-  const either = 'orthanc repository checks wait ri.a v1 --timeout 200 || orthanc repository checks wait ri.b v1 --timeout 200'
-  const pipe = 'orthanc repository checks wait ri.a v1 --timeout 200 | jq .data.status'
-  for (const [line, calls] of [
-    [either, 2],
-    ['orthanc repository checks wait ri.a v1 --timeout 200 | orthanc repository checks wait ri.b v1 --timeout 200', 2],
-    ['if orthanc repository checks wait ri.a v1 --timeout 200; then echo ok; else orthanc repository checks wait ri.b v1 --timeout 200; fi', 2],
-    ['case $r in one) orthanc repository checks wait ri.a v1 --timeout 200;; two) orthanc repository checks wait ri.b v1 --timeout 200;; esac', 2],
-    [pipe, 1],
-  ] as [string, number][]) {
+test('B11: only what cannot both happen is priced as the larger of two', async () => {
+  // `a || b` runs its right-hand call when the left one failed, and a wait that
+  // times out exits 1: the retry line runs both waits, so both are charged. The
+  // same for an `if` condition and an `else` arm - the condition always runs.
+  const retry = 'orthanc repository checks wait ri.a v1 --timeout 200 || orthanc repository checks wait ri.b v1 --timeout 200'
+  const refusal = shellTotalS(retry)
+  if (refusal.kind !== 'over') throw new Error('the retry line waits twice: 900 s, not 450 s')
+  expect({ totalS: refusal.total.totalMs / 1000, calls: refusal.total.calls, onFailure: refusal.total.onFailure }).toEqual({ totalS: 900, calls: 2, onFailure: true })
+  expect(shellWaitDenial(refusal.total, DEFAULT_SHELL)).toContain('a wait that times out exits 1, so the one after `||` runs too')
+  // The `if` line costs the same 900 s, and is charged without the `||` reason.
+  expect(shellTotalS('if orthanc repository checks wait ri.a v1 --timeout 200; then echo ok; else orthanc repository checks wait ri.b v1 --timeout 200; fi')).toMatchObject({
+    kind: 'over',
+    total: { totalMs: 900_000, calls: 2, onFailure: false },
+  })
+  // Three waits in an `&&`/`||` chain are three waits run in sequence.
+  expect(shellTotalS('orthanc repository checks wait ri.a v1 --timeout 100 && orthanc repository checks wait ri.b v1 --timeout 100 || orthanc repository checks wait ri.c v1 --timeout 100')).toMatchObject({ kind: 'over', total: { totalMs: 1_050_000, calls: 3 } })
+  // What genuinely cannot both happen is the larger: the legs of a pipeline run
+  // together, and one `case` arm is chosen between.
+  for (const line of [
+    'orthanc repository checks wait ri.a v1 --timeout 200 | orthanc repository checks wait ri.b v1 --timeout 200',
+    'case $r in one) orthanc repository checks wait ri.a v1 --timeout 200;; two) orthanc repository checks wait ri.b v1 --timeout 200;; esac',
+  ]) {
     const cover = shellTotalS(line)
-    // 450 s of waiting: the larger arm, never the 900 s sum, so no refusal.
     expect({ line, kind: cover.kind, timeoutS: cover.kind === 'raise' ? cover.timeoutMs / 1000 : 0 }).toEqual({ line, kind: 'raise', timeoutS: 450 })
-    expect({ line, calls }).toEqual({ line, calls })
   }
 })
 
@@ -686,6 +694,7 @@ test('B12: a job the shell leaves running has no foreground wait to cover', asyn
   for (const line of [
     'orthanc repository checks wait ri.r v1 --timeout 1200 > wait.log 2>&1 &',
     'orthanc repository checks wait ri.a v1 --timeout 300 & orthanc repository checks wait ri.b v1 --timeout 300 & wait',
+    'for r in ri.a ri.b ri.c; do orthanc repository checks wait $r v1 --timeout 200 & done; wait',
   ]) {
     expect({ line, cover: shellTotalS(line) }).toEqual({ line, cover: { kind: 'keep' } })
   }
@@ -742,19 +751,21 @@ test('B2 B4: what does not wait, or already has the time, reaches the tool as it
 
 test('B11 B12 B13: through the gate, only a line the guard is sure of is refused', async ($, on) => {
   const { h } = harness(on)
-  // Two 450 s waits joined by `||`: the second runs only if the first fails, so
-  // the line is raised to the larger wait rather than refused for their sum.
-  const either = 'orthanc repository checks wait ri.a v1 --timeout 200 || orthanc repository checks wait ri.b v1 --timeout 200'
-  expect((await bash($, either, { timeout: 1_000 })).deny).toBe(undefined)
-  // The same two waits in sequence are 900 s of waiting: refused, and the
-  // background job is left alone.
-  expect((await bash($, either.replace(' || ', ' && '), { timeout: 1_000 })).deny).toContain('add up to 900 s')
+  // Two 450 s waits joined by `||` are refused: a wait that timed out exits 1,
+  // so the retry line runs both, and 900 s is over any Bash timeout.
+  const retry = 'orthanc repository checks wait ri.a v1 --timeout 200 || orthanc repository checks wait ri.b v1 --timeout 200'
+  expect((await bash($, retry, { timeout: 1_000 })).deny).toContain('add up to 900 s')
+  // The pipeline spelling runs its legs together and is only raised; so is the
+  // background job, which the line never waits for.
+  expect((await bash($, retry.replace(' || ', ' && '), { timeout: 1_000 })).deny).toContain('add up to 900 s')
+  expect((await bash($, retry.replace(' || ', ' | '), { timeout: 1_000 })).deny).toBe(undefined)
   expect((await bash($, 'orthanc repository checks wait ri.r v1 --timeout 1200 > wait.log 2>&1 &', { timeout: 1_000 })).deny).toBe(undefined)
   // A --timeout the guard cannot read is the caller's own number: no refusal on
   // a default the command never asked for.
   expect((await bash($, 'orthanc repository checks wait ri.r v1 --timeout $((5*60))', { timeout: 1_000 })).deny).toBe(undefined)
   // The raised line carries 450 s; the two left alone carry what the model gave.
   expect(h.bash.map(entry => entry.timeoutMs)).toEqual([450_000, 1_000, 1_000])
+  // (pipeline raised to 450 s; the two left alone keep what the model gave.)
 })
 
 test('B2: the cover is the session\'s own shell limits, not the plugin\'s guess', async ($, on) => {

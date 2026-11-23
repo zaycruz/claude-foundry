@@ -12,10 +12,11 @@
 // BASH_MAX_TIMEOUT_MS, or 600 s. Past that the host moves the command to the
 // background, so a `checks wait --timeout 1200` run through Bash never answers
 // the turn it started in. shellTimer reads those limits, coverShellWaits prices
-// the line's Orthanc calls against them (what runs in sequence adds up, what
-// runs instead of or alongside each other does not), and shellWaitDenial writes
-// what to answer when nothing fits. Pure: the call's env and the rewrite of the
-// call stay in register.tsx.
+// the line's Orthanc calls against them (everything the shell may run one after
+// another adds up, including `a || b`, whose right-hand call runs when a wait
+// that timed out exits 1; only a pipeline's legs and a `case` arm's choices are
+// the larger of two), and shellWaitDenial writes what to answer when nothing
+// fits. Pure: the call's env and the rewrite of the call stay in register.tsx.
 
 import type { HookStream, ProcessSpawnChunk, ProcessSpawnResult } from 'claude-code'
 
@@ -69,9 +70,10 @@ export type ShellTimer = { givenMs: number; maxMs: number }
  * joins the call before it ('seq' and the two unnamed spellings aside). */
 export type ShellWait = { wait: CliWait; times: number; join?: ShellCallJoin }
 
-/** What a command's Orthanc waits cost, the longest among them, and whether the
- * guard is sure they run one after another (only then is a refusal honest). */
-export type ShellTotal = { totalMs: number; calls: number; longest: CliWait; serial: boolean }
+/** What a command's Orthanc waits cost, the longest among them, whether the
+ * guard is sure of that sequence, and whether any of them runs on another's
+ * failure (so a refusal can say why it charged both). */
+export type ShellTotal = { totalMs: number; calls: number; longest: CliWait; serial: boolean; onFailure: boolean }
 
 // A call the guard cannot price: its arguments continue inside a substitution,
 // or a wait flag carries a value Orthanc would read as its default rather than
@@ -85,9 +87,13 @@ function unpriced(entry: ShellWait): boolean {
  *
  * `a && b`, `a; b` and a newline run one after another: their waits add up, and
  * a line raised only to the longest of them loses the later answer. `a || b`
- * runs the right-hand call only when the left one failed, `a | b` runs its legs
- * together, and `if … then A; else B; fi` runs one arm: the larger of two is
- * what the timer must hold. `a &` answers at once and costs the turn nothing.
+ * runs its right-hand call when the left one failed - and `checks wait` exits 1
+ * when a check fails or time runs out, so a retry line waits twice and adds up
+ * too, with the reason said in the refusal. An `if` condition and an `else` arm
+ * are the same shape: the condition runs, then one arm, so both are charged.
+ * Only what genuinely cannot both happen is the larger of two: the legs of `a | b`
+ * run together, and the arms of a `case` are chosen between. `a &` answers at
+ * once and costs the turn nothing.
  * What cannot be priced counts for nothing and makes the total unconfirmed, so
  * the line is never refused on a number the guard is not sure of.
  */
@@ -95,18 +101,25 @@ function totalOf(waiting: readonly ShellWait[]): ShellTotal {
   let totalMs = 0
   let calls = 0
   let serial = true
+  let onFailure = false
   let longest = waiting[0]!.wait
   for (const entry of waiting) {
     if (entry.join === 'bg') continue
     const passes = Math.max(1, entry.times)
     const cost = entry.wait.waitMs * passes
-    const alternative = entry.join === 'alt' || entry.join === 'pipe'
-    if (alternative || unpriced(entry)) serial = false
-    totalMs = alternative ? Math.max(totalMs, cost) : totalMs + (unpriced(entry) ? 0 : cost)
+    // A `case` arm and a pipeline leg are the two spellings where one wait can
+    // stand in for another: the arms are chosen between, the legs run together.
+    const join = entry.join ?? 'seq'
+    const instead = join === 'arm' || join === 'pipe'
+    if (join === 'fail') onFailure = true
+    // Only a call the guard cannot place makes the total unconfirmed; an arm or a
+    // pipe leg it is sure of, and prices as the larger of two.
+    if (unpriced(entry)) serial = false
+    totalMs = instead ? Math.max(totalMs, cost) : totalMs + (unpriced(entry) ? 0 : cost)
     calls += passes
     if (entry.wait.waitMs > longest.waitMs) longest = entry.wait
   }
-  return { totalMs, calls, longest, serial }
+  return { totalMs, calls, longest, serial, onFailure }
 }
 
 // A positive, finite count of milliseconds; the host reads its two variables the
@@ -172,6 +185,9 @@ export function shellWaitDenial(total: ShellTotal, timer: ShellTimer): string {
     ? `run it with orthanc_cli, which waits up to ${seconds(longest.capMs)} s for it`
     : `run each wait in its own command with orthanc_cli, which waits up to ${seconds(longest.capMs)} s for 'orthanc ${longest.path}'`
   if (longest.overCap) cli += longest.maxTimeoutS === undefined ? `, where a smaller ${smaller} fits` : `, with --timeout ${longest.maxTimeoutS} or less`
+  // Both waits of `a || b` are charged: the one that timed out exits 1, and the
+  // second then runs. Say so, or the number reads like a mistake.
+  const why = total.onFailure ? ' (a wait that times out exits 1, so the one after `||` runs too)' : ''
   const ways = [cli]
   // A call that fits orthanc_cli but not Bash also has a --timeout that fits
   // Bash: say the number, or the model has to guess it and be refused again.
@@ -179,5 +195,5 @@ export function shellWaitDenial(total: ShellTotal, timer: ShellTimer): string {
   if (!longest.overCap && calls === 1 && fitsBashS >= 1) ways.push(`pass --timeout ${fitsBashS} or less, which fits Bash`)
   ways.push('pass run_in_background: true and read the output when the command lands')
   const cost = calls === 1 ? `'orthanc ${longest.path}' waits ${seconds(totalMs)} s here` : `${calls} Orthanc waits in this command add up to ${seconds(totalMs)} s, the longest 'orthanc ${longest.path}' at ${seconds(longest.waitMs)} s each`
-  return `Bash runs a command for at most ${seconds(timer.maxMs)} s, and ${cost}, so the command was not run. To get its result: ${ways.join('; ')}.`
+  return `Bash runs a command for at most ${seconds(timer.maxMs)} s, and ${cost}${why}, so the command was not run. To get its result: ${ways.join('; ')}.`
 }
