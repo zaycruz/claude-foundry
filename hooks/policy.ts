@@ -1851,21 +1851,25 @@ export function touchesFoundryTool(tool: string, input: Record<string, unknown>)
 }
 
 // The guard's own write vocabulary. Sets elsewhere in this file already treat these verbs
-// as protected writes on the Orthanc side, each in its own way. A work branch is required
-// by `BRANCH_REQUIRED_PATHS` (`dataset files upload`, `dataset transactions start`,
-// `streams stream reset`, and about fifty more). Agents never run `MAIN_ONLY_WRITES`
-// (`ontology object-upsert` and two others), and `MAIN_WRITES`, `BASE_BRANCH_WRITES` and
-// `POSITIONAL_BRANCH_WRITES` ask in every mode. `PROMOTIONS` (`proposal accept`,
-// `proposal merge` and three others) asks, and runs in `yolo`, because a merge lands
-// through a proposal rather than on main. An MCP tool naming one of those verbs is the
-// same kind of write, so it is a write here too. This list also carries acts nothing else
-// here names, and it overlaps the ones that do: `DESTRUCTIVE_WORDS` covers what leaves
-// something gone and `destructiveTermIn` reads the whole name for those, so
+// as protected writes on the Orthanc side, each in its own way, and none of them is the
+// whole set. A work branch is required by `BRANCH_REQUIRED_PATHS` (`dataset files upload`,
+// `dataset transactions start`, `streams stream reset` and about fifty more). Agents never
+// run `MAIN_ONLY_WRITES` (`ontology object-upsert` and two others). `MAIN_WRITES` asks in
+// every mode (`workshop module publish`, `Y15`). `BASE_BRANCH_WRITES` and
+// `POSITIONAL_BRANCH_WRITES` ask when the call names main: a scenario whose base is not
+// provably one work branch, or a positional that is `main`. A scenario plan with no
+// `--apply` writes nothing and asks no one (`SC5`). `PROMOTIONS` (`proposal accept`,
+// `proposal merge` and three others) asks, and `yolo` runs it, because a merge lands
+// through a proposal rather than on main. An MCP tool naming one of those verbs is the same
+// kind of write, so it is a write here too. This list also carries acts nothing else here
+// names, and it overlaps the ones that do: `DESTRUCTIVE_WORDS` covers what leaves something
+// gone, and `destructiveTermIn` reads the whole name for those, so
 // `view_branch_and_revoke_protection` is a write with or without this list, while
 // `describe_branch_and_upsert_object` is a write only because `upsert` is in it. Measured
-// both ways, and `MS11` and `MS12` in `mcp-guard.test.ts` keep that true: drop `upsert` and
-// that name answers 'read' and runs. The list will never be complete, which is why an
-// unreadable name fails closed instead of running.
+// both ways. `MS11` and `MS12` in `mcp-guard.test.ts` keep the two claims that matter here
+// true: drop `upsert` and that name answers 'read' and runs, and the branch-required,
+// main-only and promotion behaviour named above stays as described. The list will never be
+// complete, which is why an unreadable name fails closed instead of running.
 const WRITE_WORDS = new Set(['accept', 'add', 'apply', 'archive', 'approve', 'build', 'cancel', 'close', 'create', 'decline', 'delete', 'deploy', 'destroy', 'drop', 'edit', 'grant', 'install', 'merge', 'post', 'promote', 'protect', 'publish', 'purge', 'put', 'reject', 'remove', 'rename', 'reset', 'restart', 'revert', 'revise', 'revoke', 'rollback', 'rotate', 'set', 'start', 'stop', 'submit', 'sync', 'terminate', 'truncate', 'unprotect', 'update', 'upload', 'upsert', 'write'])
 const AMBIGUOUS_WORDS = new Set(['call', 'execute', 'invoke', 'run', 'trigger'])
 const READ_WORDS = new Set(['check', 'describe', 'get', 'health', 'inspect', 'list', 'preview', 'query', 'read', 'search', 'view'])
