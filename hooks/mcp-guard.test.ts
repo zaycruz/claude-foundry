@@ -110,17 +110,18 @@ test('MS4: the plugin owns mcp__foundry__, and its two tools keep their own path
 })
 
 test('MS5: a server with no Foundry name is left alone', async () => {
-  // The last six are the shapes a real Claude config holds (an operator's own
-  // mcpServers keys, written here with neutral names): a hyphen, a vendor word and
-  // a project suffix, none of them Foundry.
+  // The last six are the shapes a real Claude config holds: a short build tool, a
+  // vendor account, a database, a notes tool and two project-prefixed trackers. The
+  // operator's real server keys have the same shapes and none carries a Foundry
+  // name; they stay out of this file.
   for (const tool of [
     'mcp__github__create_issue',
     'mcp__filesystem__write_file',
     'mcp__context7__search_docs',
-    'mcp__rbe__run_build',
-    'mcp__clerk__create_user',
-    'mcp__supabase__run_query',
-    'mcp__reasoning-bank__write_note',
+    'mcp__buildtool__run_build',
+    'mcp__accounts__create_user',
+    'mcp__database__run_query',
+    'mcp__notes-service__write_note',
     'mcp__linear-project-a__create_issue',
     'mcp__linear-project-b__update_issue',
     'Read',
