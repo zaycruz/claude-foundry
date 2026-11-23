@@ -25,8 +25,9 @@ says so instead of falling back to REST.
   destructive when its command name, or one of its flags, says something is left
   gone or overwritten — `marketplace installation uninstall`,
   `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
-  given `--force`, or when the value of one of its flags is an act Orthanc lists
-  among that flag's accepted values (`--transaction-type DELETE`).
+  given `--force`, or when the value of one of its flags is an act — one Orthanc
+  lists among that flag's accepted values (`--transaction-type DELETE`), or one
+  spelled in caps the way Orthanc spells its enumerated values.
   The rule reads the name and anything that looks like a flag. A branch name, a
   positional, and a value such as `keep-outputs` or `delete-me` ask nothing. An
   argument that starts with a hyphen looks like a flag, so it asks: reading too

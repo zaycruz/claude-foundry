@@ -77,6 +77,7 @@
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
+import { manifestFrom } from './orthanc'
 import {
   classifyCall,
   classifyMcpIntent,
@@ -177,6 +178,7 @@ const MANIFEST: ManifestCommand[] = [
 ]
 
 const DATASET = 'ri.foundry.main.dataset.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
+const MODULE = 'ri.workshop.main.module.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
 const REPO = 'ri.stemma.main.repository.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
 const INSTALLATION = 'ri.marketplace.main.installation.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
 const SCHEDULE = 'ri.scheduler.main.schedule.0f6c2a1e-1b2c-4d5e-8f90-a1b2c3d4e5f6'
@@ -361,9 +363,9 @@ test('D8: a branch name, a positional or a flag value spelling a destructive wor
     ['dataset create', ['--branch', 'agent-x', '--description', 'a delete of the old rows']],
     ['marketplace installation upgrade', [INSTALLATION, '--mode', 'keep-outputs']],
     ['orchestration builds create', ['--branch', 'agent-x', '--job', 'revert']],
-    // A caps branch name equal to a table word does ask; pinned as the cost of
-    // reading an enum, and the safe direction.
-    ['dataset branches create', [DATASET, '--name', 'agent-x']],
+    // A branch-creation path is never destructive, whatever its argument says:
+    // policy.ts answers it before the rule runs. D14 pins the caps-value cost of
+    // reading an enum, on a command the rule does reach.
   ] as [string, string[]][]) {
     expect({ command, args, destructive: isDestructive(command, args) }).toEqual({ command, args, destructive: false })
   }
@@ -582,7 +584,10 @@ test('D12: the ask and the log name which of the four the guard read', async () 
   // shapes do not remove it: `--description` is no option of `dataset create`, so
   // the guard has nothing to read the next word against, and Orthanc may take that
   // word as the value or refuse it. The ask is the safe direction, pinned so the
-  // limit stays a known one, and D14 pins where a declared option changes it.
+  // limit stays a known one. A declared option does not change it: `--description`
+  // is no option of this command, and a value that starts with a hyphen is read as
+  // an option either way, in the `--flag value` and the `--flag=value` spelling
+  // alike (D14).
   const hyphenValue = classifyCall(CLI, { command: 'dataset create', args: ['people', '--description', '-remove the old rows'] }, MANIFEST, 'agent/x')
   expect(hyphenValue?.isDestructive).toBe(true)
 
@@ -664,6 +669,68 @@ test('the term table reads the 0.7.11 surface by what each write leaves gone', a
   // it. The recount command beside SURFACE_TRUE is the check, and FND-11's
   // release step is where it belongs.
   expect(SURFACE.filter(([, destructive]) => destructive).length).toBe(SURFACE_TRUE)
+})
+
+// D14 is the same rule read through the seam that supplies the shapes: the
+// manifest below is Orthanc's own JSON, not a hand-built ManifestCommand, so the
+// parser in orthanc.ts is what puts `values` in front of the value lane.
+const LIVE_MANIFEST = manifestFrom({
+  schema_version: 'foundry-agent-v1',
+  data: {
+    commands: [
+      {
+        path: 'dataset transactions start',
+        kind: 'mutation',
+        args: [
+          { kind: 'positional', name: 'dataset_rid', takes_value: true },
+          { kind: 'option', flag: '--branch', takes_value: true },
+          { kind: 'option', flag: '--transaction-type', takes_value: true, default: 'APPEND', values: ['APPEND', 'UPDATE', 'SNAPSHOT', 'DELETE'] },
+          { kind: 'option', flag: '--apply', takes_value: false },
+        ],
+      },
+      {
+        // A command whose option declares nothing: here the guard has only the
+        // spelling to go on, which is why the caps form asks and a name does not.
+        path: 'workshop module publish',
+        kind: 'mutation',
+        args: [
+          { kind: 'positional', name: 'module_rid', takes_value: true },
+          { kind: 'option', flag: '--tag', takes_value: true },
+        ],
+      },
+    ],
+  },
+})
+
+const liveDestructive = (command: string, args: string[]) =>
+  classifyCall(CLI, { command, args }, LIVE_MANIFEST, 'agent/x')?.isDestructive ?? false
+
+test('D14: the shapes that decide the value lane come from Orthanc manifest JSON', async () => {
+  // The parser hop. destructive.test.ts builds ManifestCommand literals elsewhere,
+  // which is not how the runtime gets them: register.tsx reads the agent-manifest
+  // and manifestFrom parses it. Cut the `values` read in orthanc.ts and only this
+  // test can notice, on the one command whose erasure rides on that list.
+  const erased = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', 'delete', '--apply'] }, LIVE_MANIFEST, 'agent/x')
+  expect(erased?.isDestructive).toBe(true)
+  expect(erased?.destructiveWhy).toBe('--transaction-type=DELETE')
+  expect(ladderDecision('allow-edits', erased!, approve).outcome).toBe('ask')
+  expect(liveDestructive('dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type', 'APPEND'])).toBe(false)
+
+  // Where an option declares no values, the caps spelling is all the guard has.
+  // This is the lane that will exist for almost every flag Orthanc ships, so it is
+  // pinned on its own: a name stays a name, and a caps act asks.
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag', 'DELETE'])).toBe(true)
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag', 'delete'])).toBe(false)
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag', 'v1-delete'])).toBe(false)
+
+  // A declared boolean owns no value, so the word after it is not read as one.
+  // Orthanc would refuse `--apply DELETE` as a stray argument, and the guard says
+  // nothing about it: pinned so a change here is a decision, not a drift.
+  expect(liveDestructive('dataset transactions start', [DATASET, '--branch', 'agent-x', '--apply', 'DELETE'])).toBe(false)
+
+  // The two spellings of a hyphen-led value ask alike.
+  expect(liveDestructive('dataset transactions start', [DATASET, '--transaction-type=-DELETE'])).toBe(true)
+  expect(liveDestructive('workshop module publish', [MODULE, '--tag=-delete'])).toBe(true)
 })
 
 // ---------------------------------------------------------------------------

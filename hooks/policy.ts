@@ -316,10 +316,13 @@ type GivenFlag = { flag: string; value: string | null; values: readonly string[]
  * v0.7.11, 990 of them, 573 with a value, 417 without, and 10 commands with no
  * options at all — and `orthanc.ts` parses them into `ManifestCommand.flags`, so
  * the guard does not have to guess whether a hyphen-led word is a flag or someone's
- * value. `--flag=v` and `--flag v` are one call. Two readings survive as a guess,
- * both on the safe side: an option the manifest does not name is still read as an
- * option, and a word after a flag whose shape is unknown is read as its value, so a
- * missing or stale pin asks more rather than less. */
+ * value. `--flag=v` and `--flag v` are one call, including when the value starts with
+ * a hyphen: the `=` form reads its remainder as an option too, so the two spellings
+ * cannot ask differently. Two readings survive as a guess, both on the safe side: an
+ * option the manifest does not name is still read as an option, and a word after a
+ * flag whose shape is unknown is read as its value, so a pin that lost its args asks
+ * more. One shape error asks less, and is worth knowing: an option that declares
+ * `takes_value: false` owns no value, so the word after it is never read as one. */
 function givenFlags(args: readonly string[], shapes: ReadonlyMap<string, ManifestFlag>): GivenFlag[] {
   const given: GivenFlag[] = []
   for (let index = 0; index < args.length; index += 1) {
@@ -338,6 +341,11 @@ function givenFlags(args: readonly string[], shapes: ReadonlyMap<string, Manifes
       else index += 1
     }
     given.push({ flag, value, values: shape?.values ?? [] })
+    // A value that starts with a hyphen is also an option as far as this rule is
+    // concerned, so `--flag=-remove the old rows` asks where `--flag -remove the old
+    // rows` asks. One spelling asking and the other silent would be a hole a caller
+    // could fall into by accident.
+    if (value !== null && value.startsWith('-')) given.push({ flag: value, value: null, values: [] })
   }
   return given
 }
@@ -1559,7 +1567,7 @@ export function modeGuidance(mode: ApprovalMode): string {
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Writes the agent manifest marks operator_approval, such as turning branch protection off, also ask the operator. ' +
         `A mutation is destructive, and asks the operator outside yolo, when its command name or one of its flags says something is ${destructiveWords()}, ` +
-        'when a value a flag takes names such an act among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`), ' +
+        'when a value a flag takes names such an act, either among the values Orthanc lists for that flag (`dataset transactions start --transaction-type DELETE`) or spelled in caps the way Orthanc spells an enumerated value, ' +
         'or when it is given --force. ' +
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
