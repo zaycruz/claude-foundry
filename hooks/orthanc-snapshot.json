@@ -3109,7 +3109,7 @@
       "path": "workshop module widgets"
     }
   ],
-  "min_orthanc": "0.7.13",
-  "orthanc_tag": "v0.7.13",
+  "min_orthanc": "0.7.14",
+  "orthanc_tag": "v0.7.14",
   "snapshot_version": 1
 }
