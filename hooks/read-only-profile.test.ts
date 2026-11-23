@@ -822,6 +822,31 @@ test('Q20: a command that is not known to only read cannot meet the store', asyn
     '{ rm -rf ~/.config/foundry; }',
     'time rm -rf ~/.config/foundry',
     'nice -n 5 truncate -s0 ' + mark,
+    // A variable set for a reader changes what it runs.
+    "GIT_EXTERNAL_DIFF='rm -rf ~/.config/foundry' git diff",
+    "LESSOPEN='|rm -rf ~/.config/foundry %s' less notes.txt",
+    `PATH=/tmp/evil:$PATH cat ${mark}`,
+    // A long option abbreviated as GNU allows, and a reader from a path of its own.
+    `echo '{}' | sort --o ${mark}`,
+    `sort --out=${mark} /dev/null`,
+    `git diff --ou=${mark}`,
+    `less '+!rm -rf ~/.config/foundry' notes.txt`,
+    `/tmp/cat ${mark}`,
+    `./ls ${mark}`,
+    // An unknown variable with a default, and the working directory as a variable.
+    'rm -rf "${NOPE:-$HOME/.config/foundry}"',
+    'rm -rf ${NOPE-~/.config/foundry}',
+    'rm -rf "${NOPE:-${HOME}/.config}/foundry"',
+    'cd ~/.config && rm -rf "$PWD/foundry"',
+    'cd ~/.config && rm -rf "$(pwd)/foundry"',
+    // A directory above the store carried by a pipe, a substitution or a loop.
+    'echo ~/.config | xargs rm -rf',
+    'rm -rf $(echo ~/.config)',
+    'ls -d ~ | while read d; do rm -rf "$d/.config"; done',
+    'for d in ~/.config; do rm -rf "$d/foundry"; done',
+    // `!(…)` at command position is a negated subshell, not a pattern.
+    '!(rm -rf ~/.config/foundry)',
+    "cd ~/.config && rm -rf !(x)",
   ]) {
     const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
     if (deny === '') denied.push(command)
@@ -847,6 +872,10 @@ test('Q20: a command that is not known to only read cannot meet the store', asyn
     'rm -rf ~/.config/{foundry}',
     'cd ~ && npm test',
     'cd ~/projects/app && rm -rf node_modules && npm ci',
+    `/usr/bin/cat ${mark}`,
+    'ls ~ | wc -l',
+    "find ~/projects -name '*.pyc' | xargs rm -f",
+    'for f in src/*.ts; do rm -f "$f.bak"; done',
     `cat > notes.md <<'EOF'\nthe mark lives in ${mark}\nEOF`,
   ])
     expect({ command, deny: (await fileTool($, 'Bash', { command })).deny }).toEqual({ command, deny: undefined })

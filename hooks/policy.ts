@@ -1485,15 +1485,23 @@ function shellWords(command: string): { segments: Segment[]; code: string[]; hid
       quote = '"'
       quoted = true
       index += 1
-    } else if (char === '(' && word !== '' && '@+*?!'.includes(word.at(-1)!)) {
+    } else if (
+      char === '(' &&
+      word !== '' &&
+      '@+*?!'.includes(word.at(-1)!) &&
+      !(word === '!' && words.every(item => SHELL_KEYWORDS.has(item) || ASSIGNMENT_WORD.test(item)))
+    ) {
       // An extglob group (`+(f)oundry`, `!(x)`) is part of the word, as bash reads it
-      // under `shopt -s extglob`; without it bash refuses the line anyway.
+      // under `shopt -s extglob`; without it bash refuses the line anyway. At command
+      // position `!(…)` is bash's negation of a subshell and is read as that.
       let depth = 0
       let last = index
       for (; last < command.length; last += 1) {
         if (command[last] === '(') depth += 1
         else if (command[last] === ')' && (depth -= 1) === 0) break
       }
+      // A substitution inside the group still runs (`+($(cmd))`), so it is read.
+      code.push(...substitutionsIn(command.slice(index, last + 1)))
       word += command.slice(index, last + 1)
       index = last
     } else if (char === "'" || char === '"') {
@@ -2395,23 +2403,34 @@ const STORE_READERS = new Set([
   'cat', 'tac', 'ls', 'stat', 'file', 'wc', 'head', 'tail', 'less', 'more', 'grep', 'egrep', 'fgrep', 'jq',
   'diff', 'cmp', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'du', 'df', 'realpath',
   'readlink', 'dirname', 'basename', 'echo', 'printf', 'test', '[', '[[', 'true', 'false', ':', 'pwd', 'cd',
-  'pushd', 'popd', 'which', 'type', 'strings', 'hexdump', 'od', 'column', 'nl', 'id', 'whoami', 'date',
-  'sleep', 'export', 'declare', 'local', 'readonly', 'typeset', 'shopt', 'set', 'unset',
+  'pushd', 'popd', 'which', 'type', 'strings', 'hexdump', 'od', 'column', 'nl', 'id', 'whoami', 'date', 'sleep',
   // Text filters: they read files or stdin and write stdout only.
-  'tr', 'cut', 'paste', 'sort', 'join', 'comm', 'fold', 'fmt', 'expand', 'unexpand', 'rev', 'seq', 'base64',
-  'zcat', 'printenv', 'uname', 'tree', 'rg', 'ag', 'fd', 'eza', 'exa',
+  'tr', 'cut', 'paste', 'sort', 'join', 'comm', 'fold', 'fmt', 'expand', 'unexpand', 'rev', 'seq', 'zcat',
+  'printenv', 'uname',
 ])
-const READER_WRITE_FLAG: Record<string, RegExp> = {
-  less: /^(?:-[A-Za-z]*[oO]|--log-file|--LOG-FILE)/,
-  file: /^(?:-[A-Za-z]*C|--compile)/,
-  date: /^(?:-[A-Za-z]*s|--set)/,
-  sort: /^(?:-[A-Za-z]*o|--output)/,
-  tree: /^(?:-[A-Za-z]*o|--output)/,
-  rg: /^--pre(?:=|$)/,
-  fd: /^(?:-[A-Za-z]*[xX]|--exec|--exec-batch)/,
-  ag: /^--pager(?:=|$)/,
-  base64: /^(?:-[A-Za-z]*o|--output)/,
+// The flags with which a reader writes a file or runs a program: short flags (also
+// bundled, `-ro`), long options with every abbreviation GNU accepts (`--o`, `--out=`),
+// and `+command` for the pagers.
+const READER_WRITE_FLAG: Record<string, { short?: RegExp; long?: string[]; plus?: boolean }> = {
+  less: { short: /^-[A-Za-z]*[oO]/, long: ['log-file', 'LOG-FILE'], plus: true },
+  more: { plus: true },
+  file: { short: /^-[A-Za-z]*C/, long: ['compile'] },
+  date: { short: /^-[A-Za-z]*s/, long: ['set'] },
+  sort: { short: /^-[A-Za-z]*[oT]/, long: ['output', 'compress-program', 'temporary-directory'] },
 }
+const GIT_WRITE_FLAG = { short: /^-[A-Za-z]*O/, long: ['output', 'open-files-in-pager', 'exec', 'upload-pack', 'receive-pack', 'ext-diff', 'textconv'] }
+/** Whether a word is one of these writing flags. */
+function writingFlag(word: string, flags: { short?: RegExp; long?: string[]; plus?: boolean }): boolean {
+  if (word.startsWith('--')) {
+    const name = word.slice(2).split('=')[0]!
+    return name !== '' && (flags.long ?? []).some(option => option.startsWith(name))
+  }
+  if (flags.plus === true && word.startsWith('+')) return true
+  return flags.short !== undefined && word.startsWith('-') && flags.short.test(word)
+}
+// A program named by a path counts only from a standard directory: `/tmp/cat` is
+// whatever someone put there.
+const STANDARD_BIN = /^(?:\/usr\/local|\/usr|\/opt\/homebrew|)\/s?bin\/[^/]+$/
 // Shell words that open or close a construct; the command is the word after them.
 const SHELL_KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', '}', 'fi', 'done', 'esac', 'in', '(', ')'])
 // Keywords whose words are data to bind or match (`for f in …`, `case x in`).
@@ -2435,7 +2454,6 @@ const GIT_READ_SUBCOMMAND = new Set([
   'shortlog', 'rev-list', 'branch', 'tag', 'remote', 'commit', 'add', 'fetch', 'push', 'reflog', 'whatchanged',
   'help', 'version', 'name-rev', 'merge-base', 'for-each-ref', 'show-ref', 'count-objects', 'check-ignore',
 ])
-const GIT_WRITE_FLAG = /^(?:--output(?:=|$)|-O|--open-files-in-pager|--exec(?:=|$)|--upload-pack|--receive-pack|--ext-diff|--textconv)/
 // Options git takes before its subcommand, and whether each takes the next word.
 const GIT_GLOBAL_OPTION = /^(?:-C|--git-dir|--work-tree|--namespace)$/
 const GIT_GLOBAL_FLAG = /^(?:--no-pager|-P|--bare|--no-replace-objects|--literal-pathspecs|--git-dir=.*|--work-tree=.*|--namespace=.*)$/
@@ -2445,11 +2463,18 @@ const GIT_GLOBAL_FLAG = /^(?:--no-pager|-P|--bare|--no-replace-objects|--literal
  * `nice`, `time`, `xargs`) or anything unknown is not a reader. */
 function readsOnly(words: readonly string[]): boolean {
   let head = 0
+  let assigns = false
   while (head < words.length && (ASSIGNMENT_WORD.test(words[head]!) || SHELL_KEYWORDS.has(words[head]!))) {
+    if (ASSIGNMENT_WORD.test(words[head]!)) assigns = true
     head += 1
   }
   if (head >= words.length) return true
-  const program = basename(words[head])
+  // A variable set for the command changes what it runs (`GIT_EXTERNAL_DIFF=…`,
+  // `LESSOPEN=…`, `PATH=…`), so a reader with one is not a reader.
+  if (assigns) return false
+  const word = words[head]!
+  if (word.includes('/') && !STANDARD_BIN.test(word)) return false
+  const program = basename(word)
   if (BINDING_KEYWORDS.has(program)) return true
   const rest = words.slice(head + 1)
   if (program === 'find') return rest.every(word => !word.startsWith('-') || FIND_READ_PRIMARY.has(word) || /^-O[0-9]$|^-D$/.test(word))
@@ -2459,11 +2484,11 @@ function readsOnly(words: readonly string[]): boolean {
       index += GIT_GLOBAL_OPTION.test(rest[index]!) ? 2 : 1
     }
     const sub = rest[index]
-    return sub !== undefined && GIT_READ_SUBCOMMAND.has(sub) && !rest.slice(index + 1).some(word => GIT_WRITE_FLAG.test(word))
+    return sub !== undefined && GIT_READ_SUBCOMMAND.has(sub) && !rest.slice(index + 1).some(word => writingFlag(word, GIT_WRITE_FLAG))
   }
   if (!STORE_READERS.has(program)) return false
-  const writeFlag = READER_WRITE_FLAG[program]
-  return writeFlag === undefined || !rest.some(word => writeFlag.test(word))
+  const flags = READER_WRITE_FLAG[program]
+  return flags === undefined || !rest.some(word => writingFlag(word, flags))
 }
 
 const MARK_FILE_NAMES = ['profile-settings.json', 'profile-settings.lock']
@@ -2833,12 +2858,21 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
       if ((word === 'cd' || word === 'pushd') && next !== undefined && !next.startsWith('-'))
         visited.add(resolvedPath(next.replace(/^~(?=\/|$)/, homeText), cwd, home))
     })
-  const value = (name: string): string | undefined =>
-    name === 'HOME' ? homeText : name === 'XDG_CONFIG_HOME' ? config : assigned.get(name)
-  // `~`, `~+` (the working directory), `~-` (the last one, unknown: home and the
-  // working directory both) and `~login` (that login's home: the one beside ours, and
-  // ours too, since the guard cannot read the password file) at the start of a word or
-  // of an assignment's value.
+  // What a name can hold. `PWD` and `OLDPWD` (and `$(pwd)`) can be any directory
+  // the line visits, or home.
+  const values = (name: string): string[] | undefined =>
+    name === 'HOME'
+      ? [homeText]
+      : name === 'XDG_CONFIG_HOME'
+        ? [config]
+        : name === 'PWD' || name === 'OLDPWD'
+          ? [homeText, ...visited]
+          : assigned.has(name)
+            ? [assigned.get(name)!]
+            : undefined
+  // `~`, `~+` (the working directory), `~-` (the last one) and `~login` (that login's
+  // home: the one beside ours, and ours too, since the guard cannot read the password
+  // file) at the start of a word or of an assignment's value.
   const tildes = (word: string): string[] => {
     const match = /^((?:[^=~]*=)?)~([^/:]*)(.*)$/s.exec(word)
     if (match === null) return [word]
@@ -2849,29 +2883,66 @@ function runWords(command: string, home: string, configHome: string, cwd = '/'):
     const beside = home === '' ? `/home/${login}` : `${home.replace(/\/[^/]*\/?$/, '')}/${login}`
     return [`${before}${homeText}${rest}`, `${before}${beside}${rest}`]
   }
-  // `${NAME op word}` for a name the guard knows. The default and assign forms give the
-  // value (it is set); `:+`/`+` give the word; a trim (`%`, `#`) gives the trimmed
-  // value; anything else (a replacement, a substring, a case change) gives the value,
-  // which is what the store path is spelled from.
-  const parameters = (word: string): string[] => {
-    const match = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])([^}]*)\}/.exec(word)
-    if (match === null) return [word]
-    const [whole, name = '', op = '', operand = ''] = match
-    const known = value(name)
-    if (known === undefined) return [word]
-    const at = (text: string) => `${word.slice(0, match.index)}${text}${word.slice(match.index + whole.length)}`
-    let results: string[]
-    if (op === ':+' || op === '+') results = [at(operand)]
-    else if (op.startsWith('%') || op.startsWith('#')) results = [at(trimmed(known, op, operand)), at(known)]
-    else results = [at(known)]
-    return results.flatMap(parameters)
-  }
-  const plain = (word: string) =>
+  // `$NAME`, `$(pwd)` and `` `pwd` `` are written as `${NAME}` / `${PWD}`, so one
+  // scanner reads every form.
+  const braced = (word: string) =>
     word
-      .replace(/\$\{(?:HOME|XDG_CONFIG_HOME)\}|\$(?:HOME|XDG_CONFIG_HOME)(?![A-Za-z0-9_])/g, name => (name.includes('XDG') ? config : homeText))
-      .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (whole, first, second) => assigned.get((first ?? second) as string) ?? whole)
-  const once = (word: string) => tildes(word).flatMap(parameters).map(plain)
-  const substitute = (word: string) => [...new Set(once(word).flatMap(once))]
+      .replace(/\$\(\s*pwd\s*\)|`\s*pwd\s*`/g, '${PWD}')
+      .replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_whole, name: string) => `\${${name}}`)
+  // `${NAME op word}`, nested ones too. A known name gives its value, with bash's
+  // operator applied (`:+` gives the word, a trim gives the trimmed value and the
+  // value). An unknown name with a default (`${NOPE:-x}`, `${NOPE=x}`) gives the
+  // default, and the word as written, since the guard does not know whether it is
+  // set; `${NOPE:+x}` gives the word or nothing. Anything else unknown stays as
+  // written.
+  const PARAMETER_LIMIT = 64
+  const parameters = (word: string): string[] => {
+    const start = word.indexOf('${')
+    if (start < 0) return [word]
+    let depth = 0
+    let end = -1
+    for (let index = start; index < word.length; index += 1) {
+      if (word.startsWith('${', index)) {
+        depth += 1
+        index += 1
+      } else if (word[index] === '}' && (depth -= 1) === 0) {
+        end = index
+        break
+      }
+    }
+    if (end < 0) return [word]
+    const head = word.slice(0, start)
+    const whole = word.slice(start, end + 1)
+    const tails = parameters(word.slice(end + 1))
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)(:?[-=?+]|%%?|##?|[/:^,@])?([\s\S]*)$/.exec(word.slice(start + 2, end))
+    const known = match === null ? undefined : values(match[1]!)
+    const op = match?.[2] ?? ''
+    const operand = match?.[3] ?? ''
+    const choices: { text: string; open: boolean }[] = []
+    if (match === null || (known === undefined && !['', ':-', '-', ':=', '=', ':+', '+'].includes(op))) {
+      choices.push({ text: whole, open: false })
+    } else if (known === undefined) {
+      if (op === '') choices.push({ text: whole, open: false })
+      else if (op === ':+' || op === '+') choices.push({ text: operand, open: true }, { text: '', open: false })
+      else choices.push({ text: operand, open: true }, { text: whole, open: false })
+    } else {
+      for (const value of known) {
+        if (op === ':+' || op === '+') choices.push({ text: operand, open: true })
+        else if (op.startsWith('%') || op.startsWith('#')) choices.push({ text: trimmed(value, op, operand), open: false }, { text: value, open: false })
+        else choices.push({ text: value, open: false })
+      }
+    }
+    const results = new Set<string>()
+    for (const choice of choices)
+      for (const text of choice.open ? tildes(choice.text).flatMap(parameters) : [choice.text])
+        for (const tail of tails) {
+          if (results.size >= PARAMETER_LIMIT) return [...results]
+          results.add(`${head}${text}${tail}`)
+        }
+    return [...results]
+  }
+  const once = (word: string) => tildes(word).map(braced).flatMap(parameters)
+  const substitute = (word: string) => [...new Set(once(word).flatMap(once))].slice(0, PARAMETER_LIMIT)
   const expand = (word: string) => substitute(word).flatMap(braceCandidates)
   return segments.map(segment => ({
     words: segment.words.flatMap(expand),
@@ -3036,6 +3107,7 @@ export function profileStoreWriteReason(
   if (FILE_WRITERS.has(tool) && paths.some(path => inside(path))) return PROFILE_STORE_WRITE_REASON
   if (tool !== 'Bash' || typeof input.command !== 'string') return null
   const segments = runWords(input.command, home, configHome, cwd)
+  const raw = commandSegments(input.command)
   const every = (segment: { words: string[]; targets: string[]; stdin: string[] }) => [...segment.words, ...segment.targets, ...segment.stdin]
   const allWords = segments.flatMap(every)
   const mentioned = mentionedDirs(segments.map(segment => [...segment.words, ...segment.targets]), cwd, home)
@@ -3065,6 +3137,14 @@ export function profileStoreWriteReason(
   // to the other (`ls -d <store> | while read d; do rm -rf "$d"; done`).
   const named = allWords.some(word => namesStore(word, cwd, home, dir, mentioned, true))
   if (named && segments.some(writes)) return PROFILE_STORE_WRITE_REASON
+  // A directory above the store carried to another command, by a pipe, a command
+  // substitution or a loop's words (`echo ~/.config | xargs rm -rf`,
+  // `rm -rf $(echo ~/.config)`, `for d in ~; do rm -rf "$d/.config"; done`).
+  const substitutes = /\$\(|`|<\(/.test(input.command)
+  const carries = (segment: { words: string[]; targets: string[]; stdin: string[] }, index: number) =>
+    substitutes || raw[index]?.join === 'pipe' || segment.words.some(word => BINDING_KEYWORDS.has(word))
+  if (segments.some((segment, index) => carries(segment, index) && names(segment)) && segments.some(writes))
+    return PROFILE_STORE_WRITE_REASON
   // A pattern naming the mark file or the store directory, with the writer in another
   // segment: `find ~ -name profile-settings.json | xargs -d '\n' rm`.
   if (allWords.some(word => bareNamesStore(word, dir)) && segments.some(writes) && reaches(allWords))

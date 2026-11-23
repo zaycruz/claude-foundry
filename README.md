@@ -226,17 +226,24 @@ directory above it (`~/.config`, `~`) runs only when it is a known reader: `cat`
 `ls`, `stat`, `wc`, `head`, `tail`, `grep`, `jq`, `diff`, a checksum, `echo`,
 `printf`, `test`, a text filter such as `cut`, `tr` or `sort`, a `find` that uses
 only tests and print actions, or a `git` subcommand that writes only the
-repository (`log`, `diff`, `status`, `add`, `commit`, and the like), each without a
-flag that writes a file or runs a program (`sort -o`, `less -o`, `find -fprint`,
-`git diff --output`, `git -c`). Everything else is refused. That includes a command
-the list does not know (`curl -o`, `wget -O`, `ex`, `vim -es`, `gio trash`,
-`sqlite3`), a wrapper (`sudo`, `env`, `nice`, `time`, `xargs`), and a redirect into
-the store, with or without a command word (`> profile-settings.json` after a
-`cd`). When the store, or a path in it, appears anywhere on the line, including in
-a heredoc or a here-string, then every command on the line must be a reader. A
-pipe, a loop, `read`, `mapfile` or a command substitution can carry the path
-from one command to another (`ls -d <store> | while read d; do rm -rf "$d"; done`).
-A redirect to a path the guard cannot read (`: > "$f"`) counts as a write. The
+repository (`log`, `diff`, `status`, `add`, `commit`, and the like). The reader
+must be called by its bare name or from a standard `bin` directory (not
+`/tmp/cat`), with no variable set for it (`GIT_EXTERNAL_DIFF=…`, `LESSOPEN=…`,
+`PATH=…`), and with no flag that writes a file or runs a program, in any
+abbreviation GNU accepts (`sort -o`, `sort --out=`, `less -o`, `less +cmd`,
+`find -fprint`, `git diff --ou=`, `git -c`). Everything else is refused. That
+includes a command the list does not know (`curl -o`, `wget -O`, `ex`, `vim -es`,
+`gio trash`, `sqlite3`), a wrapper (`sudo`, `env`, `nice`, `time`, `xargs`), and a
+redirect into the store, with or without a command word (`> profile-settings.json`
+after a `cd`). When the store, or a path in it, appears anywhere on the line,
+including in a heredoc or a here-string, every command on the line must be a
+reader. A pipe, a loop, `read`, `mapfile` or a command substitution can carry the
+path from one command to another
+(`ls -d <store> | while read d; do rm -rf "$d"; done`). A directory above the store
+has the same rule when a pipe, a command substitution or a loop's words carry it
+(`echo ~/.config | xargs rm -rf`, `for d in ~; do rm -rf "$d/.config"; done`).
+Elsewhere on the line it does not, so `cd ~ && npm test` runs. A redirect to a
+path the guard cannot read (`: > "$f"`) counts as a write. The
 guard spells each word the way bash would. It expands globs on any part of the
 path, with bash's whole bracket grammar (`[!F]`, `[[:alpha:]]`, `[=f=]`, a leading
 `]`), matched case by case and also case-free for macOS. It reads extglob groups
@@ -244,8 +251,9 @@ path, with bash's whole bracket grammar (`[!F]`, `[[:alpha:]]`, `[=f=]`, a leadi
 in any direction, step or padding (`foundr{a..z}`, `foundr{z..a..2}`, `{01..10}`).
 It joins quoted pieces (`fo""undry`, `foundr$'y'`, `foundr$"y"`), drops backslashes,
 and expands every `~` form (`~`, `~+`, `~-`, `~login`). It substitutes `$HOME`,
-`$XDG_CONFIG_HOME` and the variables the line sets, also with bash's operators
-(`${HOME:-x}`, `${HOME%/}`). It resolves relative names after a `cd`, and reads the
+`$XDG_CONFIG_HOME`, `$PWD`, `$OLDPWD`, `$(pwd)` and the variables the line sets,
+also with bash's operators (`${HOME:-x}`, `${HOME%/}`). The default of an unknown
+variable (`${NOPE:-$HOME/.config/foundry}`) counts as a path it can name. It resolves relative names after a `cd`, and reads the
 path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
 mark (`find ~ -name "profile-*.png" -delete`) still runs. The limits are these: the
 guard reads the command line, not a running shell. A path built at run time inside
