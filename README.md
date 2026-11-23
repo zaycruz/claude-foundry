@@ -25,17 +25,18 @@ says so instead of falling back to REST.
   destructive when its command name, or one of its flags, says something is left
   gone or overwritten — `marketplace installation uninstall`,
   `project remove-orgs`, `streams stream reset`, `alias clear` — or when it is
-  given `--force`. The rule reads the name and anything that looks like a flag,
-  never a value or a branch name, so `--mode keep-outputs` and a branch named
-  `delete-me` ask nothing. An argument that starts with a hyphen looks like a
-  flag, so it asks: reading too much costs a prompt, reading too little costs
-  the ask. The words,
+  given `--force`, or when the value of one of its flags is an enumerated act
+  spelled the way Orthanc spells them, in caps (`--transaction-type DELETE`).
+  The rule reads the name and anything that looks like a flag. A branch name, a
+  positional, and a value such as `keep-outputs` or `delete-me` ask nothing. An
+  argument that starts with a hyphen looks like a flag, so it asks: reading too
+  much costs a prompt, reading too little costs the ask. The words,
   and what each one leaves, are `DESTRUCTIVE_WORDS` in `hooks/policy.ts`; the
   approval prompt builds its own wording from that table. In `yolo` only a write
   on main asks: destructive writes run at once, and the loop guard is off. A
   release tag with no `--branch <global branch RID>` is a release on main and
   asks in `yolo` too. A write that Orthanc's agent manifest marks
-`operator_approval` (turning branch protection off, removing a required
+  `operator_approval` (turning branch protection off, removing a required
   check) asks in every mode; in `yolo` it runs with no ask only when the
   entry's `operator_approval_scope` shows it lands on one global work branch
   (`global-branch roles set`, `remove-resources`, `remove-repo` with a branch

@@ -38,7 +38,8 @@
 //      `--keep-data` carries no word of the table and asks for none.
 //  D6  A flag that does erase is missed: `--remove`, `--remove-check`,
 //      `--remove-resource`, `--delete-project`, `--delete-object-type`, in any
-//      case, as `=value`, at any position.
+//      case, as `=value`, at any position. So is an enum value that names the
+//      act the way Orthanc writes an enum: `--transaction-type DELETE`.
 //  D7  The rule only reads a path the manifest lists: the same words as a path
 //      it does not list, the verb first rather than last, or the path split
 //      across `command` and `args`, run unasked.
@@ -52,11 +53,13 @@
 //      words as the orthanc lane.
 //  D11 The words the operator is told fall behind the words the guard reads, so
 //      a prompt that says "deletes ask" fires for a revoke and reads as a bug.
-//  D12 The ask, and the line the debug log keeps, do not say which of the three
+//  D12 The ask, and the line the debug log keeps, do not say which of the four
 //      the guard read: a word in the command name, a flag that names what the
-//      write removes, or `--force`. After the widening those are three different
-//      claims about the write, and `data-health check-group update
-//      --remove-check …` would read the same as `project remove-orgs`.
+//      write removes, an enum value that names it, or `--force`. After the
+//      widening those are four different claims about the write, and
+//      `data-health check-group update --remove-check …` would read the same as
+//      `project remove-orgs`. Also pinned: when two hold at once, the name wins,
+//      because it is the claim about the command rather than about an argument.
 //
 // Through the real hook, on a synthetic stack:
 //  E1  In allow-edits and auto an uninstall asks the operator, names the
@@ -104,6 +107,7 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'dataset create', kind: 'mutation' },
   { path: 'dataset files delete', kind: 'mutation' },
   { path: 'dataset schema set', kind: 'mutation' },
+  { path: 'dataset transactions start', kind: 'mutation' },
   { path: 'dataset transactions abort', kind: 'mutation' },
   { path: 'dev-console scope remove', kind: 'mutation' },
   { path: 'devops draft abort', kind: 'mutation' },
@@ -193,6 +197,11 @@ const DESTRUCTIVE: [string, string[]][] = [
   ['global-branch remove-repo', [GLOBAL, REPO]],
   ['global-branch remove-resources', [GLOBAL, DATASET]],
   ['repository checks required remove', [REPO, '--branch', 'agent-x', '--check', 'ci/publish']],
+  // The word sits in the enum value, not the name: `--transaction-type DELETE`
+  // erases the rows a transaction wrote, and the pinned entry names neither a
+  // destructive word nor an operator_approval.
+  ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type', 'DELETE', '--apply']],
+  ['dataset transactions start', [DATASET, '--branch', 'agent-x', '--transaction-type=DELETE', '--apply']],
   // A verb no 0.7.11 command uses: a rename into the table is read at once.
   // These four are the names the parity cycle (FND-17) reported; measured
   // against the released 0.7.11 manifest none of them is a command today, so
@@ -328,6 +337,9 @@ test('D8: a branch name, a positional or a flag value spelling a destructive wor
     ['dataset create', ['--branch', 'agent-x', '--description', 'a delete of the old rows']],
     ['marketplace installation upgrade', [INSTALLATION, '--mode', 'keep-outputs']],
     ['orchestration builds create', ['--branch', 'agent-x', '--job', 'revert']],
+    // A caps branch name equal to a table word does ask; pinned as the cost of
+    // reading an enum, and the safe direction.
+    ['dataset branches create', [DATASET, '--name', 'agent-x']],
   ] as [string, string[]][]) {
     expect({ command, args, destructive: isDestructive(command, args) }).toEqual({ command, args, destructive: false })
   }
@@ -433,6 +445,8 @@ const SURFACE: [string, boolean][] = [
   ['ontology action-type-delete', true],
   ['ontology interface-delete', true],
   ['ontology link-type-delete', true],
+  // The name reads as no claim; the enum value is what asks (D6/D12).
+  ['dataset transactions start', false],
   ['ontology object-type-delete', true],
   ['ontology object-type-guarded-delete', true],
   ['ontology shared-property-delete', true],
@@ -485,7 +499,7 @@ const SURFACE: [string, boolean][] = [
   ['workshop module update', false],
 ]
 
-test('D12: the ask and the log name which of the three the guard read', async () => {
+test('D12: the ask and the log name which of the four the guard read', async () => {
   const byName = classifyCall(CLI, { command: 'marketplace installation uninstall', args: [INSTALLATION, '--mode', 'delete'] }, MANIFEST, 'agent/x')
   const byFlag = classifyCall(CLI, { command: 'data-health check-group update', args: ['ri.health.main.group.1', '--remove-check', 'ri.health.main.check.1'] }, MANIFEST, 'agent/x')
   const byForce = classifyCall(CLI, { command: 'dataset create', args: ['people', '--force'] }, MANIFEST, 'agent/x')
@@ -529,6 +543,11 @@ test('D12: the ask and the log name which of the three the guard read', async ()
   const longWhy = longCall?.destructiveWhy ?? ''
   expect(longWhy.length < 100).toBe(true)
   expect(() => JSON.parse(longWhy.endsWith('…') ? `${longWhy.slice(0, -1)}"` : longWhy)).not.toThrow()
+  // Two cues at once: the name is the claim about the command, so it is the one
+  // the operator reads, and `--force` stays visible in the write's own argv.
+  const both = classifyCall(CLI, { command: 'project remove-orgs', args: ['ri.compass.main.project.1', '--org', 'acme', '--force'] }, MANIFEST, 'agent/x')
+  expect(both?.destructiveWhy).toBe('remove')
+
   // A value that happens to start with a hyphen is read as a flag name: the guard
   // cannot tell a value from a flag without Orthanc's argument shapes. The ask is
   // the safe direction, and pinned here so the limit stays a known one.
@@ -552,6 +571,20 @@ test('D12: the ask and the log name which of the three the guard read', async ()
   const yoloMain = ladderDecision('yolo', onMain!, approve)
   expect(yoloMain.outcome).toBe('ask')
   expect(yoloMain.reason).toContain('It is also destructive (reset)')
+
+  // A value is read only where it names the act the way an enum is written. The
+  // same word lower case reads as a name and asks nothing (measured residual:
+  // Orthanc accepts `delete` too), and a word that is not one of the enum's
+  // values asks nothing either.
+  const lowerEnum = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--transaction-type', 'delete', '--apply'] }, MANIFEST, 'agent/x')
+  expect(lowerEnum?.isDestructive).toBe(false)
+  const appendEnum = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--transaction-type', 'APPEND', '--apply'] }, MANIFEST, 'agent/x')
+  expect(appendEnum?.isDestructive).toBe(false)
+  // The cue names the flag and the value, both validated pieces, so the operator
+  // can see which word asked and the log cannot be forged from the value.
+  const enumAsk = classifyCall(CLI, { command: 'dataset transactions start', args: [DATASET, '--branch', 'agent-x', '--transaction-type', 'DELETE'] }, MANIFEST, 'agent/x')
+  expect(enumAsk?.destructiveWhy).toBe('--transaction-type=DELETE')
+  expect(ladderDecision('allow-edits', enumAsk!, approve).reason).toContain("destructive mutation 'dataset transactions start' (--transaction-type=DELETE)")
 
   // An ordinary write keeps the plain yolo reason: the extra words are only for
   // a write the guard read as destructive.

@@ -136,9 +136,9 @@ export type GateClassification = {
   targetsProtected: boolean
   isDestructive: boolean
   /** Why it read as destructive: the word in its name, the flag it was given,
-   * or `--force`. Carried into the ask and the debug log, so the operator
-   * deciding the dialog and whoever reads the log later can tell the three
-   * apart (`data-health check-group update --remove-check …` is not a
+   * an enum value it was given, or `--force`. Carried into the ask and the debug
+   * log, so the operator deciding the dialog and whoever reads the log later can
+   * tell the four (`data-health check-group update --remove-check …` is not a
    * `project remove-orgs`). */
   destructiveWhy?: string
   proposedName?: string
@@ -174,8 +174,8 @@ export function classifyOrthancCommand(
 /**
  * A word that says the write leaves something gone or overwritten.
  *
- * The rule used to read one word, `delete`, and only as the whole last word of
- * a command path. Measured on the orthanc 0.7.11 agent-manifest the plugin pins
+ * The rule used to read one word, `delete`, and only in one position: the last
+ * hyphen part of the last word of a command path. Measured on the orthanc 0.7.11 agent-manifest the plugin pins
  * (541 command names, 260 of them mutation or local): 25 writes the old rule
  * read, 51 carry a word in this table. The 26 it missed split two ways. 15
  * asked nobody outside yolo — `marketplace installation uninstall` ("the plan
@@ -207,9 +207,11 @@ export function classifyOrthancCommand(
  * future `orthanc remove resource` all count. Measured on the 541 names of
  * 0.7.11, every destructive word sits in the last word of its path, so reading
  * the whole path asks nothing new today and covers a name that puts the verb
- * first. Values, positionals and branch names carry nothing: `--mode
- * keep-outputs`, `--branch delete-me` and `alias remove delete` say nothing
- * about what the write erases. One limit: the guard cannot tell a value from a
+ * first. A positional or a branch name carries nothing, and so does a value
+ * except where it is an enum written in caps (`--transaction-type DELETE`), the
+ * way Orthanc writes its enumerated values: `--mode keep-outputs`,
+ * `--branch delete-me` and `alias remove delete` say nothing about what the
+ * write erases. One limit: the guard cannot tell a value from a
  * flag without Orthanc's argument shapes, so an argument that starts with a
  * hyphen is read as a flag (`--description "-remove the old rows"` asks).
  * Reading too much costs a prompt; reading too little costs the ask.
@@ -306,18 +308,63 @@ function destructiveFlag(args: readonly string[]): string | null {
   return args.map(flagNameOf).find(isDestructiveFlag) ?? null
 }
 
+/** An enum value that names the act. Orthanc spells its enumerated values in
+ * caps, and one of them erases data on a command whose name says nothing:
+ * `dataset transactions start --transaction-type DELETE` (possible values
+ * APPEND, UPDATE, SNAPSHOT, DELETE, no `operator_approval` on the pinned entry)
+ * deletes a dataset's rows with the word sitting one position past the flag the
+ * old rule stopped reading. A value is read only where a flag owns it, only when
+ * it is written in caps, and only when it equals a word of the table exactly —
+ * that is how an enum is written and not how a name is written, so `--branch
+ * abort-x`, `--job revert`, `--mode keep-outputs` and a dataset called `remove`
+ * stay no claim. What is shown is built from the validated pieces, so no model
+ * text reaches the dialog through this lane. Residual, measured: the same enum
+ * written in lower case (`--transaction-type delete`) reads as a name and asks
+ * nothing, and Orthanc accepts it. */
+function destructiveValue(args: readonly string[]): string | null {
+  for (const [flag, value] of ownedFlagValues(args)) {
+    if (/^[A-Z]+$/.test(value) && TERMS.has(value.toLowerCase())) return `${displayTrigger(flag)}=${value}`
+  }
+  return null
+}
+
+/** Each argument a flag owns, as `[flag, value]`: the value after a flag, or the
+ * right side of `--flag=value`. An argument no flag owns (a positional, the first
+ * word) carries nothing, because a bare word is what a caller names something.
+ * Different from `flagValues`, which answers the same question for one known
+ * list of flags. */
+function ownedFlagValues(args: readonly string[]): [string, string][] {
+  const pairs: [string, string][] = []
+  args.forEach((arg, index) => {
+    const text = unquote(arg).trim()
+    const equals = text.indexOf('=')
+    if (equals > 0 && text.startsWith('-')) {
+      pairs.push([text.slice(0, equals), text.slice(equals + 1)])
+      return
+    }
+    if (index > 0 && !text.startsWith('-')) {
+      const owner = unquote(args[index - 1]!).trim()
+      if (owner.startsWith('-') && !owner.includes('=')) pairs.push([owner, text])
+    }
+  })
+  return pairs
+}
+
 /** Why a write reads as destructive, in the words the operator is told: a word
- * in the command name, a flag that names what the write removes, or `--force`.
- * The answer goes into the approval dialog, the debug log and the trace, and an
- * argument is text a model wrote, so a flag is only shown as written when it is
- * spelled like a flag. Anything else is JSON escaped and cut — the same contract
- * `operatorApprovalQuestion` keeps, where a newline in an arg would otherwise
- * forge lines in the question a human answers. */
+ * in the command name, a flag that names what the write removes, an enum value
+ * that names it, or `--force`. The answer goes into the approval dialog, the
+ * debug log and the trace, and an argument is text a model wrote, so a flag is
+ * shown as written only when it is spelled like a flag. Anything else is JSON
+ * escaped and cut — the same contract `operatorApprovalQuestion` keeps, where a
+ * newline in an arg would otherwise forge lines in the question a human
+ * answers. */
 function destructiveTrigger(command: string, args: readonly string[]): string | null {
   const word = destructiveTermIn(command)
   if (word !== null) return word
   const flag = destructiveFlag(args)
   if (flag !== null) return displayTrigger(flag)
+  const value = destructiveValue(args)
+  if (value !== null) return value
   return argsHaveForce(command, args) ? '--force' : null
 }
 
