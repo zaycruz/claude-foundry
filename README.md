@@ -110,8 +110,16 @@ says so instead of falling back to REST.
   naming the tag, the commit, the repository and the Foundry branch if any;
   in `yolo` only a tag on a global branch RID runs with no ask. Orthanc
   writes run only through `orthanc_cli`: Bash may read through Orthanc but not
-  write, however the shell wraps the call. Text that only mentions Orthanc (a
-  commit message, a PR body, an `echo`) is not a call.
+  write, however the shell wraps the call. The Bash guard decides "this runs
+  Orthanc" from the command word of each simple command (assignments and
+  wrappers resolved), never from a substring anywhere in the line: the word in
+  a quoted argument, a repo name (`zaycruz/orthanc`), a path, a flag value, a
+  heredoc body or a JSON payload is data, not a call. Only a command word that
+  is Orthanc — plain, a path to it, or `$ORTHANC_BIN` — is one, however it is
+  spelled (after `env`/`sudo`/`timeout`/`xargs`, in a pipeline, in `$(…)`, via
+  `bash -c`, over `ssh`); where the guard cannot tell (eval, a variable as the
+  command word, code fed to a shell or interpreter) it refuses. Text that only
+  mentions Orthanc (a commit message, a PR body, an `echo`) is not a call.
 - **FDE mode** (`/fde on`, or `/fde <goal>`): binds the session to one agent global branch.
   Ontology writes that name no branch get it added, a write aimed directly at
   main or master is the one thing the mode refuses, and `/fde end` hands the
