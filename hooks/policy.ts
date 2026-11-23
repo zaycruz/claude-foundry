@@ -9,6 +9,8 @@ export type ManifestCommand = {
   kind?: string
   auth?: string
   input?: string
+  /** Set when the command writes the operator's own credential store (orthanc names it `credential_store`). */
+  credentialStore?: string
   flags?: ManifestFlag[]
   /** The entry's raw `operator_approval`, unread: operatorApprovalQuestion reads it, failing closed. */
   operatorApproval?: unknown
@@ -52,6 +54,17 @@ const BRANCH_REQUIRED_PATHS = new Set([
   'ontology link-type-create',
   'ontology link-type-upsert',
   'ontology link-type-delete',
+  // The schema writes orthanc 0.7.10 (#181) added beyond object, link and action
+  // types, and the branch index of 0.7.7. Each one takes a branch and never
+  // writes main (`--branch … required, never main`), so a call that names none
+  // is an incomplete call, not a write with a default.
+  'ontology interface-upsert',
+  'ontology interface-delete',
+  'ontology shared-property-upsert',
+  'ontology shared-property-delete',
+  'ontology type-group-upsert',
+  'ontology type-group-delete',
+  'ontology branch-index',
   'ontology action-type-upsert',
   'ontology action-type-update',
   'ontology action-type-set-function-version',
@@ -116,7 +129,23 @@ const READ_VERBS = new Set([
   'get', 'list', 'search', 'describe', 'check', 'health', 'inspect',
   'preview', 'query', 'read', 'view', 'help', 'export', 'status', 'download',
 ])
-export const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
+const DENIED_COMMANDS = new Set(['auth store', 'onboarding'])
+// Orthanc names a command that takes a credential the operator types two ways:
+// `input`, and `credential_store`, the store the command writes. An agent must
+// never be the one to hand a credential over, so a marked command never runs.
+// `credential_store` marks six commands in 0.7.10; four also name an `input`,
+// and two only clear the store, so the ladder judges those as the deletes zay
+// lets yolo run (2026-11-17). A marked command that is not one of the two is
+// refused: the guard does not guess that an entry it has never seen types no
+// secret. The names stay for a binary that ships the command with neither mark.
+const CLEARS_CREDENTIALS = new Set(['auth delete', 'configure delete'])
+export const isCredentialCommand = (command: ManifestCommand) =>
+  DENIED_COMMANDS.has(command.path) ||
+  command.input !== undefined ||
+  (command.credentialStore !== undefined && !CLEARS_CREDENTIALS.has(command.path))
+
+/** Where a typed credential belongs: said once, in both refusals and in /auth. */
+export const CREDENTIAL_HINT = 'The operator runs it in their own terminal; /auth lists the credential commands.'
 // Orthanc's global stack flag; it takes no abbreviation (`--prof` is a usage error).
 const PROFILE_FLAG = /^--profile(=|$)/
 // Local commands that change which stack orthanc runs on when none is named.
@@ -1153,6 +1182,10 @@ function shellClassification(
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
+    // Before the read short-circuit, and with no second gate behind it: Bash is
+    // the one lane where a secret could still be piped in.
+    if (manifest.some(entry => entry.path === call.path && isCredentialCommand(entry)))
+      return refuse(call.path, `'orthanc ${call.path}' needs a credential the operator types, so neither Bash nor orthanc_cli runs it. ${CREDENTIAL_HINT}`)
     const marked = manifest.some(entry => entry.path === call.path && entry.operatorApproval !== undefined)
     if (classifyOrthancCommand(call.path, manifest) === 'read' && !marked) continue
     return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)

@@ -91,6 +91,11 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'ontology object-type-delete', kind: 'mutation' },
   { path: 'global-branch create', kind: 'mutation' },
   { path: 'ontology definition', kind: 'read-only' },
+  // orthanc 0.7.10 (#181): the schema writes beyond object, link and action types.
+  { path: 'ontology interface-upsert', kind: 'mutation' },
+  { path: 'ontology shared-property-upsert', kind: 'mutation' },
+  { path: 'ontology type-group-upsert', kind: 'mutation' },
+  { path: 'ontology branch-index', kind: 'mutation' },
 ]
 const CLI = 'mcp__foundry__orthanc_cli'
 
@@ -148,6 +153,22 @@ test('D6: an ontology write with no --branch is bound to the session branch', as
     args: [ONT, '--request-file', 'f.json', '--branch', RID],
   })
   expect(bind('ontology object-type-upsert', [ONT, '--branch', RID])).toEqual({ args: [ONT, '--branch', RID] })
+})
+
+// The mode promises "a write that needs a branch and names none gets it", for
+// every ontology write, not the four paths the first version listed. Ways this
+// can fail, written before the change:
+//  D6b A schema write the mode does not know (interface, shared property, type
+//      group, branch index) is passed through with no branch: orthanc refuses it
+//      as a usage error, so a bound session cannot do that work at all.
+//  D6c It is supplied twice, or the supplied RID is not the session's.
+//  D6d A bound session naming another branch for one of them still runs it there.
+test('D6b D6c D6d: every ontology write gets the session branch, the new schema writes included', async () => {
+  for (const path of ['ontology interface-upsert', 'ontology shared-property-upsert', 'ontology type-group-upsert', 'ontology branch-index']) {
+    expect({ path, bound: bind(path, [ONT, '--apply']) }).toEqual({ path, bound: { args: [ONT, '--apply', '--branch', RID] } })
+    expect({ path, twice: bind(path, [ONT, '--branch', RID, '--apply']) }).toEqual({ path, twice: { args: [ONT, '--branch', RID, '--apply'] } })
+    expect({ path, other: 'deny' in bind(path, [ONT, '--branch', OTHER, '--apply']) }).toEqual({ path, other: true })
+  }
 })
 
 test('D7 D8 D9 D10: another branch, main, joined spellings and a dangling --branch are refused', async () => {
