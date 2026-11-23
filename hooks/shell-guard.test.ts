@@ -271,3 +271,24 @@ test('S9: a credential command in Bash is sent to the operator, not to orthanc_c
   // A read verb is not enough: the store mark still refuses, ahead of the short-circuit.
   expect(classifyCall('Bash', { command: 'orthanc credential show' }, MANIFEST, null)?.error).toContain('needs a credential the operator types')
 })
+
+// Review of #33: a launcher in command position runs a later word as its program,
+// so an Orthanc write after flock, nsenter, unshare or docker exec is still a call.
+test('S-launcher: an Orthanc write after a launcher is still caught', () => {
+  const manifest = [
+    { path: 'ontology object-delete', kind: 'mutation', flags: [{ flag: '--apply', takesValue: false }, { flag: '--branch', takesValue: true }] },
+  ] as never
+  const write = 'ontology object-delete ri.x --apply'
+  for (const line of [
+    `flock /tmp/lock orthanc ${write}`,
+    `nsenter -t 1 orthanc ${write}`,
+    `unshare -r orthanc ${write}`,
+    `docker exec c orthanc ${write}`,
+    `chroot /srv orthanc ${write}`,
+  ]) {
+    expect({ line, caught: classifyCall('Bash', { command: line }, manifest, null, [] as never) !== null }).toEqual({ line, caught: true })
+  }
+  for (const line of ['gh release view v1 --repo zaycruz/orthanc --json isDraft,assets', 'docker run --name orthanc-docs nginx']) {
+    expect({ line, caught: classifyCall('Bash', { command: line }, manifest, null, [] as never) !== null }).toEqual({ line, caught: false })
+  }
+})

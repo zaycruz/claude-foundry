@@ -1113,10 +1113,22 @@ function printsAndExits(runner: string, flags: readonly string[]): boolean {
  * to it (`/opt/bin/orthanc`, `target/debug/orthanc`) or `$ORTHANC_BIN`. -1
  * otherwise: a word orthanc anywhere past the command word is an argument (a
  * repo named zaycruz/orthanc, a `--bin` value), not a call. */
-function orthancStart(segment: Segment): number {
+function orthancStart(segment: Segment, groups: ReadonlySet<string>): number {
   if (segment.continues) return -1
-  const index = commandWord(segment.words)
-  return index >= 0 && isOrthancWord(segment.words[index]!) ? index : -1
+  const { words } = segment
+  const index = commandWord(words)
+  if (index < 0) return -1
+  if (isOrthancWord(words[index]!)) return index
+  // A launcher runs a later word as its program (`flock LOCK orthanc …`,
+  // `nsenter -t 1 orthanc …`, `docker exec c orthanc …`): an orthanc word after
+  // one that starts a call is a real call. Only after a launcher, so an argument
+  // of any other command (a repo named zaycruz/orthanc) stays data.
+  for (let position = index + 1; position < words.length; position += 1) {
+    if (!isOrthancWord(words[position]!)) continue
+    if (!words.slice(index, position).some(earlier => LAUNCHERS.has(basename(earlier)))) continue
+    if (startsCall(words, position, groups)) return position
+  }
+  return -1
 }
 
 /** True when a segment runs Orthanc in a form the parser cannot read: a
@@ -1246,7 +1258,7 @@ function shellRefusal(
   }
   for (const segment of segments) {
     if (hidesOrthanc(segment, line, assignments, groups)) return refuse(null, HIDING_REASON)
-    const start = orthancStart(segment)
+    const start = orthancStart(segment, groups)
     if (start < 0) {
       // ssh runs a command on another host: what it runs there is read like a line of its own.
       const at = sshCommandStart(segment)
