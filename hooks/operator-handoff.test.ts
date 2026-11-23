@@ -33,6 +33,15 @@
 //     at orthanc_cli for a call orthanc_cli also refuses (foundry.test.ts F20).
 //  Q8 orthanc_help says so on the command's own page, so the agent is not sent
 //     to try the call.
+//  Q9 The table is an object literal, so an inherited key (`command:
+//     'constructor'`) reads as a match and the refusal prints an inherited
+//     Object.prototype member. `command` is free-form text in the tool schema.
+//  Q10 would pin both names and their `read-only` kind against
+//     hooks/orthanc-snapshot.json, the manifest copy the plugin ships, so a
+//     rename reopens the leak loudly. It cannot be written: a hooks module may
+//     import only relative paths and 'claude-code', so no test in this plugin
+//     can read a .json (the runner says so: 'cannot import "node:fs"'). The pin
+//     belongs in the hooks runtime, where file reads go through `$`.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
@@ -46,6 +55,14 @@ type Mode = (typeof MODES)[number]
 
 // The two commands as orthanc 0.7.11 declares them, plus the reads a rule that
 // over-reads would catch with them.
+// One phrase only the command's own reason can carry. Q8 asks for it in the
+// page text, so a refusal that lost its explanation fails the test instead of
+// matching an expectation rebuilt from the same code.
+const REASON_MARKS: Record<string, string> = {
+  'repository git-credential': "active profile's token",
+  'compute env get': 'environment variable',
+}
+
 const MANIFEST: ManifestCommand[] = [
   { path: 'agent-manifest', kind: 'local' },
   { path: 'repository git-credential', kind: 'read-only', auth: 'bearer-token' },
@@ -54,7 +71,6 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'alias export', kind: 'local' },
   { path: 'capabilities', kind: 'local' },
   { path: 'repository list', kind: 'read-only', auth: 'bearer-token' },
-  { path: 'dataset create', kind: 'mutation' },
 ]
 
 const envelope = (data: unknown) =>
@@ -83,7 +99,7 @@ function harness(on: On, mode: Mode = 'yolo'): Harness {
   on('env.get', (_$, e) => ({ value: env.get(e.name) }))
   on('env.set', (_$, e) => {
     if (e.value === undefined) env.delete(e.name)
-    else env.set(e.name)
+    else env.set(e.name, e.value)
     return { value: {} }
   })
   on('store.get', (_$, e) => ({ value: h.store.get(e.key) }))
@@ -131,15 +147,33 @@ test('Q2: every action of the credential helper is refused, and the refusal is o
   }
 })
 
+const WRAPPED = [
+  'orthanc repository git-credential get',
+  'orthanc --agent repository git-credential get | tee /tmp/tester/cred.txt',
+  "printf 'protocol=https\\nhost=probe.example.com\\n\\n' | orthanc --profile probe repository git-credential get",
+  'cd /tmp/tester && /usr/local/bin/orthanc repository git-credential get > out.txt',
+  'orthanc compute env get ' + APP + ' MODEL_API_KEY --to-file key.txt',
+]
+
 test('Q3: Bash that runs the credential helper is refused, however it is wrapped or piped', async () => {
-  for (const command of [
-    'orthanc repository git-credential get',
-    'orthanc --agent repository git-credential get | tee /tmp/tester/cred.txt',
-    "printf 'protocol=https\\nhost=probe.example.com\\n\\n' | orthanc --profile probe repository git-credential get",
-    'cd /tmp/tester && /usr/local/bin/orthanc repository git-credential get > out.txt',
-  ]) {
+  for (const command of WRAPPED) {
     expect({ command, modes: bash(command) }).toEqual({ command, modes: ['block', 'block', 'block', 'block'] })
   }
+})
+
+// The Bash lane has no executor behind it: the classification is the whole
+// enforcement, so the deny is checked through the hook too, not only through
+// classifyCall.
+test('Q3: the hook denies the same lines, asks no one, and the shell never sees orthanc', async ($, on) => {
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const command of WRAPPED) {
+    const denied = await shell($, command)
+    expect({ command, deny: typeof denied.deny }).toEqual({ command, deny: 'string' })
+  }
+  expect(h.asked).toEqual([])
+  expect(ran(h, 'repository git-credential')).toEqual([])
+  expect(ran(h, 'compute env get')).toEqual([])
 })
 
 test('Q4: setting the helper up in git config is not a call, and still runs', async () => {
@@ -190,12 +224,7 @@ test('Q6: a read that writes a data file is not caught; it runs in yolo with no 
     expect({ command, deny: wrote.deny }).toEqual({ command, deny: undefined })
   }
   expect(h.asked).toEqual([])
-  for (const [command] of [
-    ['sql export'],
-    ['alias export'],
-    ['capabilities'],
-    ['repository list'],
-  ])
+  for (const command of ['sql export', 'alias export', 'capabilities', 'repository list'])
     expect({ command, ran: ran(h, command).length }).toEqual({ command, ran: 1 })
   for (const command of ['orthanc sql export --format csv "SELECT 1" -o rows.csv', 'orthanc alias export --output aliases.json']) {
     expect({ command, modes: bash(command) }).toEqual({ command, modes: [null, null, null, null] })
@@ -221,9 +250,28 @@ test('Q8: orthanc_help marks both commands, and says why, on their own page', ()
   for (const path of ['repository git-credential', 'compute env get']) {
     const entry = MANIFEST.find(candidate => candidate.path === path)!
     const tail = renderCommand(entry, `orthanc ${path} --help`).split('\n').at(-1) ?? ''
-    expect({ path, tail }).toEqual({ path, tail: `Refused through orthanc_cli and Bash: ${operatorOnlyReason(path)}` })
+    expect({ path, marked: tail.startsWith('Refused through orthanc_cli and Bash: ') }).toEqual({ path, marked: true })
+    expect({ path, explained: tail.includes(REASON_MARKS[path]!) }).toEqual({ path, explained: true })
     expect(tail).toContain('terminal')
   }
   const other = renderCommand(MANIFEST.find(entry => entry.path === 'sql export')!, 'orthanc sql export --help')
   expect(other).not.toContain('Refused through orthanc_cli and Bash')
+})
+
+// `OPERATOR_ONLY_COMMANDS` is an object literal, so a key inherited from
+// Object.prototype reads as a hit: `OPERATOR_ONLY_COMMANDS['constructor']` is
+// Object's constructor, not undefined. `command` is a required free-form string
+// in orthanc_cli's own input schema (register.tsx), and an unlisted command
+// reaches the table unresolved, so `command: 'constructor'` was refused with
+// "is the operator's to run: function Object() { [native code] }".
+test('Q9: an inherited object key is not a match, and an unknown command is not refused', async ($, on) => {
+  for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'])
+    expect({ key, reason: operatorOnlyReason(key) }).toEqual({ key, reason: null })
+  const h = harness(on)
+  h.answer = 'throw'
+  for (const key of ['constructor', 'toString', '__proto__']) {
+    const denied = await cliCall($, key, ['get'])
+    expect({ key, deny: denied.deny }).toEqual({ key, deny: undefined })
+  }
+  expect(h.asked).toEqual([])
 })

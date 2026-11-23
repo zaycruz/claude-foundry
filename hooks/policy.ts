@@ -142,8 +142,14 @@ const OPERATOR_ONLY_COMMANDS: Readonly<Record<string, string>> = {
 
 /** Why this command is the operator's to run, or null. One sentence the agent can act on. */
 export function operatorOnlyReason(path: string): string | null {
+  // hasOwnProperty, not a plain read: `path` can be any text the agent typed
+  // (`command` is free-form in orthanc_cli's schema, and a name the manifest
+  // does not know reaches here unresolved), so 'constructor' or '__proto__'
+  // would otherwise read an inherited Object.prototype member and print it back
+  // as the reason. hooks/operator-handoff.test.ts Q9.
+  if (!Object.prototype.hasOwnProperty.call(OPERATOR_ONLY_COMMANDS, path)) return null
   const why = OPERATOR_ONLY_COMMANDS[path]
-  return why === undefined ? null : `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
+  return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
 }
 // Orthanc `local` commands that only read local state.
 const LOCAL_READS = new Set([
