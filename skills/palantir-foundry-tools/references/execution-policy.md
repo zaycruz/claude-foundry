@@ -6,7 +6,7 @@ Use this policy whenever the Foundry tool decision flow reaches documentation, r
 
 1. Discover the command with `orthanc_help` (group listing, command schema, or `{query}` keyword search across all groups) before the first operation.
 2. Execute platform operations with `orthanc_cli` — agent-mode envelope, usage-shaped errors, verification hints, fail-closed commands explain the alternative. Do not use Foundry REST, raw `orthanc` in Bash, or another CLI in its place.
-3. Read official Palantir documentation before a material decision (a connected Palantir MCP server is fine for this, read-only). A search snippet is not decision evidence; load the full page.
+3. Read official Palantir documentation before a material decision (a connected Palantir MCP server is fine for this, read-only; the guard refuses a tool on such a server whose name does not read with plain separated words). A search snippet is not decision evidence; load the full page.
 4. Search for the existing resource before creating one (`orthanc search` for titles, `resource search` within a folder).
 5. Read the resource and its dependencies before modifying it.
 
