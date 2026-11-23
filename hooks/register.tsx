@@ -85,6 +85,7 @@ import {
   type ManifestCommand,
   classifyCall,
   classifyOrthancCommand,
+  isLocalPull,
   compassRootReason,
   DEFAULT_APPROVAL_MODE,
   type GateClassification,
@@ -94,6 +95,7 @@ import {
   gitPushNamesFoundry,
   isCredentialCommand,
   ladderDecision,
+  replacesBinary,
   loopStep,
   modeGuidance,
   ORTHANC_CLI,
@@ -363,6 +365,15 @@ async function executeCli($: EngineInterface, input: { command: string; args: st
     return failure('unknown-command', `Unknown Orthanc command '${input.command}'. Call orthanc_help first.`, input.command)
   }
   if (isCredentialCommand(command)) return credentialFailure(command)
+  if (replacesBinary(command)) {
+    return failure(
+      'self-update-denied',
+      `Orthanc command '${command.path}' replaces the orthanc binary this session reads its command list from${
+        command.path === 'update' ? ' (with --plugin, the foundry plugin too)' : ''
+      }, so orthanc_cli did not run it. The operator installs it in their own terminal.`,
+      command.path,
+    )
+  }
   const wait = cliWait(command, resolved.args)
   if (wait.overCap) return overCapFailure(command, wait)
   const now = await binaryIdentity($)
@@ -710,7 +721,9 @@ function recordTool(key: string, tool: string, input: unknown, ran: unknown, not
     startMs,
     endMs,
     attributes,
-    ...(denied ? { error: `denied: ${denied}` } : result.isError === true ? { error: 'tool error' } : {}),
+    // Redacted like every other field of this span: a refusal often quotes the
+    // operator's reason back, and that reason can carry an email, a RID or a token.
+    ...(denied ? { error: `denied: ${redactString(denied, tracing.redact)}` } : result.isError === true ? { error: 'tool error' } : {}),
   })
 }
 
@@ -944,13 +957,20 @@ async function fdeGate(
   manifest: readonly ManifestCommand[],
 ): Promise<{ deny: string } | { input: Record<string, unknown>; ran: string | null }> {
   const resolved = resolveOrthancCommand(asString(input.command), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
-  const isMutation = resolved.path !== '' && resolved.path !== 'repository clone' && classifyOrthancCommand(resolved.path, manifest) === 'mutation'
-  const bound = fdeBind(fde, resolved.path, resolved.args, isMutation)
+  const isMutation = resolved.path !== '' && classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'mutation'
+  // A clone pull stays out of the *binding*: its --branch is a Code Repository
+  // branch, so pinning it to the session's global branch, or reading
+  // `--branch main` as a write aimed at main, would refuse a pull
+  // (hooks/fde-hold.test.ts H9a). The --force form is still the write the ladder
+  // judged, and it is still recorded: hooks/local-write.test.ts LW1 and
+  // hooks/fde-hold.test.ts H9b.
+  const bindable = isMutation && !isLocalPull(resolved.path)
+  const bound = fdeBind(fde, resolved.path, resolved.args, bindable)
   if ('deny' in bound) return bound
   return { input: { ...input, command: resolved.path, args: bound.args }, ran: isMutation ? resolved.path : null }
 }
 
-// A /fde from one of these is the person's own typing: the terminal and Remote
+// A /fde end, /fde resume or /approval yolo from one of these is the person's own typing: the terminal and Remote
 // Control. An SDK turn (`claude -p`, the Agent SDK), peers, relays, channels,
 // triggers and plugins are not (zay, 2026-10-21: "Not you").
 const PERSON_ORIGINS = new Set(['composer', 'bridge'])
@@ -1669,6 +1689,14 @@ async function runEntry($: EngineInterface, entry: CommandEntry, args: string, o
       }
       const mode = parseApprovalMode(wanted)
       if (mode === null) return `Unknown mode '${wanted}'. Modes: ${APPROVAL_MODES.join(', ')}.`
+      // yolo is where destructive writes and promotions run with no ask, and the
+      // mode persists: only the person's own typing turns it on. An SDK turn, a
+      // peer or a relay can still pick a stricter mode.
+      if (mode === 'yolo' && !isPerson(origin)) {
+        return `Only you can turn on yolo: type /approval yolo yourself. This one came from ${
+          origin?.kind || 'an unknown source'
+        }, so the approval mode stays ${await approvalMode($)}.`
+      }
       await $.store.set('approvalMode', mode)
       return `Foundry approval mode: ${mode}.`
     }
@@ -1759,6 +1787,8 @@ async function guardedCall($: EngineInterface, e: Args<'tool.call'>, next: Next<
   // A call over the cap, or one that fills the operator's credential store, is
   // refused here, before the ladder can ask the operator to approve a call that
   // cannot run. executeCli checks again.
+  // It sits after the FDE gate on purpose: that gate can rewrite argv, and the
+  // timer has to cover the call that would really run.
   if (tool === ORTHANC_CLI) {
     const resolved = resolveOrthancCommand(normalizeCommand(asString(input.command)), Array.isArray(input.args) ? input.args.map(String) : [], manifest)
     const command = manifest.find(entry => entry.path === resolved.path)

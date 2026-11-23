@@ -75,7 +75,7 @@
 //
 // Synthetic stack and RIDs only.
 import type { On } from 'claude-code'
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import { manifestFrom } from './orthanc'
 import {
@@ -768,6 +768,15 @@ function rig(on: On, mode: Mode) {
     if (line === 'configure list') return reply(envelope({ profiles: [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }] }))
     if (e.argv[0] === 'git') return reply('origin\thttps://tester.example.com/stemma/git/ri.stemma.main.repository.x/repo.git (push)\n')
     return reply(envelope({ ran: line }))
+  })
+  // A write whose own wait passes $.process.run's ten minutes (an uninstall polls
+  // its delete job for 600 s) streams under a $.clock.after deadline instead.
+  mock.clock(on, { now: 1_000_000 })
+  on('process.spawn', async function* (_$, e) {
+    const line = e.argv.slice(1).filter(word => word !== '--agent' && word !== '--non-interactive').join(' ')
+    h.ran.push(line)
+    yield { stream: 'stdout' as const, text: envelope({ ran: line }) }
+    return { value: { code: 0, signal: null } }
   })
   const env = new Map<string, string>([['HOME', '/home/tester']])
   on('env.get', (_$, e) => ({ value: env.get(e.name) }))

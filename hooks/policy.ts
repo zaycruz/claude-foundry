@@ -16,6 +16,10 @@ export type ManifestCommand = {
   operatorApproval?: unknown
   /** The entry's raw `operator_approval_scope` (orthanc #118), unread: approvalOnWorkBranch reads it, failing closed. */
   operatorApprovalScope?: unknown
+  /** The entry's `mutation_risk`, kept raw: what a write does that its `kind`
+   * cannot say. A value this file cannot read is read as no risk line — see
+   * `replacesBinary`, which says why that is the safe direction here. */
+  mutationRisk?: unknown
 }
 
 export const APPROVAL_MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
@@ -196,12 +200,165 @@ export function operatorOnlyReason(path: string): string | null {
   const why = OPERATOR_ONLY_COMMANDS[path]
   return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
 }
-// Orthanc `local` commands that only read local state.
-const LOCAL_READS = new Set([
+// Two commands whose own manifest entry says `kind: read-only`, because nothing
+// on Foundry changes, and whose flags say the call writes the machine the agent
+// works on. Measured on the sha-256-verified orthanc v0.7.12 release binary
+// (archive 1983c18a179c54ef1b4f9b18c50acd3db9c364d61f3d5e7cbfa73eea06c0e424,
+// built from commit 7b54958); the source lines are orthanc-source origin/main.
+//  - `repository clone <rid> <dir> --force` — src/repository_git.rs `run_clone`
+//    calls `std::fs::remove_dir_all(target)` (line 44) on a non-empty target,
+//    then `git clone` into it. Without `--force` a non-empty target is a usage
+//    error, so a plain clone writes only where nothing was, and it stays the read
+//    the plugin's own skill tells the agent to run as plain `orthanc repository
+//    clone`.
+//  - `dev-console sdk install --yes | --target <dir>` — src/dev_console_local.rs
+//    `install` runs the steps unless the call is a plan (line 172: no
+//    coordinates, or neither `--yes` nor `--target`, or `args.dry_run`); the
+//    steps `dev_console_local_support.rs` builds
+//    are `npm install --registry … <name>@<version>` or `python3 -m pip install
+//    --index-url …`, of a package name and version taken from the application's
+//    SDK definition response. A package the server named runs its install scripts
+//    as the agent's user: `npm` needs `--target`, and `pip` needs `--yes` to
+//    leave a virtualenv. `execute_step` is line 182, past both returns.
+// Both line numbers are read at commit 7b54958, the commit the v0.7.12 binary
+// reports, and both say the same thing about `--dry-run`: the command returns
+// before either the delete or the install (`run_clone` returns at line 30, four-
+// teen lines before the delete), which is what lets a plan stay a read.
+// Each entry keeps its own words, the way OPERATOR_ONLY_COMMANDS does, so the
+// sentence an operator reads cannot fall behind the rule that asked them.
+// Neither command defines a short alias (measured on the v0.7.12 binary:
+// `-f` and `-y` are both 'unexpected argument'), so the long names are enough.
+// This is not "a read with a file flag": `sql export --out f.csv` writes a data
+// file and stays a read (hooks/operator-handoff.test.ts Q6). Orthanc still labels
+// both entries `read-only` in the pinned snapshot, and
+// hooks/local-write.test.ts LW8 fails loudly when an orthanc-side mark makes this
+// table redundant.
+type LocalWrite = { flags: readonly string[]; reason: string; note: string }
+const LOCAL_WRITE_COMMANDS: Readonly<Record<string, LocalWrite>> = {
+  'repository clone': {
+    flags: ['--force'],
+    reason: "'repository clone' writes this machine, not Foundry: --force deletes what is already in the target folder before cloning.",
+    note: 'Writes this machine, not Foundry: with --force it deletes a non-empty target directory before cloning, so that call goes through the approval ladder and is refused in Bash.',
+  },
+  'dev-console sdk install': {
+    flags: ['--yes', '--target'],
+    reason: "'dev-console sdk install' writes this machine, not Foundry: it runs npm or pip install of the packages this application's SDK definition names.",
+    note: "Writes this machine, not Foundry: with --yes or --target it runs npm or pip install of the packages this application's SDK definition names, so that call goes through the approval ladder and is refused in Bash.",
+  },
+}
+
+// `orthanc repository clone` is exempt from the ladder in its own right, whatever
+// a manifest says: it pulls a Code Repository into a local folder, and the plugin's
+// own skill tells the agent to run it as plain `orthanc repository clone`. Its
+// `--branch` is a Code Repository branch, so reading it as a write aimed at main
+// would refuse a pull. LOCAL_WRITE_COMMANDS above still judges its --force form.
+const LOCAL_PULLS = new Set(['repository clone'])
+
+/** The clone pull that no rule here judges as a write. One spelling, so the
+ * guard and FDE mode cannot drift apart on which name is exempt. */
+export const isLocalPull = (path: string) => LOCAL_PULLS.has(path)
+
+// One entry of the table, on its own keys only: `command` is free-form text in
+// the tool schema, so 'constructor' must not read an inherited member
+// (hooks/operator-handoff.test.ts Q9).
+function localWriteEntry(path: string): LocalWrite | null {
+  if (!Object.prototype.hasOwnProperty.call(LOCAL_WRITE_COMMANDS, path)) return null
+  return LOCAL_WRITE_COMMANDS[path]!
+}
+
+// True when the call asked only for a plan. Decided by the file's own argv
+// reader, and only by what that reader can prove: an answer that REMOVES an ask
+// must not lean on `argsNameFlag`, whose contract is to over-match because
+// "over-matching only asks more".
+//  - `--dry-run` standing alone (quoted, or `--DRY-RUN`) is the switch.
+//  - `--dry-run=false` is not. Measured on the v0.7.12 binary, orthanc takes the
+//    flag as a switch and refuses any value ('unexpected value 'false' for
+//    '--dry-run' found; no more were expected'), so that spelling runs nothing
+//    and must not be read as a plan. Should the flag ever take a value, it keeps
+//    the write there instead of quietly dropping to a read.
+//  - `--target --dry-run` is not either: `--target` takes a value, so the word is
+//    that option's value (an install into a folder literally named `--dry-run`),
+//    not the switch. givenFlags records such a swallowed word as a flag too, so
+//    the switch counts only while nothing consumed it.
+function isPlanCall(args: readonly string[], command: ManifestCommand | undefined): boolean {
+  const shapes = flagShapes(command)
+  return args.some((raw, index) => {
+    if (unquote(raw).trim().toLowerCase() !== '--dry-run') return false
+    const previous = index === 0 ? '' : unquote(args[index - 1]!).trim().toLowerCase()
+    // A word another option took as its value is not the switch, so a hyphen-led
+    // word before this one owns it unless it proves it takes nothing — the same
+    // rule `baseBranchOnWorkBranch` and `positionals` apply to the identical
+    // pflag hazard, where a flag the manifest does not list leaves the call
+    // unproven and the guard asks more. The file's argv reader cannot show this:
+    // it nulls such a swallowed value and lists the word as a flag of its own,
+    // on purpose, because for a destructive flag over-reading is the safe
+    // direction. Here the safe direction is the other way round: an entry that
+    // stopped listing `--target` must not talk the guard into reading
+    // `--target --dry-run` as a plan and run the npm install.
+    if (previous.startsWith('-')) {
+      // `--target=./app` binds its own value, so nothing follows it that could be
+      // swallowed; `--target --dry-run` does not, and takes the word.
+      if (previous.includes('=')) return true
+      return shapes.get(previous)?.takesValue === false
+    }
+    return true
+  })
+}
+
+/** Why this `read-only` command writes this machine instead of reading Foundry,
+ * or null when the call reads. `command` is the manifest entry: its flag shapes
+ * tell the plan switch from a word another option swallowed as its value. */
+export function localWriteReason(
+  path: string,
+  args: readonly string[],
+  command?: ManifestCommand | null,
+): string | null {
+  const entry = localWriteEntry(path)
+  if (entry === null) return null
+  if (!entry.flags.some(flag => argsNameFlag(args, [flag]))) return null
+  return isPlanCall(args, command) ? null : entry.reason
+}
+
+/** The line `orthanc_help` puts on the command's own page, so the agent learns
+ * it there instead of spending a call on it. */
+export function localWriteNote(path: string): string | null {
+  return localWriteEntry(path)?.note ?? null
+}
+
+// Orthanc `local` commands that only read local state. Every name here is a
+// `local` command in the orthanc this plugin is tied to
+// (hooks/orthanc-snapshot.json): a name orthanc drops comes out, since a write
+// that later returns under it would be read as a read.
+export const LOCAL_READS = new Set([
   'version', 'hello', 'agent-manifest', 'capabilities', 'completion show',
   'configure list', 'alias list', 'alias show', 'alias resolve', 'alias export',
-  'ai-fde tools list', 'smoke schedule',
+  'smoke schedule',
 ])
+// Orthanc's self-update. `--apply` replaces the binary the agent-manifest and
+// its operator_approval marks were read from, `--channel nightly` replaces it
+// with a build of main, `--version <older> --yes` moves it back under the
+// plugin's own min_orthanc, and `--plugin` updates this plugin: the guard's own
+// code. Not Foundry work on a branch, so no approval mode runs it.
+//
+// The manifest already says this in data: orthanc 0.7.11 marks `update`
+// `mutation_risk: "replaces-binary"` (the only other risk it names is
+// `solution-design delete`: "moves-a-resource-to-the-trash"). A guard that read
+// only the field would miss a binary that ships `update` with no risk line, and
+// a guard that read only the name would miss the next binary-replacing command,
+// so the rule reads both, as the credential refusals read `input` and the name.
+const SELF_UPDATE_COMMANDS = new Set(['update'])
+export const BINARY_RISK = 'replaces-binary'
+// A `mutation_risk` in a shape this file cannot read (an object, a number, null)
+// is read as no risk line at all, not as a risk: refusing on shape would refuse
+// every command orthanc later annotates with a field it writes differently, and
+// the case that matters — `update` itself — is held by the name. An unreadable
+// condition on `operator_approval` fails the other way, to a human decision,
+// because there the alternative is letting a mutation through unasked.
+
+/** True when this command replaces the orthanc binary the guard reads its rules
+ * from, by its manifest name or by its `mutation_risk`. */
+export const replacesBinary = (command: ManifestCommand | undefined): boolean =>
+  command !== undefined && (SELF_UPDATE_COMMANDS.has(command.path) || command.mutationRisk === BINARY_RISK)
 
 export type GateClassification = {
   command: string | null
@@ -225,6 +382,9 @@ export type GateClassification = {
   operatorApproval?: string
   /** True when operator_approval_scope proves the write lands on one global work branch: yolo skips the ask. */
   operatorApprovalOnWorkBranch?: true
+  /** Set when the manifest calls the command a read and it is not one: what the
+   * call does to this machine, in the sentence the operator and the agent read. */
+  localWrite?: string
   /** True for a promotion into main through a proposal (merge, accept, approve, deploy, pull-request merge): not a direct write to main, so yolo runs it with no ask. */
   promotion?: true
   error?: string
@@ -239,9 +399,17 @@ const lastWord = (text: string) => text.split(/\s+/).at(-1) ?? ''
 export function classifyOrthancCommand(
   command: string,
   manifest: readonly ManifestCommand[],
+  /** Every word after the command name, required: two `read-only` entries are a
+   * write with the right flag and a plan without it. No default, because an
+   * omitted argv would read every one of those calls as a plan. */
+  args: readonly string[],
 ): 'read' | 'mutation' {
   const normalized = command.trim().toLowerCase()
   const declared = manifest.find(entry => entry.path === normalized)
+  // Before the `read-only` short-circuit: two entries Orthanc calls a read write
+  // this machine, and a read short-circuits the ladder, the ask and the trace.
+  if (localWriteReason(normalized, args, declared) !== null) return 'mutation'
+  if (LOCAL_PULLS.has(normalized)) return 'read'
   if (declared?.kind === 'read-only') return 'read'
   if (declared?.kind === 'local' && LOCAL_READS.has(normalized)) return 'read'
   if (declared === undefined && READ_VERBS.has(lastWord(normalized))) return 'read'
@@ -525,6 +693,15 @@ function argsHaveForce(command: string, args: readonly string[]): boolean {
 // A flag as the manifest may list it in when_all_flags.
 const APPROVAL_FLAG = /^--?[a-z0-9][a-z0-9-]*$/i
 const QUESTION_ARGS_MAX = 600
+
+/** The call's own words, for a question an operator answers about it. JSON
+ * escapes newlines and quotes, so an argument cannot forge a line here
+ * (`operatorApprovalQuestion` shows its args for the same reason). */
+function calledAs(args: readonly string[]): string {
+  const shown = JSON.stringify(args)
+  const cut = shown.length > QUESTION_ARGS_MAX ? `${shown.slice(0, QUESTION_ARGS_MAX)}… (${shown.length - QUESTION_ARGS_MAX} more characters)` : shown
+  return `The call was: ${cut}.`
+}
 
 /** An `operator_approval` value the guard reads: `"always"` or
  * `{when_all_flags: [flags]}`, nothing else. Anything else is null: the guard
@@ -1142,9 +1319,15 @@ function orthancClassification(
     const approval = operatorApprovalQuestion(command, args, manifest)
     const approvalOnBranch = approval !== null && approvalOnWorkBranch(command, args, manifest)
     const trigger = destructiveTrigger(command, args, manifest.find(entry => entry.path === command))
+    const localFact = localWriteReason(command, args, manifest.find(entry => entry.path === command))
+    // Which folder gets deleted, and which application's packages get installed,
+    // are in the call: an operator told only 'deletes what is already in the
+    // target folder' is approving blind.
+    const localWrite = localFact === null ? null : `${localFact} ${calledAs(args)}`
     return {
       ...base,
       kind: 'mutation',
+      ...(localWrite === null ? {} : { localWrite }),
       isBranchScoped: BRANCH_REQUIRED_PATHS.has(command),
       isDestructive: trigger !== null,
       ...(trigger === null ? {} : { destructiveWhy: trigger }),
@@ -1760,6 +1943,61 @@ function printsAndExits(runner: string, flags: readonly string[]): boolean {
   )
 }
 
+/** The other route to the same self-modification, with no Orthanc in the call:
+ * `claude plugin update|uninstall|disable` replaces or removes
+ * `foundry@claude-foundry`, which is the code these rules are written in. Reads
+ * (`list`, `details`, `search`) and any other plugin are left alone; so is a bare
+ * `-h`, which prints help. An update naming no plugin is refused, because it
+ * updates every plugin, this one included. */
+const PLUGIN_SELF_ACTIONS = new Set(['disable', 'remove', 'uninstall', 'update'])
+const CLAUDE_BINARIES = new Set(['claude'])
+
+function mutatesThisPlugin(words: readonly string[]): boolean {
+  const head = commandHead(words)
+  if (!CLAUDE_BINARIES.has(basename(words[head]))) return false
+  const rest = words.slice(head + 1).map(word => unquote(word).toLowerCase())
+  // Only a usage print escapes: `-V`/`--version` names a release to install here,
+  // the same trap the shell lane learned about `orthanc update --version` (U13).
+  if (rest.some(word => ['-h', '--help', 'help'].includes(word))) return false
+  if (rest[0] !== 'plugin' && rest[0] !== 'plugins') return false
+  if (!rest.some(word => PLUGIN_SELF_ACTIONS.has(word))) return false
+  const named = rest.filter(word => word.includes('@') || word === 'foundry' || word === 'claude-foundry')
+  return named.length === 0 || named.some(word => word === 'foundry' || word === 'claude-foundry' || word.startsWith('foundry@'))
+}
+
+/** The index of the first word past the wrapper prefix: assignments, wrappers,
+ * their flags and the numbers they take (`timeout 5`, `nice -n 10`). */
+function commandHead(words: readonly string[]): number {
+  let index = 0
+  while (index < words.length && (ASSIGNMENT.test(words[index]!) || WRAPPERS.has(basename(words[index])) || words[index]!.startsWith('-') || /^[0-9.]+[smhd]?$/.test(words[index]!))) {
+    index += 1
+  }
+  return index
+}
+
+/** `-h`, `--help` or `help` among the words: a usage print, which installs nothing.
+ * `--version` is not one: on `update` it names the release to install (U13). */
+function isUsagePrint(args: readonly string[]): boolean {
+  const words = args.map(word => unquote(word).trim().toLowerCase())
+  return words.some(word => word === '-h' || word === '--help') || words[0] === 'help'
+}
+
+/** True when the segment runs Orthanc but the words that say what to run never
+ * reach the line: `xargs orthanc` takes them from stdin or a file, so the parse
+ * sees the binary and nothing else, and no rule of the ladder has anything to
+ * judge. A process substitution is a different case and is not refused: measured
+ * against the released 0.7.11, `orthanc <(echo 'update --apply')` hands the binary
+ * the path `/dev/fd/63`, and it answers `unrecognized subcommand` and changes
+ * nothing. */
+function runsOrthancOnUnreadableWords(words: readonly string[]): boolean {
+  const head = commandHead(words)
+  // A head that names Orthanc without running it (`ls | xargs grep orthanc README`)
+  // is a mention, not a call, exactly as everywhere else in this file.
+  if (NON_EXECUTING.has(basename(words[head]))) return false
+  if (!words.slice(head, head + 2).some(word => isOrthancWord(word))) return false
+  return words.slice(0, head + 1).some(word => basename(word) === 'xargs')
+}
+
 /** Where a segment starts a real Orthanc call: at its command word (assignments
  * and wrappers resolved), when that word is Orthanc itself — `orthanc`, a path
  * to it (`/opt/bin/orthanc`, `target/debug/orthanc`) or `$ORTHANC_BIN`. -1
@@ -1848,7 +2086,7 @@ function orthancShellCall(
   words: readonly string[],
   start: number,
   manifest: readonly ManifestCommand[],
-): { path: string; known: boolean; help: boolean } {
+): { path: string; known: boolean; help: boolean; helpVerb: boolean } {
   const rest = words.slice(start + 1)
   let index = 0
   while (index < rest.length && rest[index]!.startsWith('-')) index += rest[index] === '--profile' ? 2 : 1
@@ -1856,6 +2094,10 @@ function orthancShellCall(
   const ended = rest.indexOf('--')
   const flags = ended < 0 ? rest : rest.slice(0, ended)
   const help = flags.some(word => ['-h', '--help', '-V', '--version'].includes(word)) || tail[0] === 'help'
+  // `-V`/`--version` prints the version on most commands, and on `update` it names
+  // the release to install. Only `-h`, `--help` and `orthanc help …` are a read of
+  // documentation, so only those let a call the guard refuses through the shell lane.
+  const helpVerb = flags.some(word => ['-h', '--help'].includes(word)) || tail[0] === 'help'
   const leading: string[] = []
   for (const word of tail) {
     if (word.startsWith('-')) break
@@ -1864,9 +2106,9 @@ function orthancShellCall(
   const paths = new Set(manifest.map(entry => entry.path))
   for (let width = leading.length; width >= 1; width -= 1) {
     const path = leading.slice(0, width).join(' ').toLowerCase()
-    if (paths.has(path)) return { path, known: true, help }
+    if (paths.has(path)) return { path, known: true, help, helpVerb }
   }
-  return { path: leading.join(' ').toLowerCase(), known: false, help }
+  return { path: leading.join(' ').toLowerCase(), known: false, help, helpVerb }
 }
 
 // One Orthanc call a shell line runs, in the order the shell runs them.
@@ -2017,6 +2259,17 @@ function shellClassification(
     isDestructive: false,
     error,
   })
+  // Two refusals read the raw segment words, before the per-call ladder: a
+  // `claude plugin` change to this plugin runs no Orthanc at all, and `xargs
+  // orthanc` takes its words from stdin, where no call can be read.
+  for (const { words } of commandSegments(command)) {
+    if (runsOrthancOnUnreadableWords(words)) {
+      return refuse(null, 'This shell command runs Orthanc with words the Foundry guard cannot read (xargs takes them from stdin or a file, and `<(...)` takes them from a substitution). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
+    }
+    if (mutatesThisPlugin(words)) {
+      return refuse(null, `'claude plugin' updates, removes or disables foundry@claude-foundry: the code the Foundry guard is written in, including the branch rule and the approval ladder. That is the operator's call, in their own terminal; this session does not run it. Ask them to run 'claude plugin update foundry@claude-foundry'.`)
+    }
+  }
   for (const call of shellCalls(command, manifest)) {
     if (call.hides) {
       return refuse(null, 'This shell command runs Orthanc in a form the Foundry guard cannot read (a variable, eval or interpreter code). Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
@@ -2024,7 +2277,23 @@ function shellClassification(
     if (call.path === '' && !call.help && call.split) {
       return refuse(null, 'This shell command builds an Orthanc command from a substitution or variable, which the Foundry guard cannot read. Run Orthanc reads as plain `orthanc …` and writes with orthanc_cli.')
     }
-    if (call.help || call.path === '' || call.path === 'repository clone') continue
+    // Before the help carve-out, and not by it: `--version` prints the version on
+    // most commands and names the release to install on `update`, so an update
+    // spelled `--version <older> --yes --apply` would otherwise read as a question
+    // about versions. `-h`, `--help` and `orthanc help …` still print usage —
+    // measured, not assumed: against the released 0.7.11,
+    // `orthanc update --apply --help` prints the usage page, exits 0, and leaves the
+    // binary's mtime unchanged, so the marker that survives this carve-out is an
+    // exit rather than an install with a banner on it.
+    if (call.known && replacesBinary(manifest.find(entry => entry.path === call.path)) && !isUsagePrint(call.args)) {
+      return refuse(
+        call.path,
+        call.path === 'update'
+          ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`
+          : `'orthanc ${call.path}' is marked '${BINARY_RISK}' in Orthanc's agent manifest: it replaces the orthanc binary this session reads its command list from. Installing a binary is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`,
+      )
+    }
+    if (call.help || call.path === '') continue
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }
@@ -2039,8 +2308,12 @@ function shellClassification(
     if (operatorOnly !== null) return refuse(call.path, operatorOnly)
     // The manifest entry this call names, read once: the wait timer below
     // (shellOrthancCalls) judges the same entry the ladder judged here.
-    if (classifyOrthancCommand(call.path, manifest) === 'read' && call.entry?.operatorApproval === undefined) continue
-    return refuse(call.path, `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.`)
+    if (classifyOrthancCommand(call.path, manifest, call.args) === 'read' && call.entry?.operatorApproval === undefined) continue
+    const localWrite = localWriteReason(call.path, call.args, call.entry)
+    return refuse(
+      call.path,
+      `Orthanc writes run through orthanc_cli, where the branch rule and approval ladder apply, not Bash. Run '${call.path}' with orthanc_cli.${localWrite === null ? '' : ` ${localWrite}`}`,
+    )
   }
   return null
 }
@@ -2190,13 +2463,19 @@ export function classifyCall(
     if (resolved.path === '' && resolved.args.length > 0) {
       return unreadableCall(input, workingBranch, `Orthanc's agent manifest has no command starting with '${resolved.args.join(' ')}'. Look it up with orthanc_help, then call orthanc_cli with the command name in \`command\`.`)
     }
-    if (resolved.path === '' || resolved.path === 'repository clone') return null
+    if (resolved.path === '') return null
     // Before the read short-circuit: these two are `read-only` in the manifest,
     // and what they print or write is the whole point of the call.
     const operatorOnly = operatorOnlyReason(resolved.path)
     if (operatorOnly !== null) return unreadableCall(input, workingBranch, operatorOnly)
     // A read whose entry also asks for the operator is not let through as a read.
-    if (classifyOrthancCommand(resolved.path, manifest) === 'read' && operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null) return null
+    // A read that names a risk the guard refuses outright is not let through as a read either.
+    if (
+      classifyOrthancCommand(resolved.path, manifest, resolved.args) === 'read' &&
+      operatorApprovalQuestion(resolved.path, resolved.args, manifest) === null &&
+      !replacesBinary(manifest.find(found => found.path === resolved.path))
+    )
+      return null
     // orthanc reads the last --profile it is given, so one in the args would move
     // the write off the stack the operator picked. Reads may look at another stack.
     if (resolved.args.some(arg => PROFILE_FLAG.test(unquote(arg)))) {
@@ -2204,6 +2483,13 @@ export function classifyCall(
     }
     if (STACK_COMMANDS.has(resolved.path)) {
       return unreadableCall(input, workingBranch, `'${resolved.path}' changes orthanc's default stack, which a later session starts on. The stack is the operator's: they switch it with /profile.`)
+    }
+    if (replacesBinary(manifest.find(found => found.path === resolved.path))) {
+      // Refused, not asked: a dialog cannot show which build the binary becomes.
+      const why = resolved.path === 'update'
+        ? `'orthanc update' replaces the orthanc binary this session reads its command list and operator_approval marks from, and '--plugin' updates the foundry plugin: the guard's own code. It is the operator's call and not a write on a branch: they update orthanc in their own terminal with 'orthanc update --apply'. orthanc_cli runs no update, in any mode.`
+        : `'${resolved.path}' is marked '${BINARY_RISK}' in Orthanc's agent manifest: it replaces the orthanc binary this session reads its command list and operator_approval marks from. Installing a binary is the operator's call, not a write on a branch: they run it in their own terminal. orthanc_cli runs no binary-replacing command, in any mode.`
+      return unreadableCall(input, workingBranch, why)
     }
     return orthancClassification(resolved.path, resolved.args, { ...input, args: resolved.args }, workingBranch, manifest, stored)
   }
@@ -2279,6 +2565,10 @@ export function ladderDecision(
   }
   const command = classification.command ?? '(foundry mcp write)'
   const note = verdict ? ` ${verdict.reason}` : ''
+  // The fact this rule exists to state, in every question an operator answers:
+  // a manifest `read-only` command that writes this machine must not be approved
+  // under a sentence that says only 'a mutation waits for approval'.
+  const local = classification.localWrite ? ` ${classification.localWrite}` : ''
   // Yolo asks only for a write naming main: no write lands on main without the operator.
   if (mode === 'yolo' && classification.targetsProtected) {
     return {
@@ -2286,34 +2576,39 @@ export function ladderDecision(
       reason:
         (classification.command !== null && BASE_BRANCH_WRITES.has(classification.command)
           ? `yolo mode: ${scenarioBaseReason(command)}`
-          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves; ${workBranchFix(classification.command)}`) +
-        (classification.destructiveWhy ? ` It is also destructive (${classification.destructiveWhy}).` : ''),
+          : `yolo mode: '${command}' writes main (it names main, master or HEAD as its branch, or works on main only, or starts a stored schedule or import that may build main). It runs only if the operator approves.`) +
+        (classification.destructiveWhy ? ` It is also destructive (${classification.destructiveWhy}).` : '') +
+        // A local write reached this ask because a flag names main, and that flag
+        // is a Code Repository branch: work-branch advice would send the agent to
+        // pass a branch that changes nothing about what the call deletes.
+        (classification.localWrite ? ' No Foundry branch changes what this writes on this machine.' : ` ${workBranchFix(classification.command)}`) +
+        local,
     }
   }
   if (mode === 'yolo')
     return {
       outcome: 'run',
-      reason: classification.destructiveWhy
+      reason: (classification.destructiveWhy
         ? `yolo mode: nothing else asks; this write is destructive (${classification.destructiveWhy}) and runs with no ask`
-        : 'yolo mode: nothing else asks; work stays on branches that are not main',
+        : 'yolo mode: nothing else asks; work stays on branches that are not main') + local,
     }
   if (classification.isDestructive) {
     // Both claims are kept: outside yolo a write that is destructive *and* names
     // main asks once, and the operator reads why it cannot be waved through.
     const also = classification.targetsProtected ? ', and it writes main' : ''
-    return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${also}${note}` }
+    return { outcome: 'ask', reason: `destructive mutation '${command}' (${classification.destructiveWhy}) asks in every mode but yolo${also}${note}${local}` }
   }
   if (classification.targetsProtected) {
     return {
       outcome: 'ask',
-      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology).${workBranchFix(classification.command) === '' ? '' : ` ${workBranchFix(classification.command)}.`}${note}`,
+      reason: `'${command}' targets a protected baseline (main/master branch or the production ontology).${workBranchFix(classification.command) === '' ? '' : ` ${workBranchFix(classification.command)}.`}${note}${local}`,
     }
   }
-  if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval` }
-  if (mode === 'allow-edits') return { outcome: 'run', reason: 'allow-edits mode: non-protected mutations run' }
-  if (!verdict) return { outcome: 'ask', reason: `'${command}': guard unavailable; failing closed to a human decision` }
-  if (verdict.action === 'approve') return { outcome: 'run', reason: verdict.reason }
-  return { outcome: 'ask', reason: `'${command}': ${verdict.reason}` }
+  if (mode === 'ask-always') return { outcome: 'ask', reason: `ask-always mode: mutation '${command}' waits for approval${local}` }
+  if (mode === 'allow-edits') return { outcome: 'run', reason: `allow-edits mode: non-protected mutations run${local}` }
+  if (!verdict) return { outcome: 'ask', reason: `'${command}': guard unavailable; failing closed to a human decision${local}` }
+  if (verdict.action === 'approve') return { outcome: 'run', reason: `${verdict.reason}${local}` }
+  return { outcome: 'ask', reason: `'${command}': ${verdict.reason}${local}` }
 }
 
 export function modeGuidance(mode: ApprovalMode): string {
@@ -2340,7 +2635,11 @@ export function modeGuidance(mode: ApprovalMode): string {
         'Release tags (repository tag create --apply) ask the operator in every mode except yolo, where only a tag with no --branch <global branch RID> asks. ' +
         `Foundry approval mode: ${mode}. Foundry mutations may surface an approval dialog for the ` +
         'operator: the call continues once approved; if the operator declines or no one can be asked, ' +
-        'the call is blocked — report it, do not retry blindly.')
+        'the call is blocked — report it, do not retry blindly.') +
+    // Named in both sentences: the model reads this text to predict whether a
+    // call will stop, and a rule it is not told reads as a hang
+    // (hooks/destructive.test.ts D11).
+    ' Two commands Orthanc labels `read-only` write this machine instead of Foundry — `repository clone <rid> <dir> --force` deletes a non-empty target folder, and `dev-console sdk install --yes|--target <dir>` runs npm or pip install of the packages an application\'s SDK definition names — and the guard judges those two calls as writes.'
   )
 }
 

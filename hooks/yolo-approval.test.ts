@@ -399,3 +399,26 @@ for (const mode of OTHER_MODES) {
     }
   })
 }
+
+// FND-28: /approval yolo is the person's own typing, like /fde end. An SDK turn,
+// a peer, a relay, a channel or a trigger cannot turn it on; the mode persists
+// and is where destructive writes and promotions run with no ask.
+const asOrigin = async ($: Engine, kind: string | undefined, args: string) =>
+  (await $.command.run({ command: 'approval', args, origin: kind ? { kind } : undefined, presentation: { isFullscreen: false, columns: 120 } } as never)).text ?? ''
+
+for (const kind of ['sdk', 'peer', 'relay', 'channel', 'trigger', 'plugin', undefined]) {
+  test(`O13: /approval yolo from ${kind ?? 'no origin'} is refused and the mode stays; a stricter mode is allowed`, async ($, on) => {
+    harness(on, 'auto')
+    expect(await asOrigin($, kind, 'yolo')).toContain('Only you can turn on yolo')
+    expect(await say($, 'approval')).toContain('approval mode: auto.')
+    expect(await asOrigin($, kind, 'ask-always')).toBe('Foundry approval mode: ask-always.')
+  })
+}
+
+for (const kind of ['composer', 'bridge']) {
+  test(`O13: /approval yolo from ${kind} (the person) still turns it on`, async ($, on) => {
+    harness(on, 'auto')
+    expect(await asOrigin($, kind, 'yolo')).toBe('Foundry approval mode: yolo.')
+    expect(await say($, 'approval')).toContain('approval mode: yolo.')
+  })
+}

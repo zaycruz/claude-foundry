@@ -7,15 +7,24 @@ says so instead of falling back to REST.
 
 - **Two tools.** `orthanc_help` discovers Orthanc's command surface; `orthanc_cli`
   runs a command in agent mode and returns its `foundry-agent-v1` envelope.
-  A waiting command (`repository checks wait`, `ontology branch-index-status
-  --wait`, `sql wait`, `ai-fde run --apply`) runs as long as its own `--timeout`
-  and `--publish-grace`, plus the time Orthanc adds around the wait (370 s for
-  `ai-fde run`) and a margin, from 300 s up to 2,290 s (more for a command
-  whose own defaults need more). A call that would need more is refused before
-  it starts and before any approval prompt, with the largest `--timeout` that
-  fits or the flag to make smaller (for `ai-fde run`, also `--detach` with
-  `ai-fde status` and `ai-fde result`). A call stopped from outside its timer
-  says `reason: cancelled`; a stop by the timer says `reason: timeout`. The same
+  A waiting command (`repository checks wait`, `ontology
+  branch-index-status --wait`, `sql wait`, `devops draft publish
+  --wait`, `marketplace installation create|upgrade|uninstall --apply`,
+  `marketplace job cancel --wait`, `functions execute`, `models deployment get
+  --wait`, `ai-fde run --apply`) runs as long as Orthanc bounds its own wait —
+  one of `--timeout`, `--timeout-seconds`, `--publish-grace`,
+  `--readback-timeout`, `--time-budget-seconds`, plus a wait Orthanc keeps as a
+  constant with no flag for it (the 900 s a draft takes to finalise; the 780 s
+  of a Marketplace install; the 600 s an uninstall polls its delete job; 370 s
+  around `ai-fde run`) — and a margin, from 300 s up to 2,290 s (more for a
+  command whose own defaults need more). A call that would need more is refused
+  before it starts and before any approval prompt, naming the flag to make
+  smaller and the largest value of it that fits (for `ai-fde run`, also
+  `--detach`). A flag that only caps one HTTP request — `--timeout-seconds` on
+  `search`, `update` or `functions` — lengthens the timer and never refuses. A
+  call stopped from outside its timer says `reason: cancelled`; a stop by the
+  timer says `reason: timeout`. A write stopped by either is reported as an
+  unknown mutation: reconcile before you retry it. The same
   wait typed into `Bash` gets that budget too: the call's `timeout` is raised to
   what its own flags ask for — the waits of the Orthanc calls in one command,
   added up when the shell can run them one after another (`a && b`, `;`, a counted
@@ -64,6 +73,12 @@ says so instead of falling back to REST.
   `ontology scenario create --apply` when `--base-branch` does not name one
   global branch RID: an Ontology scenario is a what-if fork, and its base is
   main unless the call names a branch.
+  `orthanc update` never runs through `orthanc_cli`, in any mode: it replaces
+  the Orthanc binary the command list and its `operator_approval` marks were
+  read from, and `--plugin` updates this plugin. `claude plugin
+  update|uninstall|disable` naming this plugin is refused in Bash for the same
+  reason: it replaces the code these rules are written in. The operator updates
+  Orthanc and the plugin in their own terminal.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied. A command whose manifest entry names a credential the operator types —
   by `input`, or by `credential_store`, the store it writes — never runs, in any
@@ -163,6 +178,15 @@ still refuses them in every mode, because their job is to hand you a value:
 `orthanc repository git-credential get` prints the active profile's token
 (`password=…`), and `orthanc compute env get` writes one environment variable's
 value to a new file or to the clipboard. Run those in your own terminal.
+
+Two more are `read-only` because nothing on Foundry changes, and their flags say
+the call writes **this machine**: `repository clone <rid> <dir> --force` deletes
+a non-empty target folder before it clones, and `dev-console sdk install
+--yes|--target <dir>` runs `npm` or `pip` install of the packages the
+application's SDK definition names. The mod judges those two calls as writes:
+they go through the approval ladder (the `--force` clone asks in every mode but
+yolo) and Bash runs neither. A plain clone, and either command with `--dry-run`,
+is still a read.
 
 ### 2. The mod
 
@@ -356,7 +380,10 @@ Approve writes in the Sandbox project on agent/ branches.
 Ask before any change to the Person or Organization object types.
 ```
 
-`/approval rules` shows what the guard reads. The rules steer the guard only:
+Only you can turn on `yolo`: `/approval yolo` from the terminal or Remote
+Control works; from an SDK turn (`claude -p`), a peer, a relay, a channel or a
+trigger it is refused and the mode stays as it was. Those origins can still pick
+a stricter mode. `/approval rules` shows what the guard reads. The rules steer the guard only:
 the branch rule and the destructive rule run first and cannot be loosened.
 
 Claude Code's own auto-mode classifier judges tool calls before the mod sees

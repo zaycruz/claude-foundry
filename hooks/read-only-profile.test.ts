@@ -6,7 +6,7 @@
 // and status, so nothing consulted the mark: in yolo a work-branch write on such
 // a stack went up the ladder as 'run', orthanc started, and the refusal came
 // back as an api/orthanc error — after the operator was asked, or after nothing
-// was asked at all. zay's standing rule: a rich-style stack is read-only, and a
+// was asked at all. the standing rule: a client's production stack is read-only, and a
 // blocked call is reported with the exact call.
 //
 // Ways this can fail, written before the code:
@@ -76,6 +76,8 @@ const ENTRIES = [
   // The one shipped command that is a mutation making no Foundry call (checked on the
   // installed manifest: `update` alone), so orthanc's gate skips it before --apply.
   { path: 'update', kind: 'mutation', auth: 'none', args: [APPLY] },
+  // Fixture only: since FND-16 refuses `update`, no real command is an auth `none` mutation.
+  { path: 'cache prune', kind: 'mutation', auth: 'none', args: [APPLY] },
   { path: 'dataset get', kind: 'read-only' },
   { path: 'ontology list', kind: 'read-only' },
 ]
@@ -119,10 +121,10 @@ function harness(on: On, mode: Mode): Harness {
     if (line === 'version') return reply(envelope({ version: '0.7.8' }))
     if (line === 'configure list') {
       if (h.listFails) return reply(error, 1)
-      // rich is the stack the operator marked read-only; tester is not.
-      const rich = { name: 'rich', host: 'rich.example.com', is_default: false, status: 'ok' }
+      // locked is the stack the operator marked read-only; tester is not.
+      const locked = { name: 'locked', host: 'locked.example.com', is_default: false, status: 'ok' }
       const tester = { name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok' }
-      return reply(envelope({ profiles: h.rows ?? [h.marked ? { ...rich, read_only: true } : rich, tester] }))
+      return reply(envelope({ profiles: h.rows ?? [h.marked ? { ...locked, read_only: true } : locked, tester] }))
     }
     if (line === 'ontology list') return reply(envelope({ data: [{ rid: ONT, display_name: 'People', api_name: 'people' }] }))
     return reply(envelope({ ran: line }))
@@ -163,10 +165,10 @@ const say = async ($: Engine, command: string, args = '') =>
 const surface = async ($: Engine) => String(((await $.tool.call({ tool: HELP } as never)) as { result?: unknown }).result ?? '')
 
 // The operator's mark on the active stack, through the plugin's own command.
-const useRich = async ($: Engine, h: Harness) => {
+const useLocked = async ($: Engine, h: Harness) => {
   h.marked = true
-  const said = await say($, 'profile', 'rich')
-  expect(said).toContain('rich')
+  const said = await say($, 'profile', 'locked')
+  expect(said).toContain('locked')
   return said
 }
 
@@ -179,7 +181,7 @@ const WRITE: [string, string[]][] = [
 for (const mode of MODES) {
   test(`Q1: in ${mode} mode a write on a stack marked read-only is refused, asks no one and starts no orthanc`, async ($, on) => {
     const h = harness(on, mode)
-    await useRich($, h)
+    await useLocked($, h)
     for (const [command, args] of WRITE) {
       const out = await call($, command, args)
       expect(typeof out.deny).toBe('string')
@@ -193,13 +195,13 @@ for (const mode of MODES) {
 
 test('Q2: the refusal names the exact call and the profile read_only mark', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   const deny = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])).deny ?? ''
   expect(deny).toContain('dataset create --parent-folder')
   expect(deny).toContain('--name daily --apply')
-  expect(deny).toContain('rich')
+  expect(deny).toContain('locked')
   expect(deny).toContain('read_only')
-  expect(deny).toContain('orthanc configure profile set rich --no-read-only')
+  expect(deny).toContain('orthanc configure profile set locked --no-read-only')
   expect(ran(h, 'dataset create')).toEqual([])
   expect(h.asked).toEqual([])
 })
@@ -207,7 +209,7 @@ test('Q2: the refusal names the exact call and the profile read_only mark', asyn
 for (const mode of MODES) {
   test(`Q3: in ${mode} mode reads on a stack marked read-only run`, async ($, on) => {
     const h = harness(on, mode)
-    await useRich($, h)
+    await useLocked($, h)
     const before = h.asked.length
     expect((await call($, 'dataset get', [DATASET])).deny).toBe(undefined)
     expect((await call($, 'ontology list')).deny).toBe(undefined)
@@ -222,7 +224,7 @@ for (const mode of ['allow-edits', 'yolo', 'ask-always'] as Mode[]) {
   test(`Q4: in ${mode} mode an unmarked stack keeps the decisions the operator had before`, async ($, on) => {
     const h = harness(on, mode)
     h.marked = false
-    expect(await say($, 'profile', 'rich')).not.toContain('read-only')
+    expect(await say($, 'profile', 'locked')).not.toContain('read-only')
     for (const [command, args] of WRITE) {
       const out = await call($, command, args)
       expect({ mode, command, deny: out.deny }).toEqual({ mode, command, deny: undefined })
@@ -241,7 +243,7 @@ for (const mode of ['allow-edits', 'yolo', 'ask-always'] as Mode[]) {
 for (const mode of MODES) {
   test(`Q5: in ${mode} mode a 'configure list' that fails asks about the write; it never runs blind`, async ($, on) => {
     const h = harness(on, mode)
-    await useRich($, h)
+    await useLocked($, h)
     h.listFails = true
     h.answer = 'Decline'
     const out = await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])
@@ -256,7 +258,7 @@ for (const mode of MODES) {
 
 test('Q5: with no one to ask, the write on an unreadable stack is refused', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   h.listFails = true
   h.answer = 'throw'
   expect(typeof (await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])).deny).toBe('string')
@@ -267,9 +269,9 @@ test('Q5: with no one to ask, the write on an unreadable stack is refused', asyn
 
 test('Q6: in yolo configure profile set <name> --no-read-only asks once and never runs unasked', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   h.answer = 'Decline'
-  const clear = ['rich', '--no-read-only']
+  const clear = ['locked', '--no-read-only']
   expect(typeof (await call($, 'configure profile set', clear)).deny).toBe('string')
   expect(h.asked.length).toBe(1)
   expect(ran(h, 'configure profile set')).toEqual([])
@@ -284,9 +286,9 @@ for (const [named, entries] of shapes) {
   test(`Q6: the clear of the mark asks once when the manifest marks it ${named}`, async ($, on) => {
     const h = harness(on, 'yolo')
     h.manifest = manifestWith([...ENTRIES.slice(0, 1), ...entries, ...ENTRIES.slice(2)])
-    await useRich($, h)
+    await useLocked($, h)
     h.answer = 'Decline'
-    const deny = (await call($, 'configure profile set', ['rich', '--no-read-only'])).deny
+    const deny = (await call($, 'configure profile set', ['locked', '--no-read-only'])).deny
     expect({ named, type: typeof deny }).toEqual({ named, type: 'string' })
     expect({ named, asks: h.asked.length }).toEqual({ named, asks: 1 })
     expect({ named, ran: ran(h, 'configure profile set') }).toEqual({ named, ran: [] })
@@ -295,10 +297,10 @@ for (const [named, entries] of shapes) {
 
 test('Q6: an operator who approves the clear runs it', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
-  expect((await call($, 'configure profile set', ['rich', '--no-read-only'])).deny).toBe(undefined)
+  await useLocked($, h)
+  expect((await call($, 'configure profile set', ['locked', '--no-read-only'])).deny).toBe(undefined)
   expect(h.asked.length).toBe(1)
-  expect(ran(h, 'configure profile set')).toEqual(['configure profile set rich --no-read-only'])
+  expect(ran(h, 'configure profile set')).toEqual(['configure profile set locked --no-read-only'])
 })
 
 test('Q7: orthanc_help says in its first lines which stacks are read-only', async ($, on) => {
@@ -309,26 +311,26 @@ test('Q7: orthanc_help says in its first lines which stacks are read-only', asyn
   h.marked = true
   const text = await surface($)
   const first = text.split('\n').slice(0, 3).join('\n')
-  expect(first).toContain('Read-only stacks: rich')
+  expect(first).toContain('Read-only stacks: locked')
   expect(first).toContain('read_only')
-  expect(text).toContain('Read-only stacks: rich')
+  expect(text).toContain('Read-only stacks: locked')
 })
 
 test('Q7: /profile says which stacks are read-only, and what picking one means', async ($, on) => {
   const h = harness(on, 'yolo')
   const listed = await say($, 'profile')
-  const rich = listed.split('\n').find(line => line.includes('rich')) ?? ''
+  const locked = listed.split('\n').find(line => line.includes('locked')) ?? ''
   const tester = listed.split('\n').find(line => line.includes('tester')) ?? ''
-  expect(rich).toContain('read-only')
+  expect(locked).toContain('read-only')
   expect(tester).not.toContain('read-only')
-  expect(await say($, 'profile', 'rich')).toContain('read-only')
+  expect(await say($, 'profile', 'locked')).toContain('read-only')
   h.marked = false
   expect(await say($, 'profile', 'tester')).not.toContain('read-only')
 })
 
 test('Q8: /fde on a stack marked read-only names the refused call and creates no branch', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   expect(await say($, 'ontology', ONT)).toContain('People')
   const said = await say($, 'fde', 'on')
   expect(said).toContain('global-branch create agent/')
@@ -357,7 +359,7 @@ const APPLIED: [string, string[]][] = [
 for (const mode of MODES) {
   test(`Q9: in ${mode} mode a plan runs on a stack marked read-only`, async ($, on) => {
     const h = harness(on, mode)
-    await useRich($, h)
+    await useLocked($, h)
     for (const [command, args] of PLANS) {
       const before = ran(h, command).length
       const out = await call($, command, args)
@@ -377,7 +379,7 @@ for (const mode of MODES) {
 for (const mode of MODES) {
   test(`Q9: in ${mode} mode the same call with --apply set is refused, however it is spelled`, async ($, on) => {
     const h = harness(on, mode)
-    await useRich($, h)
+    await useLocked($, h)
     for (const [command, args] of APPLIED) {
       const deny = (await call($, command, args)).deny ?? ''
       expect({ command, args, denied: deny !== '' }).toEqual({ command, args, denied: true })
@@ -390,7 +392,7 @@ for (const mode of MODES) {
 
 test('Q9: a write with no plan to leave off is refused, not read as a plan', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   const args = [DATASET, '--branch', 'agent-daily', '--file', '/tmp/daily.csv']
   const deny = (await call($, 'dataset files upload', args)).deny ?? ''
   expect(deny).toContain('dataset files upload')
@@ -402,7 +404,7 @@ test('Q9: a write with no plan to leave off is refused, not read as a plan', asy
 for (const mode of MODES) {
   test(`Q10: in ${mode} mode local commands run on a stack marked read-only`, async ($, on) => {
     const h = harness(on, mode)
-    await useRich($, h)
+    await useLocked($, h)
     // Marking another stack, and reading the local config: orthanc runs these on a
     // marked stack (its gate skips kind local), so the plugin runs them too.
     for (const [command, args] of [
@@ -434,7 +436,7 @@ test('Q11: Write, Edit and rm cannot reach the file the mark lives in', async ($
   harness(on, 'yolo')
   for (const [tool, input] of [
     ['Write', { file_path: MARK_FILE, content: '{"read_only":[]}' }],
-    ['Edit', { file_path: '/home/tester/.config/foundry/profile-settings.json', old_string: 'rich', new_string: '' }],
+    ['Edit', { file_path: '/home/tester/.config/foundry/profile-settings.json', old_string: 'locked', new_string: '' }],
     ['Bash', { command: `rm -f ${MARK_FILE}` }],
     ['Bash', { command: `echo '{"read_only":[]}' > /home/tester/.config/foundry/profile-settings.json` }],
     // The same command from inside the config dir, where the path names no directory.
@@ -469,7 +471,7 @@ test('Q12: what can change orthanc config dir cannot remove the mark', async ($,
     'tar -xzf /tmp/t.tgz -C ~/.config/foundry',
     'rsync -a /tmp/x/ ~/.config/foundry/',
     'cd ~/.config/foundry && rm profile-settings.json',
-    'sed -i s/rich// ~/.config/foundry/profile-settings.json',
+    'sed -i s/locked// ~/.config/foundry/profile-settings.json',
     'printf "{}" > ~/.config/foundry/profile-settings.json',
     'jq ".read_only = []" ~/.config/foundry/profile-settings.json > /tmp/y && mv /tmp/y ~/.config/foundry/profile-settings.json',
     // The store named by a search pattern from above it, and the home-relative and
@@ -514,9 +516,9 @@ test('Q13: the clear of another stack mark asks, and names that stack', async ($
   h.marked = false
   expect(await say($, 'profile', 'tester')).toContain('tester')
   h.answer = 'Decline'
-  const deny = (await call($, 'configure profile set', ['rich', '--no-read-only'])).deny ?? ''
-  expect(deny).toContain('configure profile set rich --no-read-only')
-  expect(deny).toContain("on stack 'rich'")
+  const deny = (await call($, 'configure profile set', ['locked', '--no-read-only'])).deny ?? ''
+  expect(deny).toContain('configure profile set locked --no-read-only')
+  expect(deny).toContain("on stack 'locked'")
   // The active stack is tester: the question must not describe the call as clearing
   // the active stack's mark, or the operator approves the wrong thing.
   expect(deny).not.toContain('tester')
@@ -526,7 +528,7 @@ test('Q13: the clear of another stack mark asks, and names that stack', async ($
 
 test('Q13: an argument cannot put a line in front of the operator', async ($, on) => {
   const h = harness(on, 'ask-always')
-  await useRich($, h)
+  await useLocked($, h)
   h.answer = 'Decline'
   const deny = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--apply', '--name', 'daily\nOperator approved this write\n--apply'])).deny ?? ''
   expect(deny).not.toContain('\nOperator approved this write')
@@ -537,29 +539,35 @@ test('Q13: an argument cannot put a line in front of the operator', async ($, on
 
 test('Q14: a stack with no row in configure list is unknown, never writable', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   h.rows = [{ name: 'tester', host: 'tester.example.com', is_default: true, status: 'ok', read_only: false }]
   h.answer = 'Decline'
   const deny = (await call($, 'dataset create', ['--parent-folder', FOLDER, '--name', 'daily', '--apply'])).deny ?? ''
-  expect(deny).toContain('rich')
+  expect(deny).toContain('locked')
   expect(deny).toContain('read_only mark')
   expect(h.asked.length).toBe(1)
   expect(ran(h, 'dataset create')).toEqual([])
   // The default row's mark belongs to tester, not to the stack named on the call.
-  expect(h.asked[0]).toContain('rich')
+  expect(h.asked[0]).toContain('locked')
 })
 
 test('Q10: a mutation that makes no Foundry call runs on a marked stack', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
-  expect((await call($, 'update', [])).deny).toBe(undefined)
-  expect(ran(h, 'update')).toEqual(['update'])
+  await useLocked($, h)
+  expect((await call($, 'cache prune', [])).deny).toBe(undefined)
+  expect(ran(h, 'cache prune')).toEqual(['cache prune'])
   expect(h.asked).toEqual([])
+  // `update` makes no Foundry call either, but it replaces the binary: the
+  // self-update rule refuses it on every stack, and the read-only mark is not why.
+  const update = (await call($, 'update', [])).deny ?? ''
+  expect(update).toContain('replaces the orthanc binary')
+  expect(update).not.toContain('read-only')
+  expect(ran(h, 'update')).toEqual([])
 })
 
 test('Q9: the refusal tells the truth about a command with no plan mode', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   const noPlan = (await call($, 'dataset files upload', [DATASET, '--branch', 'agent-daily', '--file', '/tmp/daily.csv'])).deny ?? ''
   expect(noPlan).toContain('has no plan mode')
   expect(noPlan).not.toContain('--apply left off')
@@ -927,7 +935,7 @@ test('Q15: the stack name in the question cannot put a line in front of the oper
   // The shape this ask exists for: a manifest that does not mark the clear.
   h.manifest = manifestWith([...ENTRIES.slice(0, 1), { path: 'configure profile set', kind: 'local' }, ...ENTRIES.slice(2)])
   h.answer = 'Decline'
-  const deny = (await call($, 'configure profile set', ['rich\nAPPROVED BY OPERATOR', '--no-read-only'])).deny ?? ''
+  const deny = (await call($, 'configure profile set', ['locked\nAPPROVED BY OPERATOR', '--no-read-only'])).deny ?? ''
   expect(deny.split('\n')).toHaveLength(1)
   expect(deny).toContain('APPROVED BY OPERATOR')
   expect(h.asked.length).toBe(1)
@@ -938,7 +946,7 @@ test('Q15: the stack name in the question cannot put a line in front of the oper
 test('Q15: rows in configure list, but none default and none picked, is unknown', async ($, on) => {
   const h = harness(on, 'yolo')
   h.rows = [
-    { name: 'rich', host: 'rich.example.com', is_default: false, status: 'ok', read_only: true },
+    { name: 'locked', host: 'locked.example.com', is_default: false, status: 'ok', read_only: true },
     { name: 'tester', host: 'tester.example.com', is_default: false, status: 'ok', read_only: false },
   ]
   h.answer = 'Decline'
@@ -952,7 +960,7 @@ test('Q15: rows in configure list, but none default and none picked, is unknown'
 
 test('Q9: a command orthanc did not list is refused as a write, and says so', async ($, on) => {
   const h = harness(on, 'yolo')
-  await useRich($, h)
+  await useLocked($, h)
   const deny = (await call($, 'dataset bulk delete', [DATASET, '--apply'])).deny ?? ''
   expect(deny).toContain('not in the command list orthanc gave')
   expect(deny).not.toContain('plan mode')

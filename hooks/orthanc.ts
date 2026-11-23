@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { CREDENTIAL_HINT, type ManifestCommand, type ManifestFlag, isCredentialCommand, operatorOnlyReason } from './policy'
+import { BINARY_RISK, CREDENTIAL_HINT, localWriteNote, type ManifestCommand, type ManifestFlag, isCredentialCommand, operatorOnlyReason, replacesBinary } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -65,6 +65,9 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
+          // Kept raw: policy.ts reads the one value it knows and reads anything
+          // else as no risk line.
+          ...('mutation_risk' in entry ? { mutationRisk: entry.mutation_risk } : {}),
         }]
       : [],
   )
@@ -78,7 +81,13 @@ function flagsFrom(args: unknown): ManifestFlag[] {
           {
             flag: arg.flag,
             takesValue: arg.takes_value === true,
-            ...(typeof arg.default === 'string' ? { default: arg.default } : {}),
+            // A default is seconds, and JSON may carry it as a number. Read both:
+            // one that is dropped is a wait that silently falls back to the floor.
+            ...typeof arg.default === 'string'
+              ? { default: arg.default }
+              : typeof arg.default === 'number' && Number.isFinite(arg.default)
+                ? { default: String(arg.default) }
+                : {},
             // An enumerated option lists the values it accepts, which is how the
             // guard tells `--transaction-type DELETE` from a branch someone named.
             ...(Array.isArray(arg.values) ? { values: arg.values.filter((value: unknown): value is string => typeof value === 'string') } : {}),
@@ -93,22 +102,50 @@ function flagsFrom(args: unknown): ManifestFlag[] {
 // their own --timeout, plus --publish-grace after the checks pass. The timer
 // gives them that wait, any fixed time Orthanc adds around it, one poll
 // interval (Orthanc can overshoot its deadline by one) and a margin, so Orthanc
-// reports its own timeout instead of being killed. The floor is the old fixed
+// reports its own timeout instead of being killed. A command bounds its wait
+// with one of five flags and the timer adds every one it declares. The floor is
+// the old fixed
 // 300 s; the cap is Orthanc's longest default wait (ai-fde run: 1800 s plus
 // 370 s around it) plus the margin, or more for a command whose own defaults
 // need more, so a call with its defaults is never refused. A call that would
-// need more is refused before Orthanc starts.
+// need more is refused before Orthanc starts, and only when a flag the caller
+// passed can bring it back within the cap (see ADJUSTABLE below).
 const CLI_MARGIN_S = 120
 export const CLI_TIMEOUT_FLOOR_MS = 300_000
-const WAIT_FLAGS = ['--timeout', '--publish-grace']
+// Every flag Orthanc bounds its own wait with, across the 0.7.11 surface:
+//   --timeout             checks, sql, imports, branch-index, ai-fde, dev-console
+//   --timeout-seconds     a deployment wait (models deployment), the run request
+//                         (functions, ontology query-execute), or one HTTP
+//                         request (search, verify, update): see ADJUSTABLE
+//   --publish-grace       the time it allows after the checks pass
+//   --readback-timeout    the time after --apply until its reads show the change
+//   --time-budget-seconds the dependency graph reads, up to 600 s. Orthanc says
+//                         it is `reported in the budget only`, so a read may run
+//                         past it: counting it can only lengthen the timer.
+const WAIT_FLAGS = ['--timeout', '--timeout-seconds', '--publish-grace', '--readback-timeout', '--time-budget-seconds']
 const POLL_FLAGS = ['--interval', '--poll-interval']
 
-// What the manifest cannot say about a command's wait (orthanc-source
-// src/ai_fde_web.rs): ai-fde run's --timeout is 1800 s when absent but the
-// flag carries no manifest default, and around it Orthanc gives the browser
-// worker 300 s to start, stops it up to 60 s past the timeout and waits 10 s
-// for it to exit. A manifest default, when one appears, wins over `defaults`.
-type WaitExtra = { defaults: Record<string, string>; aroundS: number; detachHint: string; stoppedHint: string }
+// What the manifest cannot say about a command's wait. `defaults` is a wait
+// orthanc runs with when the manifest lists the flag with no default;
+// `aroundS` is the fixed time Orthanc adds around that wait; `fixedS` is a wait
+// with no flag at all, a constant in Orthanc's code; `stoppedHint` says what may
+// still be running when the timer stops the call; `detachHint` is the way out of
+// a refusal, where there is one. A manifest default, when one appears, wins over
+// `defaults`; `fixedS` is no flag, so nothing an agent types can shorten it.
+//
+// ai-fde run (orthanc-source src/ai_fde_web.rs): --timeout is 1800 s when
+// absent, and around it Orthanc gives the browser worker 300 s to start, stops
+// it up to 60 s past the timeout and waits 10 s for it to exit. Orthanc hides
+// every ai-fde command behind ORTHANC_ENABLE_AI_FDE, off by default (its own
+// `ai-fde --help` says so, and the 0.7.11 agent-manifest lists none of them), so
+// this entry is live only on a session that turned the flag on.
+type WaitExtra = { defaults?: Record<string, string>; aroundS?: number; fixedS?: number; detachHint?: string; stoppedHint: string }
+
+// The waits Orthanc keeps as constants, each with the file that holds it.
+const FINALIZE_WAIT_S = 900 // src/devops_publish.rs FINALIZE_TIMEOUT
+const JOB_WAIT_S = 540 // src/marketplace_draft.rs JOB_TIMEOUT
+const DRAFT_WAIT_S = 120 // src/marketplace_draft.rs DRAFT_TIMEOUT, twice per apply
+const UNINSTALL_VERIFY_WAIT_S = 600 // src/marketplace_uninstall_verify.rs UNINSTALL_TIMEOUT
 const AI_FDE_RUN_EXTRA: WaitExtra = {
   defaults: { '--timeout': '1800' },
   aroundS: 300 + 60 + 10,
@@ -117,7 +154,47 @@ const AI_FDE_RUN_EXTRA: WaitExtra = {
     "The run may still be going in the AI FDE web app: find its thread with 'ai-fde threads list' and read it with " +
     "'ai-fde status <thread>' and 'ai-fde result <thread>'. For a long run, pass --detach next time.",
 }
-const WAIT_EXTRAS: Readonly<Record<string, WaitExtra>> = { 'ai-fde run': AI_FDE_RUN_EXTRA }
+// A Marketplace install or upgrade waits two job drafts and the job itself:
+// 120 + 120 + 540 = 780 s, orthanc's own bound (src/marketplace_draft.rs, MI30).
+// The two draft waits happen on every apply; --wait only follows the job. The
+// apply without --wait still needs them, and the 300 s floor covers 240 s.
+const MARKETPLACE_INSTALL_EXTRA: WaitExtra = {
+  fixedS: DRAFT_WAIT_S + DRAFT_WAIT_S + JOB_WAIT_S,
+  stoppedHint:
+    "The installation job may still be running: list it with 'marketplace job list --store <store>' and read it with " +
+    "'marketplace job get <job rid>' before you run it again.",
+}
+const WAIT_EXTRAS: Readonly<Record<string, WaitExtra>> = {
+  'ai-fde run': AI_FDE_RUN_EXTRA,
+  // `devops draft publish --wait` waits FINALIZE_TIMEOUT for the version to
+  // finalise (orthanc-source src/devops_publish.rs) and has no flag to say so:
+  // the manifest lists a bare --wait, so only a fixed wait can cover it.
+  'devops draft publish': {
+    fixedS: FINALIZE_WAIT_S,
+    stoppedHint:
+      "The version may still be finalising in Foundry: read the draft with 'devops draft get <store rid> <draft id>' " +
+      'before you publish it again.',
+  },
+  // A Marketplace install or upgrade: see MARKETPLACE_INSTALL_EXTRA.
+  'marketplace installation create': MARKETPLACE_INSTALL_EXTRA,
+  'marketplace installation upgrade': MARKETPLACE_INSTALL_EXTRA,
+  // `job cancel --wait` waits only the job (src/marketplace_uninstall.rs →
+  // marketplace_draft.rs::wait_job).
+  'marketplace job cancel': {
+    fixedS: JOB_WAIT_S,
+    stoppedHint: "The job may still be running: read it with 'marketplace job get <job rid>'.",
+  },
+  // Uninstall has no --wait flag at all, and after the POST it polls its own
+  // delete job for up to 600 s to prove the removal
+  // (src/marketplace_uninstall_verify.rs). A cut there stops a write that is
+  // already done and leaves the answer unread.
+  'marketplace installation uninstall': {
+    fixedS: UNINSTALL_VERIFY_WAIT_S,
+    stoppedHint:
+      "The uninstall POST was sent: read the installation with 'marketplace installation get <installation rid>' and " +
+      "its job with 'marketplace job get <job rid>' before you retry it.",
+  },
+}
 const CLI_LONGEST_WAIT_S = 1800 + AI_FDE_RUN_EXTRA.aroundS
 export const CLI_TIMEOUT_CAP_MS = (CLI_LONGEST_WAIT_S + CLI_MARGIN_S) * 1000
 
@@ -148,6 +225,9 @@ export type CliWait = {
   overCap: boolean
   /** The largest --timeout that fits, when one does. */
   maxTimeoutS?: number
+  /** The flag to make smaller, and the largest value of it that fits. */
+  maxFlag?: string
+  maxValueS?: number
   /** The flags the call passed that put it over the cap, --timeout when one smaller would fit. */
   overFlags?: string[]
   /**
@@ -184,7 +264,7 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     return Number.isFinite(value) && value >= 0 ? value : undefined
   }
   const defaultSeconds = (flag: string) =>
-    parse(flags.find(entry => entry.flag === flag)?.default ?? extra?.defaults[flag]) ?? 0
+    parse(flags.find(entry => entry.flag === flag)?.default ?? extra?.defaults?.[flag]) ?? 0
   // A value orthanc will reject counts as the default, so the timer is never
   // shorter than the wait orthanc would run.
   const seconds = (flag: string) => parse(flagArgument(args, flag)) ?? defaultSeconds(flag)
@@ -195,9 +275,29 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     !passes('--detach') &&
     (!declares('--apply') || passes('--apply')) &&
     (!declares('--wait') || passes('--wait'))
-  const totalOf = (secondsOf: (flag: string) => number) => {
-    const wait = WAIT_FLAGS.reduce((sum, flag) => sum + secondsOf(flag), 0)
-    return wait === 0 ? 0 : wait + (extra?.aroundS ?? 0) + Math.max(...POLL_FLAGS.map(secondsOf)) + CLI_MARGIN_S
+  // Only a wait flag the command really has counts. A flag Orthanc will reject
+  // must not set the timer or drive a refusal: orthanc's own usage error names
+  // the flags the command does have, and that answer is better than our guess.
+  // A command the manifest describes no flags for (an older Orthanc, a command
+  // it lists with positionals only) is trusted on what the caller passed.
+  const listsFlags = flags.length > 0
+  const counted = WAIT_FLAGS.filter(
+    flag => declares(flag) || (!listsFlags && given(flag)) || extra?.defaults?.[flag] !== undefined,
+  )
+  // Of those, the flags whose value the caller can lower to make the call fit.
+  // --timeout-seconds is one only where it bounds a wait (a command with
+  // --wait); elsewhere it caps one HTTP request, and a call that needs a big
+  // request ceiling (`update` on a slow mirror, `search` on a busy stack) must
+  // keep running, not hear "pass a smaller --timeout-seconds".
+  const adjustable = [
+    ...counted.filter(flag => flag !== '--timeout-seconds' || declares('--wait')),
+    ...POLL_FLAGS.filter(flag => declares(flag)),
+  ]
+  const fixedS = extra?.fixedS ?? 0
+  const totalOf = (secondsOf: (flag: string) => number, names: readonly string[] = counted) => {
+    const wait = names.reduce((sum, flag) => sum + secondsOf(flag), 0)
+    if (wait === 0 && fixedS === 0) return 0
+    return wait + fixedS + (extra?.aroundS ?? 0) + Math.max(...POLL_FLAGS.map(secondsOf)) + CLI_MARGIN_S
   }
   const capMs = Math.max(CLI_TIMEOUT_CAP_MS, totalOf(defaultSeconds) * 1000)
   const totalS = waits ? totalOf(seconds) : 0
@@ -209,12 +309,18 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
   if (totalS === 0) return withUnread({ path, timeoutMs: CLI_TIMEOUT_FLOOR_MS, neededMs: CLI_TIMEOUT_FLOOR_MS, waitMs: 0, capMs, overCap: false, fixedMs: 0 })
   const neededMs = Math.max(CLI_TIMEOUT_FLOOR_MS, totalS * 1000)
   const fixedMs = (totalS - seconds('--timeout')) * 1000
-  const overCap = neededMs > capMs
-  if (!overCap) return withUnread({ path, timeoutMs: neededMs, neededMs, waitMs: totalS * 1000, capMs, overCap, fixedMs })
-  const fits = Math.floor(capMs / 1000 - (totalS - seconds('--timeout')))
-  // When no --timeout fits, the other passed flags are what to make smaller.
-  const others = [...WAIT_FLAGS, ...POLL_FLAGS].filter(flag => flag !== '--timeout' && given(flag) && seconds(flag) > 0)
-  const overFlags = fits > 0 ? ['--timeout'] : others
+  // Refuse only when the caller can act on the answer: some flag it passed must
+  // have a value that brings the call under the cap. Where nothing it passed can
+  // (a per-request ceiling, or Orthanc's own fixed wait), run to the cap, which
+  // is the ceiling this call always had.
+  const candidates = adjustable.filter(flag => given(flag) && seconds(flag) > 0)
+  const fits = candidates
+    .map(flag => ({ flag, room: Math.floor(capMs / 1000 - (totalS - seconds(flag))) }))
+    .filter(entry => entry.room > 0)
+  const overCap = neededMs > capMs && fits.length > 0
+  if (!overCap)
+    return withUnread({ path, timeoutMs: Math.min(neededMs, capMs), neededMs, waitMs: totalS * 1000, capMs, overCap, fixedMs })
+  const chosen = fits.find(entry => entry.flag === '--timeout') ?? fits[0]!
   return withUnread({
     path,
     timeoutMs: capMs,
@@ -223,8 +329,10 @@ export function cliWait(command: ManifestCommand | undefined, args: readonly str
     capMs,
     overCap,
     fixedMs,
-    ...(fits > 0 ? { maxTimeoutS: fits } : {}),
-    ...(overFlags.length > 0 ? { overFlags } : {}),
+    maxFlag: chosen.flag,
+    maxValueS: chosen.room,
+    ...(chosen.flag === '--timeout' ? { maxTimeoutS: chosen.room } : {}),
+    overFlags: fits.map(entry => entry.flag),
   })
 }
 
@@ -235,9 +343,10 @@ export const cliTimeoutMs = (command: ManifestCommand | undefined, args: readonl
 export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelope {
   const cap = wait.capMs / 1000
   const needed = Math.ceil(wait.neededMs / 1000)
-  const smaller = wait.overFlags?.length ? wait.overFlags.join(' or ') : '--timeout'
   const ways = [
-    wait.maxTimeoutS === undefined ? `Pass a smaller ${smaller}` : `Pass --timeout ${wait.maxTimeoutS} or less`,
+    // The flag is named with the largest value that fits, so the agent has one
+    // call to make, not a search. cliWait only refuses when such a value exists.
+    `Pass ${wait.maxFlag ?? '--timeout'} ${wait.maxValueS ?? 0} or less`,
     WAIT_EXTRAS[command.path]?.detachHint,
     command.kind === 'read-only' ? 'and call it again if it times out: the wait is a read' : undefined,
   ].filter(Boolean)
@@ -245,7 +354,7 @@ export function overCapFailure(command: ManifestCommand, wait: CliWait): Envelop
     'timeout-over-cap',
     `'${command.path}' could run for ${needed} s; orthanc_cli runs a call for at most ${cap} s, so it did not start. ${ways.join(', ')}.`,
     command.path,
-    { cap_seconds: cap, needed_seconds: needed, ...(wait.maxTimeoutS === undefined ? {} : { max_timeout_seconds: wait.maxTimeoutS }) },
+    { cap_seconds: cap, needed_seconds: needed, ...(wait.maxValueS === undefined ? {} : { max_timeout_seconds: wait.maxValueS }) },
   )
 }
 
@@ -259,7 +368,7 @@ export function credentialFailure(command: ManifestCommand): Envelope {
 }
 
 // Refusals orthanc_cli makes itself, before orthanc starts.
-const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'self-update-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
 
 /** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
 export function notRunFailure(envelope: Envelope): boolean {
@@ -272,9 +381,13 @@ function stoppedHint(command: ManifestCommand, reason: 'timeout' | 'cancelled'):
   const extra = WAIT_EXTRAS[command.path]
   if (extra) return extra.stoppedHint
   if (command.kind === 'read-only') {
-    return reason === 'timeout'
-      ? 'It is a read: call it again to keep waiting, with a --timeout that fits.'
-      : 'It is a read: call it again to keep waiting.'
+    if (reason !== 'timeout') return 'It is a read: call it again to keep waiting.'
+    // Name a flag this command has: advice about a flag orthanc will reject
+    // sends the agent into a usage error.
+    const bounds = (command.flags ?? []).filter(entry => WAIT_FLAGS.includes(entry.flag)).map(entry => entry.flag)
+    return bounds.length === 0
+      ? 'It is a read: call it again to keep waiting.'
+      : `It is a read: call it again to keep waiting, with a ${bounds.join(' or ')} that fits.`
   }
   return 'Read the matching Foundry state before any retry.'
 }
@@ -290,6 +403,8 @@ export const normalizeCommand = (command: string) => command.trim().replace(/\s+
 
 const groupOf = (path: string) => path.split(' ')[0] ?? path
 
+/** One listing line for a command, with the marker an agent cannot miss whether
+ * it picked the command from a group, a search, or the command itself. */
 function commandLine(command: ManifestCommand): string {
   const traits = [
     command.kind,
@@ -299,7 +414,13 @@ function commandLine(command: ManifestCommand): string {
   ]
     .filter(Boolean)
     .join(', ')
-  return `${command.path}${traits ? ` — ${traits}` : ''}`
+  // Both hard refusals show here, not only on the command page: a group listing
+  // or a search hit is where an agent picks the command.
+  const marks = [
+    replacesBinary(command) ? 'orthanc_cli never runs this; the operator installs it in their own terminal' : '',
+    isCredentialCommand(command) ? 'orthanc_cli never runs this; the operator enters the credential in a terminal' : '',
+  ].filter(Boolean)
+  return `${command.path}${traits ? ` — ${traits}` : ''}${marks.length ? ` — ${marks.join('; ')}` : ''}`
 }
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
@@ -314,10 +435,21 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
   if (isCredentialCommand(command)) {
     lines.push('This credential-input command is not executable through orthanc_cli; the operator runs it in a terminal.')
   }
+  if (replacesBinary(command)) {
+    lines.push(
+      command.path === 'update'
+        ? 'This command replaces the orthanc binary (and with --plugin this plugin), so orthanc_cli never runs it; the operator updates orthanc in their own terminal.'
+        : `Orthanc's agent manifest marks this command '${BINARY_RISK}', so orthanc_cli never runs it; the operator installs it in their own terminal.`,
+    )
+  }
   // Named on the page the agent is reading, so it does not spend a call finding
   // out that the refusal was coming.
   const operatorOnly = operatorOnlyReason(command.path)
   if (operatorOnly !== null) lines.push(`Refused through orthanc_cli and Bash: ${operatorOnly}`)
+  // Same for the two reads that write this machine: the page says so before the
+  // agent adds --force or --target to a call it came here to plan.
+  const localWrite = localWriteNote(command.path)
+  if (localWrite !== null) lines.push(localWrite)
   return lines.join('\n')
 }
 
@@ -373,7 +505,16 @@ export function guideEnvelope(envelope: Envelope, command: ManifestCommand, help
   let guided = usage && help ? { ...envelope, usage_hint: help.slice(0, 4000) } : envelope
   if (command.kind !== 'mutation') return guided
   if (!isErrorEnvelope(guided)) return { ...guided, verification_hint: verificationHint(command.path) }
-  if (!usage && JSON.stringify(guided.errors).includes('orthanc-launch-error')) {
+  // Two ways a mutation ends with no answer: orthanc_cli's own timer stopped it
+  // (orthanc-launch-error), or Orthanc reached Foundry, sent the write, and its
+  // own wait ran out. The second is only visible as an unsupported-capability
+  // error, and it is certain to have written on a command whose wait is a fixed
+  // constant with no flag to shorten it: the job and finalize polls of
+  // src/marketplace_draft.rs, src/devops_publish.rs and
+  // src/marketplace_uninstall_verify.rs. Both read as an unknown mutation.
+  const fixedWait = (WAIT_EXTRAS[command.path]?.fixedS ?? 0) > 0
+  const errors = JSON.stringify(guided.errors)
+  if (!usage && (errors.includes('orthanc-launch-error') || (fixedWait && errors.includes('unsupported-capability')))) {
     guided = { ...guided, uncertain_mutation: true, guidance: 'reconcile observable Foundry state before any retry' }
   }
   return guided
