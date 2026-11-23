@@ -47,6 +47,16 @@
 //      that makes this rule redundant — fails here loudly instead of silently.
 //  LW9 Through the real hooks: ask-always asks once, orthanc never starts until
 //      the operator approves, and after approval the call runs.
+//  LW10 The operator's question and the Bash refusal carry the fact the rule
+//      exists to state (what the call does locally), so the ask is not just
+//      'a mutation waits for approval'. Measured on the v0.7.12 binary: orthanc
+//      refuses `--dry-run=false` ('unexpected value … no more were expected'), so
+//      the plan exemption reads the switch exactly, and a spelled value keeps the
+//      write rather than quietly dropping to a read.
+//  LW11 A Code Repository branch named main, or HEAD, on a plain clone stays a
+//      read: its --branch is not a Foundry branch (FDE mode pins nothing to a
+//      clone, hooks/register.tsx fdeGate). With --force the same call is judged
+//      by --force, not by the branch it pulls.
 //
 // Synthetic stack only: placeholder RIDs, no stack data, nothing on disk.
 import type { On } from 'claude-code'
@@ -149,6 +159,61 @@ test('LW8: the pinned manifest still calls both commands read-only, so orthanc c
     expect({ path, entry: entry === undefined ? 'missing' : entry.kind }).toEqual({ path, entry: 'read-only' })
   }
 })
+
+test('LW10: the ask and the Bash refusal say what the call does to this machine', () => {
+  const clone = reasonOf('Bash', { command: `orthanc repository clone ${REPO} ./repo --force` }, 'auto')
+  expect(clone).toContain('deletes what is already in the target folder')
+  const install = reasonOf('Bash', { command: `orthanc dev-console sdk install ${APP} --target ./app` }, 'auto')
+  expect(install).toContain('npm or pip install')
+  const asked = classifyCall(CLI, { command: 'repository clone', args: [REPO, './repo', '--force'] }, MANIFEST, null)!
+  expect(ladderDecision('ask-always', asked, { action: 'ask', reason: 'guard says no' }).reason).toContain('deletes what is already in the target folder')
+  const planned = classifyCall(CLI, { command: 'dev-console sdk install', args: [APP, '--target', './app', '--dry-run=false'] }, MANIFEST, null)
+  expect(planned).not.toBe(null)
+})
+
+test('LW11: a clone of main or HEAD is still a read, and --force is judged by --force', () => {
+  for (const branch of ['main', 'master', 'HEAD']) {
+    // A plain clone of the repository's main is a pull: a read, and FDE mode
+    // pins nothing to it (hooks/register.tsx fdeGate keeps the pull exempt).
+    expect(cli('repository clone', [REPO, './repo', '--branch', branch])).toEqual([null, null, null, null])
+    // With --force the call deletes the target folder, so it asks. It asks in
+    // yolo too: the guard reads a branch flag naming main and cannot tell from
+    // argv that this one is a Code Repository branch. That over-read costs a
+    // prompt, the under-read would cost the directory.
+    expect(cli('repository clone', [REPO, './repo', '--branch', branch, '--force'])).toEqual(['ask', 'ask', 'ask', 'ask'])
+  }
+})
+
+test('LW12: the plan switch is the switch, not a word that happens to say it', () => {
+  // Both orders ask only for a plan: orthanc returns before remove_dir_all /
+  // execute_step when dry_run is set (src/repository_git.rs, dev_console_local.rs).
+  expect(cli('repository clone', [REPO, './repo', '--force', '--dry-run'])).toEqual([null, null, null, null])
+  expect(cli('repository clone', [REPO, './repo', '--dry-run', '--force'])).toEqual([null, null, null, null])
+  // --dry-run after a value-taking option is that option's value: an install into
+  // a folder named `--dry-run`. That is the write, not the plan.
+  expect(cli('dev-console sdk install', [APP, '--target', '--dry-run'])).toEqual(['ask', 'run', 'run', 'run'])
+  // The binary refuses a value on this switch, so a spelled value is not a plan.
+  expect(cli('dev-console sdk install', [APP, '--target', './app', '--dry-run=false'])).toEqual(['ask', 'run', 'run', 'run'])
+})
+
+// One harness per test: the kit forbids registering hooks after the first $ call.
+const BASH_LOCAL_WRITES: readonly [string, string, string, string][] = [
+  ['clone --force', `orthanc repository clone ${REPO} ./repo --force`, 'repository clone', 'deletes what is already in the target folder'],
+  ['sdk install --target', `orthanc dev-console sdk install ${APP} --target ./app`, 'dev-console sdk install', 'npm or pip install'],
+]
+for (const mode of MODES) {
+  for (const [name, command, prefix, why] of BASH_LOCAL_WRITES) {
+    test(`LW13: in ${mode}, Bash denies ${name}, asks no one and starts no orthanc`, async ($, on) => {
+      const h = harness(on, mode)
+      h.answer = 'throw'
+      const denied = (await $.tool.call({ tool: 'Bash', command } as never)) as { deny?: string }
+      expect({ command, denyType: typeof denied.deny }).toEqual({ command, denyType: 'string' })
+      expect({ command, namesWhy: (denied.deny ?? '').includes(why) }).toEqual({ command, namesWhy: true })
+      expect({ command, asked: h.asked }).toEqual({ command, asked: [] })
+      expect({ command, started: ran(h, prefix) }).toEqual({ command, started: [] })
+    })
+  }
+}
 
 type Harness = { calls: string[]; asked: string[]; answer: string; store: Map<string, unknown> }
 
