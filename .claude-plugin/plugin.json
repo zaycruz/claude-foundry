@@ -1,6 +1,6 @@
 {
   "name": "foundry",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "min_orthanc": "0.7.8",
   "orthanc_checked": "0.7.13",
   "description": "Palantir Foundry for Claude Code: Orthanc tools, an approval ladder for Foundry mutations, scoped Foundry context, one slash command per Foundry resource and a /foundry context view",
