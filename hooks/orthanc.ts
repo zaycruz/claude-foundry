@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { CREDENTIAL_HINT, localWriteNote, type ManifestCommand, type ManifestFlag, isCredentialCommand, operatorOnlyReason } from './policy'
+import { BINARY_RISK, CREDENTIAL_HINT, localWriteNote, type ManifestCommand, type ManifestFlag, isCredentialCommand, operatorOnlyReason, replacesBinary } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -65,6 +65,9 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
+          // Kept raw: policy.ts reads the one value it knows and reads anything
+          // else as no risk line.
+          ...('mutation_risk' in entry ? { mutationRisk: entry.mutation_risk } : {}),
         }]
       : [],
   )
@@ -259,7 +262,7 @@ export function credentialFailure(command: ManifestCommand): Envelope {
 }
 
 // Refusals orthanc_cli makes itself, before orthanc starts.
-const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
+const NOT_RUN_TYPES = new Set(['timeout-over-cap', 'credential-command-denied', 'self-update-denied', 'unknown-command', 'orthanc-binary-changed', 'orthanc-manifest-unavailable'])
 
 /** True when the failure never reached Foundry: orthanc_cli refused it, or orthanc rejected its usage. */
 export function notRunFailure(envelope: Envelope): boolean {
@@ -290,6 +293,8 @@ export const normalizeCommand = (command: string) => command.trim().replace(/\s+
 
 const groupOf = (path: string) => path.split(' ')[0] ?? path
 
+/** One listing line for a command, with the marker an agent cannot miss whether
+ * it picked the command from a group, a search, or the command itself. */
 function commandLine(command: ManifestCommand): string {
   const traits = [
     command.kind,
@@ -299,7 +304,13 @@ function commandLine(command: ManifestCommand): string {
   ]
     .filter(Boolean)
     .join(', ')
-  return `${command.path}${traits ? ` — ${traits}` : ''}`
+  // Both hard refusals show here, not only on the command page: a group listing
+  // or a search hit is where an agent picks the command.
+  const marks = [
+    replacesBinary(command) ? 'orthanc_cli never runs this; the operator installs it in their own terminal' : '',
+    isCredentialCommand(command) ? 'orthanc_cli never runs this; the operator enters the credential in a terminal' : '',
+  ].filter(Boolean)
+  return `${command.path}${traits ? ` — ${traits}` : ''}${marks.length ? ` — ${marks.join('; ')}` : ''}`
 }
 
 export function renderCommand(command: ManifestCommand, help: string | null): string {
@@ -313,6 +324,13 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
   }
   if (isCredentialCommand(command)) {
     lines.push('This credential-input command is not executable through orthanc_cli; the operator runs it in a terminal.')
+  }
+  if (replacesBinary(command)) {
+    lines.push(
+      command.path === 'update'
+        ? 'This command replaces the orthanc binary (and with --plugin this plugin), so orthanc_cli never runs it; the operator updates orthanc in their own terminal.'
+        : `Orthanc's agent manifest marks this command '${BINARY_RISK}', so orthanc_cli never runs it; the operator installs it in their own terminal.`,
+    )
   }
   // Named on the page the agent is reading, so it does not spend a call finding
   // out that the refusal was coming.

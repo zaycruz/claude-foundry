@@ -64,6 +64,12 @@ says so instead of falling back to REST.
   `ontology scenario create --apply` when `--base-branch` does not name one
   global branch RID: an Ontology scenario is a what-if fork, and its base is
   main unless the call names a branch.
+  `orthanc update` never runs through `orthanc_cli`, in any mode: it replaces
+  the Orthanc binary the command list and its `operator_approval` marks were
+  read from, and `--plugin` updates this plugin. `claude plugin
+  update|uninstall|disable` naming this plugin is refused in Bash for the same
+  reason: it replaces the code these rules are written in. The operator updates
+  Orthanc and the plugin in their own terminal.
   Branch-scoped work needs an agent branch; calls naming the Compass root are
   denied. A command whose manifest entry names a credential the operator types —
   by `input`, or by `credential_store`, the store it writes — never runs, in any

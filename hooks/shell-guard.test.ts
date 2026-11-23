@@ -36,7 +36,7 @@
 //  S7  An interpreter asked only for its version or help (`node --version`,
 //      `python3 -V`) is read as one taking code from stdin, on a line that
 //      names orthanc.
-//  S8  A local command that only lists or shows (`ai-fde tools list`,
+//  S8  A local command that only lists or shows (`alias list`,
 //      `smoke schedule`) is refused as a write.
 //  S9  A credential command in Bash is told to "run it with orthanc_cli", which
 //      refuses it too, so the agent works around a call nothing may run. Bash is
@@ -77,7 +77,7 @@ const MANIFEST: ManifestCommand[] = [
   { path: 'dataset create', kind: 'mutation' },
   { path: 'proposal merge', kind: 'mutation' },
   { path: 'sql export', kind: 'read-only' },
-  { path: 'ai-fde tools list', kind: 'local' },
+  { path: 'alias list', kind: 'local' },
   { path: 'smoke schedule', kind: 'local' },
   { path: 'alias add', kind: 'local' },
   // Orthanc 0.7.10 marks: `input` for a typed secret, `credential_store` for the
@@ -120,7 +120,7 @@ const PASSES: [string, string][] = [
   ['S6', 'cmp /opt/bin/orthanc ${X}/orthanc-old'],
   ['S7', 'command -v orthanc; head -c 300 "$(command -v orthanc 2>/dev/null)" | strings | head -5; node --version'],
   ['S7', 'which orthanc && python3 -V && perl -v | head -2'],
-  ['S8', "orthanc --agent ai-fde tools list 2>/dev/null | grep -i -E 'log|build_history' | head"],
+  ['S8', "orthanc --agent alias list 2>/dev/null | grep -i -E 'log|build_history' | head"],
   ['S8', 'orthanc smoke schedule'],
   // S10: only a real invocation counts, not the word (the 2026-11-23 session).
   ['S10', 'H=/opt/herdr/bin/herdr-projects; $H add claude-foundry/2 --goal "wire the orthanc CLI into the guard" --kind agent'],
