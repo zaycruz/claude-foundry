@@ -29,6 +29,24 @@
 // inside the test runner's time: the same sweep through `$.tool.call` took the
 // file's whole budget and more.
 //
+// What no arm here reaches, so the next reader does not trust the sweep further
+// than it goes:
+//  - A write that another command runs for you. `watch -n1 orthanc automate mute
+//    <rid> --apply` runs the write, and BS4 passes while it does: the guard reads
+//    the command word (`watch`), so `orthanc …` is an argument, and WRAPPERS in
+//    policy.ts names `env`, `timeout`, `xargs` and friends but not the runners
+//    that exec their own arguments. Measured on this commit: `watch`, `entr`,
+//    `at`, `systemd-run`, `steady`, `pueue`, `ts`, `unbuffer`, `retry`,
+//    `tmux new-session -d`, `screen -dm` and `expect -c` all run it; `parallel`,
+//    `ssh <host> …`, `nohup`, `bash -c` and a plain redirect do not.
+//  - A branch the pin shows only as a positional (FND-21 asks for the pin to keep
+//    arguments). Y18 names the seven commands that take one.
+//  - A branch that only looks like main. `--branch origin/main`,
+//    `--branch refs/remotes/origin/main` and a name with a zero-width space in it
+//    run in yolo, and that is right: each is a different branch, and Orthanc
+//    would not touch `main` for it. `refs/heads/main`, `./main`, `main.`,
+//    `:main`, `MAIN` and `Main` are `main`, and each of those asks or blocks.
+//
 // Ways this can fail, written before the code. Each arm was measured with the
 // rule it depends on taken out of hooks/policy.ts:
 //  BS1 In yolo, a write that names main, master or HEAD as its branch reaches
