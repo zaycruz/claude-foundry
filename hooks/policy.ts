@@ -257,11 +257,11 @@ export function operatorOnlyReason(path: string): string | null {
 //    on macOS it answers `{"mode":"installed",…}`. Orthanc labels the entry
 //    `read-only` in 0.7.11 and 0.7.13 alike. `smoke` with no flag runs the checks
 //    (reads), and `smoke schedule` shows the job's state — both stay reads.
-// Both line numbers for the two below are read at commit 7b54958, the commit the
-// v0.7.12 binary reports, and both say the same thing about `--dry-run`: the
-// command returns before either the delete or the install (`run_clone` returns at
-// line 30, fourteen lines before the delete), which is what lets a plan stay a
-// read. `smoke` has no `--dry-run` at all, so nothing exempts it.
+// The two `--dry-run` line numbers above are read at commit 7b54958, the commit
+// the v0.7.12 binary reports, and both entries behave the same way: the command
+// returns before either the delete or the install (`run_clone` returns at line
+// 30, fourteen lines before the delete), which is what lets a plan stay a read.
+// `smoke` declares no `--dry-run`, so `isPlanCall` never exempts it.
 // Each entry keeps its own words, the way OPERATOR_ONLY_COMMANDS does, so the
 // sentence an operator reads cannot fall behind the rule that asked them.
 // None of the three defines a short alias (measured: on the v0.7.12 binary `-f`
@@ -330,11 +330,15 @@ function isPlanCall(args: readonly string[], command: ManifestCommand | undefine
   // installed binary: `smoke --dry-run --schedule` is 'unexpected argument
   // '--dry-run' found', so a command that never lists the flag cannot plan, and
   // a word the binary refuses must not talk the guard out of the ask. Cloning
-  // and sdk install do declare it (the pinned snapshot lists it for both), so
-  // their plan calls are unaffected.
-  if (command !== undefined && command.flags !== undefined && command.flags.length > 0) {
-    if (!shapes.has('--dry-run')) return false
-  }
+  // and sdk install do declare it (the pinned snapshot lists it for both, at
+  // hooks/orthanc-manifest.snapshot.ts:209 and :465), so their plan calls are
+  // unaffected. An entry that lists no flags at all declares no plan switch
+  // either: LW14 is this file's rule that an unreadable shape asks rather than
+  // plans, and an entry that stopped listing its flags would otherwise read as
+  // unreadable in the one direction that matters here. A command the manifest
+  // does not list at all keeps the old reading (a call with no entry is judged
+  // by the last word of its path, not by flags).
+  if (command !== undefined && !shapes.has('--dry-run')) return false
   return args.some((raw, index) => {
     if (unquote(raw).trim().toLowerCase() !== '--dry-run') return false
     const previous = index === 0 ? '' : unquote(args[index - 1]!).trim().toLowerCase()

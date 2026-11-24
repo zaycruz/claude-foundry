@@ -189,13 +189,18 @@ export function check() {
 
 // Kept in the pin even without an approval key, because a flag of theirs is what
 // makes the call a write, and LW8 fails when a rename or a takes_value change
-// would leave the guard under-reading. `hooks/policy.ts` LOCAL_WRITE_COMMANDS
-// carries a third, `smoke`, and it is not listed here on purpose: adding a name
-// changes what `refresh` writes into the pin, so it belongs with the pin
-// regeneration a release does, not beside a rule. What `smoke` keeps pinned is
-// its name and its `kind` (hooks/smoke-schedule.test.ts SS8). A rename of
-// `--schedule` cannot pass unnoticed either way: pflag refuses an undeclared
-// flag, so the renamed call ends in a usage error instead of installing the job.
+// would leave the guard under-reading.
+//
+// `hooks/policy.ts` LOCAL_WRITE_COMMANDS carries a third, `smoke`, and it is not
+// listed here. That is a gap, not a decision that closed one: `smoke`'s rule
+// reads its flag from the call's argv, so nothing here pins the two flag names
+// orthanc ships for it, and a rename of `--schedule` would leave the guard
+// reading the install as a plain read (the old spelling then dies at pflag as an
+// undeclared flag; the new one would not be seen at all). hooks/
+// smoke-schedule.test.ts SS8 pins that the pin carries no `args` for `smoke`, so
+// joining the two lists is a deliberate act. It needs `refresh`, which rewrites
+// the pin for a whole orthanc release: that is the v0.7.13 tie in PR #41, and
+// this file is one of the five it moves.
 const LOCAL_WRITE_PIN = ['dev-console sdk install', 'repository clone']
 
 const sortKeys = value =>

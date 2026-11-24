@@ -40,8 +40,8 @@
 //  LW5 `dev-console sdk install` is judged with each flag that makes it run
 //      (--target ./app, --target=./app, --yes), and stays a read with none of
 //      them, or with --dry-run — orthanc returns before the local step.
-//  LW6 A read that writes a data file still runs in every mode: the rule is
-//      these two commands, not "a read that touches the disk".
+//  LW6 A read that writes a data file still runs in every mode: the rule names
+//      entries and flags, not "a read that touches the disk".
 //  LW7 `orthanc_help` says it on the page the agent is reading, so the agent is
 //      not sent to spend a call finding out; a page for another command says
 //      nothing about it.
@@ -97,8 +97,9 @@ const APP = 'ri.foundry.main.deployed-app.c0000000-0000-4000-8000-0000000000c5'
 const MODES = ['ask-always', 'allow-edits', 'auto', 'yolo'] as const
 type Mode = (typeof MODES)[number]
 
-// The two commands as orthanc 0.7.12 declares them, plus the reads a rule that
-// over-reads would catch with them.
+// The two entries this file covers, as orthanc 0.7.12 declares them, plus the
+// reads a rule that over-reads would catch with them. `smoke`, the third entry of
+// the same table, is in hooks/smoke-schedule.test.ts.
 const MANIFEST: ManifestCommand[] = [
   { path: 'agent-manifest', kind: 'local' },
   { path: 'repository clone', kind: 'read-only', auth: 'bearer-token', flags: [{ flag: '--branch', takesValue: true }, { flag: '--force', takesValue: false }, { flag: '--dry-run', takesValue: false }] },

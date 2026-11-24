@@ -74,6 +74,9 @@
 //      write, so it asks outside yolo and runs in yolo. No branch rule applies to
 //      it: `smoke` is not branch-scoped, and a `--branch` it does not define must
 //      not be read as a write aimed at main.
+//  SS11 Through the real hooks, `ask-always` asks once, names the job, and starts
+//      no orthanc until the operator approves; after Approve the call runs once.
+//      SS12 The same surface in yolo asks no one and runs the plain checks.
 //  SS13 `smoke` has no plan switch, so a `--dry-run` in front of `--schedule`
 //      must not talk the guard out of the write. Measured on the installed
 //      binary: `smoke --dry-run --schedule` answers `unexpected argument
@@ -84,6 +87,9 @@
 //  SS14 The exemption comes from the entry, not from the word. The same command
 //      with an entry that does declare `--dry-run` reads as a plan, and
 //      `--schedule` alone still asks.
+//  SS15 The unreadable shape goes the same way: an entry that lists no flags
+//      declares no plan switch, so `smoke --dry-run --schedule` still asks (the
+//      direction LW14 pins for the two sibling entries).
 //
 // One more measured fact, because it decides what an approval through the mod can
 // do. orthanc_cli runs every call on the session's stack (`hooks/register.tsx`
@@ -262,11 +268,20 @@ test('SS7: every mode tells the model this command is judged as a write', () => 
   }
 })
 
-test('SS8: the pinned manifest still mislabels smoke, and still calls the status read local', () => {
-  const commands = (SNAPSHOT as unknown as { commands: { path: string; kind: string }[] }).commands
-  const kindOf = (path: string) => commands.find(entry => entry.path === path)?.kind ?? 'missing'
-  expect({ path: 'smoke', kind: kindOf('smoke') }).toEqual({ path: 'smoke', kind: 'read-only' })
-  expect({ path: 'smoke schedule', kind: kindOf('smoke schedule') }).toEqual({ path: 'smoke schedule', kind: 'local' })
+test('SS8: the pinned manifest still mislabels smoke, and still carries no flags for it', () => {
+  type Entry = { path: string; kind: string; args?: unknown }
+  const commands = (SNAPSHOT as unknown as { commands: Entry[] }).commands
+  const entryOf = (path: string) => commands.find(entry => entry.path === path)
+  expect({ path: 'smoke', kind: entryOf('smoke')?.kind ?? 'missing' }).toEqual({ path: 'smoke', kind: 'read-only' })
+  expect({ path: 'smoke schedule', kind: entryOf('smoke schedule')?.kind ?? 'missing' }).toEqual({ path: 'smoke schedule', kind: 'local' })
+  // The gap, pinned rather than argued. `scripts/orthanc-tie.mjs` keeps `args` in
+  // the pin only for names in LOCAL_WRITE_PIN, and `smoke` is not one of them, so
+  // this rule reads flag data the shipped pin does not hold. SS9 and SS13 pin the
+  // behaviour against an entry built from the live manifest; nothing here can pin
+  // the flag names orthanc ships. A pin that ever grows `args` for `smoke` (its
+  // LOCAL_WRITE_PIN joining hooks/policy.ts, which is the v0.7.13 tie's job in PR
+  // #41) fails here, so the gap closes on purpose and not by accident.
+  expect({ pinArgsForSmoke: entryOf('smoke')?.args ?? 'absent' }).toEqual({ pinArgsForSmoke: 'absent' })
 })
 
 test('SS9: the flag is matched however it is spelled, and a refused spelling keeps the write', () => {
@@ -283,34 +298,6 @@ test('SS10: in yolo the call runs, with no branch advice attached to it', () => 
   const reason = ladderDecision('ask-always', declined, { action: 'ask', reason: 'guard says no' }).reason
   expect(reason.includes('Pass a work branch')).toBe(false)
   expect(reason.includes('work branch')).toBe(false)
-})
-
-test('SS13: a --dry-run in front of --schedule is still the write, because smoke declares no plan switch', () => {
-  // Measured: orthanc refuses the flag for this command ('unexpected argument
-  // '--dry-run' found'), so no plan exists to exempt.
-  for (const args of [['--dry-run', '--schedule'], ['--schedule', '--dry-run'], ['--dry-run', '--unschedule']]) {
-    expect({ args, modes: cli('smoke', args) }).toEqual({ args, modes: ['ask', 'run', 'run', 'run'] })
-  }
-  expect(bash('orthanc smoke --dry-run --schedule')).toEqual(['block', 'block', 'block', 'block'])
-})
-
-test('SS14: the plan exemption is read from the entry, not guessed from the flag', () => {
-  // The same guard, an entry that does declare the switch the way clone and
-  // sdk install do: then a standing --dry-run is a plan, and the read short-
-  // circuit applies. Pinned so a future orthanc that gives smoke a plan switch
-  // gets the exemption by declaring it, not by the guard learning to guess.
-  const withPlan: ManifestCommand[] = [
-    MANIFEST[0]!,
-    { ...MANIFEST[1]!, flags: [{ flag: '--schedule', takesValue: false }, { flag: '--unschedule', takesValue: false }, { flag: '--dry-run', takesValue: false }] },
-  ]
-  const planned = (args: string[]) => {
-    const classified = classifyCall(CLI, { command: 'smoke', args }, withPlan, null)
-    // null is the read short-circuit: nothing to ask, so nothing to report.
-    if (classified === null) return READ
-    return MODES.map(mode => ladderDecision(mode, classified, { action: 'approve', reason: 'guard model absent' }).outcome)
-  }
-  expect(planned(['--dry-run', '--schedule'])).toEqual(READ)
-  expect(planned(['--schedule'])).toEqual(['ask', 'run', 'run', 'run'])
 })
 
 test('SS11: through the real hooks, ask-always asks once and nothing runs until the operator approves', async ($, on) => {
@@ -332,4 +319,47 @@ test('SS12: through the real hooks, a plain smoke run in yolo asks no one', asyn
   expect((await cliCall($, 'smoke', [])).deny).toBe(undefined)
   expect(h.asked).toEqual([])
   expect(ran(h, 'smoke').length).toBe(1)
+})
+
+test('SS13: a --dry-run in front of --schedule is still the write, because smoke declares no plan switch', () => {
+  // Measured: orthanc refuses the flag for this command ('unexpected argument
+  // '--dry-run' found'), so no plan exists to exempt.
+  for (const args of [['--dry-run', '--schedule'], ['--schedule', '--dry-run'], ['--dry-run', '--unschedule']]) {
+    expect({ args, modes: cli('smoke', args) }).toEqual({ args, modes: ['ask', 'run', 'run', 'run'] })
+  }
+  expect(bash('orthanc smoke --dry-run --schedule')).toEqual(['block', 'block', 'block', 'block'])
+})
+
+// The unreadable-shape half of SS13, named by review: an entry that lists no
+// flags at all. A guard that exempts a plan it cannot see the switch for reads
+// `smoke --dry-run --schedule` as a read, and that is the direction LW14
+// (hooks/local-write.test.ts:302) refuses for the two sibling entries.
+test('SS15: an entry with no flag data declares no plan switch either', () => {
+  const blind: ManifestCommand[] = [MANIFEST[0]!, { path: 'smoke', kind: 'read-only', auth: 'bearer-token' }]
+  const decided = (args: string[]) => {
+    const classified = classifyCall(CLI, { command: 'smoke', args }, blind, null)
+    if (classified === null) return READ
+    return MODES.map(mode => ladderDecision(mode, classified, { action: 'approve', reason: 'guard model absent' }).outcome)
+  }
+  expect(decided(['--dry-run', '--schedule'])).toEqual(['ask', 'run', 'run', 'run'])
+  expect(decided(['--schedule'])).toEqual(['ask', 'run', 'run', 'run'])
+})
+
+test('SS14: the plan exemption is read from the entry, not guessed from the flag', () => {
+  // The same guard, an entry that does declare the switch the way clone and
+  // sdk install do: then a standing --dry-run is a plan, and the read short-
+  // circuit applies. Pinned so a future orthanc that gives smoke a plan switch
+  // gets the exemption by declaring it, not by the guard learning to guess.
+  const withPlan: ManifestCommand[] = [
+    MANIFEST[0]!,
+    { ...MANIFEST[1]!, flags: [{ flag: '--schedule', takesValue: false }, { flag: '--unschedule', takesValue: false }, { flag: '--dry-run', takesValue: false }] },
+  ]
+  const planned = (args: string[]) => {
+    const classified = classifyCall(CLI, { command: 'smoke', args }, withPlan, null)
+    // null is the read short-circuit: nothing to ask, so nothing to report.
+    if (classified === null) return READ
+    return MODES.map(mode => ladderDecision(mode, classified, { action: 'approve', reason: 'guard model absent' }).outcome)
+  }
+  expect(planned(['--dry-run', '--schedule'])).toEqual(READ)
+  expect(planned(['--schedule'])).toEqual(['ask', 'run', 'run', 'run'])
 })
