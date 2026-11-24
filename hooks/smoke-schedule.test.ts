@@ -81,6 +81,25 @@
 //      as a plan would call a refused call a read, and run it in Bash. The
 //      exemption is read from the entry: an entry that does list `--dry-run`
 //      (as `repository clone` and `dev-console sdk install` do) keeps its plan.
+//  SS14 The exemption comes from the entry, not from the word. The same command
+//      with an entry that does declare `--dry-run` reads as a plan, and
+//      `--schedule` alone still asks.
+//
+// One more measured fact, because it decides what an approval through the mod can
+// do. orthanc_cli runs every call on the session's stack (`hooks/register.tsx`
+// passes `--profile <active>` into argv), and the schedule refuses any profile:
+//
+//   $ orthanc --agent --non-interactive --profile default smoke --schedule
+//   {"errors":[{"message":"the scheduled smoke runs the default profile; configure the
+//     default instead","type":"usage-error"}],…}                                      exit 1
+//   $ find <empty-home> -mindepth 1
+//   (nothing)
+//
+// So through orthanc_cli the install stops at that refusal, and it stops before
+// anything is written. `--unschedule` has no such check (`remove_schedule` takes
+// no profile: `mode: removed`, `plist_removed: true` above), so the way to take a
+// job down stays open. The rule still matters: `smoke --schedule` with no stack
+// in the session, and the same call in Bash, are the paths that would install.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 

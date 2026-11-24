@@ -455,9 +455,10 @@ const lastWord = (text: string) => text.split(/\s+/).at(-1) ?? ''
 export function classifyOrthancCommand(
   command: string,
   manifest: readonly ManifestCommand[],
-  /** Every word after the command name, required: two `read-only` entries are a
-   * write with the right flag and a plan without it. No default, because an
-   * omitted argv would read every one of those calls as a plan. */
+  /** Every word after the command name, required: three `read-only` entries are
+   * a write with the right flag and a plan without it (or, for `smoke`, with no
+   * plan to have). No default, because an omitted argv would read every one of
+   * those calls as a plan. */
   args: readonly string[],
 ): 'read' | 'mutation' {
   const normalized = command.trim().toLowerCase()
