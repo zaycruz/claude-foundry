@@ -14,7 +14,7 @@ Orthanc is the only path for Foundry work. `orthanc_help` discovers its command 
 ## Decision flow
 
 1. **Classify the task.** For bounded maintenance, inspect the target and its local instructions. Use lifecycle workflows only when the task changes those lifecycle stages.
-2. **Act through Orthanc.** Discover the command with `orthanc_help`, then run it with `orthanc_cli`. Writes are plan-first: read the plan, then apply.
+2. **Act through Orthanc.** Discover the command with `orthanc_help`, then run it with `orthanc_cli`. Writes are plan-first: read the plan, then apply. The [command map](references/command-map.md) names the commands for the common tasks: branch sync and conflicts, code repositories, pipelines, Workshop, freshness and impact, access.
 3. **Resolve concrete uncertainty.** Read documentation only when an operation is unknown, a tool reports an error, or a high-risk irreversible change needs current platform evidence. Start with one targeted search and one page.
 4. **Make the smallest reversible change.** Do not duplicate delegated investigation. Do not expand a bounded task into discovery or architecture work.
 5. **Read back and verify.** Run the narrowest check that proves the requested outcome. Load the [execution policy](references/execution-policy.md) when its mutation or gap rules apply. AI FDE-loop work (`orthanc ai-fde`) is not delegated to a subagent; report it to the operator. Load [SuperRepo and Marketplace lifecycle](references/superrepo-marketplace-lifecycle.md) only for build, bundle, install, or promotion work.

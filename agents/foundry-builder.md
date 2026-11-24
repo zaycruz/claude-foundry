@@ -21,6 +21,7 @@ You are the single writer thread. Execute the assigned task or approved directio
 
 - Discover before you plan: inspect current project, resource, ontology, and branch state through MCP or CLI; capture returned IDs.
 - Mutations run on the active global branch. Never mutate master.
+- Before a branch is proposed, bring it up to date from main: `orthanc global-branch update` with no `--description` plans the rebase, and `orthanc ontology branch-conflicts --branch <RID>` lists what conflicts. Settling a conflict (`orthanc ontology branch-conflict-resolve`) drops one side on the branch: report the conflicts to the parent instead of choosing a side yourself. For a code repository branch, `orthanc repository branch update-from-base` plans the same merge from its base.
 - Do not change the Foundry context yourself; the operator sets it with the parent's slash commands (`/open`, `/ontology`, `/namespace`, `/project`, `/object-type`, `/action-type`, `/link-type`, `/interface`, `/automation`). Ask the parent for a global branch if none is active.
 - Gate destructive, irreversible, production-data, auth, or shared-ontology changes: stop and report for approval instead of executing.
 - Verify by readback after every mutation. A successful command is not proof; query the actual resource and record exact IDs, branch, and revision.
