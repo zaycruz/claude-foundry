@@ -224,7 +224,7 @@ export function operatorOnlyReason(path: string): string | null {
   const why = OPERATOR_ONLY_COMMANDS[path]
   return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
 }
-// Two commands whose own manifest entry says `kind: read-only`, because nothing
+// Three commands whose own manifest entry says `kind: read-only`, because nothing
 // on Foundry changes, and whose flags say the call writes the machine the agent
 // works on. Measured on the sha-256-verified orthanc v0.7.12 release binary
 // (archive 1983c18a179c54ef1b4f9b18c50acd3db9c364d61f3d5e7cbfa73eea06c0e424,
@@ -244,6 +244,19 @@ export function operatorOnlyReason(path: string): string | null {
 //    SDK definition response. A package the server named runs its install scripts
 //    as the agent's user: `npm` needs `--target`, and `pip` needs `--yes` to
 //    leave a virtualenv. `execute_step` is line 182, past both returns.
+//  - `smoke --schedule | --unschedule` — src/smoke.rs `install_schedule` (line
+//    283) writes ~/Library/LaunchAgents/com.raava.orthanc.smoke.plist
+//    (`std::fs::write`, line 322) and loads it with `launchctl bootstrap` (line
+//    329): a job that runs `orthanc smoke` every day at 09:00 with the *default*
+//    profile (line 287 refuses `--profile`, so the schedule cannot be pointed at
+//    a scratch stack), from the binary path baked in at install time. It outlives
+//    the session. `remove_schedule` (line 353) boots it out and `remove_file`s
+//    the plist (line 363). Measured on the installed binary with $HOME at an
+//    empty folder: on Linux the call ends in `launchctl bootstrap failed: No such
+//    file or directory`, and the plist and ~/.orthanc-smoke are already written;
+//    on macOS it answers `{"mode":"installed",…}`. Orthanc labels the entry
+//    `read-only` in 0.7.11 and 0.7.13 alike. `smoke` with no flag runs the checks
+//    (reads), and `smoke schedule` shows the job's state — both stay reads.
 // Both line numbers are read at commit 7b54958, the commit the v0.7.12 binary
 // reports, and both say the same thing about `--dry-run`: the command returns
 // before either the delete or the install (`run_clone` returns at line 30, four-
@@ -268,6 +281,11 @@ const LOCAL_WRITE_COMMANDS: Readonly<Record<string, LocalWrite>> = {
     flags: ['--yes', '--target'],
     reason: "'dev-console sdk install' writes this machine, not Foundry: it runs npm or pip install of the packages this application's SDK definition names.",
     note: "Writes this machine, not Foundry: with --yes or --target it runs npm or pip install of the packages this application's SDK definition names, so that call goes through the approval ladder and is refused in Bash.",
+  },
+  'smoke': {
+    flags: ['--schedule', '--unschedule'],
+    reason: "'smoke' writes this machine, not Foundry: --schedule installs a daily launchd job (09:00, the default profile) that survives this session, and --unschedule takes that job down and deletes its file.",
+    note: 'Writes this machine, not Foundry: --schedule installs a launchd job that runs the smoke checks daily at 09:00 with the default profile, and --unschedule removes it, so those calls go through the approval ladder and are refused in Bash.',
   },
 }
 
@@ -2675,7 +2693,7 @@ export function modeGuidance(mode: ApprovalMode): string {
     // Named in both sentences: the model reads this text to predict whether a
     // call will stop, and a rule it is not told reads as a hang
     // (hooks/destructive.test.ts D11).
-    ' Two commands Orthanc labels `read-only` write this machine instead of Foundry — `repository clone <rid> <dir> --force` deletes a non-empty target folder, and `dev-console sdk install --yes|--target <dir>` runs npm or pip install of the packages an application\'s SDK definition names — and the guard judges those two calls as writes.'
+    ' Three commands Orthanc labels `read-only` write this machine instead of Foundry — `repository clone <rid> <dir> --force` deletes a non-empty target folder, `dev-console sdk install --yes|--target <dir>` runs npm or pip install of the packages an application\'s SDK definition names, and `smoke --schedule|--unschedule` installs or removes a daily launchd job on this machine — and the guard judges those calls as writes.'
   )
 }
 
