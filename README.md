@@ -190,8 +190,9 @@ that runs the smoke checks every day at 09:00 with the default profile (it
 survives the session; `--unschedule` takes it down). The mod judges those calls
 as writes: they go through the approval ladder (the `--force` clone asks in every
 mode but yolo) and Bash runs none of them. A plain clone, a plain `smoke`,
-`smoke schedule` (which only shows the job's state), and either command with
-`--dry-run`, is still a read.
+`smoke schedule` (which only shows the job's state), and a clone or an sdk
+install with `--dry-run`, is still a read — `smoke` declares no plan switch, so
+`smoke --dry-run --schedule` is the write it would be without the word.
 
 ### 2. The mod
 

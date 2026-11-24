@@ -188,7 +188,14 @@ export function check() {
 }
 
 // Kept in the pin even without an approval key, because a flag of theirs is what
-// makes the call a write. Same names as hooks/policy.ts; LW8 fails if they drift.
+// makes the call a write, and LW8 fails when a rename or a takes_value change
+// would leave the guard under-reading. `hooks/policy.ts` LOCAL_WRITE_COMMANDS
+// carries a third, `smoke`, and it is not listed here on purpose: adding a name
+// changes what `refresh` writes into the pin, so it belongs with the pin
+// regeneration a release does, not beside a rule. What `smoke` keeps pinned is
+// its name and its `kind` (hooks/smoke-schedule.test.ts SS8). A rename of
+// `--schedule` cannot pass unnoticed either way: pflag refuses an undeclared
+// flag, so the renamed call ends in a usage error instead of installing the job.
 const LOCAL_WRITE_PIN = ['dev-console sdk install', 'repository clone']
 
 const sortKeys = value =>

@@ -74,6 +74,13 @@
 //      write, so it asks outside yolo and runs in yolo. No branch rule applies to
 //      it: `smoke` is not branch-scoped, and a `--branch` it does not define must
 //      not be read as a write aimed at main.
+//  SS13 `smoke` has no plan switch, so a `--dry-run` in front of `--schedule`
+//      must not talk the guard out of the write. Measured on the installed
+//      binary: `smoke --dry-run --schedule` answers `unexpected argument
+//      '--dry-run' found`, so the call runs nothing — and a guard that read it
+//      as a plan would call a refused call a read, and run it in Bash. The
+//      exemption is read from the entry: an entry that does list `--dry-run`
+//      (as `repository clone` and `dev-console sdk install` do) keeps its plan.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
@@ -255,6 +262,34 @@ test('SS10: in yolo the call runs, with no branch advice attached to it', () => 
   const reason = ladderDecision('ask-always', declined, { action: 'ask', reason: 'guard says no' }).reason
   expect(reason.includes('Pass a work branch')).toBe(false)
   expect(reason.includes('work branch')).toBe(false)
+})
+
+test('SS13: a --dry-run in front of --schedule is still the write, because smoke declares no plan switch', () => {
+  // Measured: orthanc refuses the flag for this command ('unexpected argument
+  // '--dry-run' found'), so no plan exists to exempt.
+  for (const args of [['--dry-run', '--schedule'], ['--schedule', '--dry-run'], ['--dry-run', '--unschedule']]) {
+    expect({ args, modes: cli('smoke', args) }).toEqual({ args, modes: ['ask', 'run', 'run', 'run'] })
+  }
+  expect(bash('orthanc smoke --dry-run --schedule')).toEqual(['block', 'block', 'block', 'block'])
+})
+
+test('SS14: the plan exemption is read from the entry, not guessed from the flag', () => {
+  // The same guard, an entry that does declare the switch the way clone and
+  // sdk install do: then a standing --dry-run is a plan, and the read short-
+  // circuit applies. Pinned so a future orthanc that gives smoke a plan switch
+  // gets the exemption by declaring it, not by the guard learning to guess.
+  const withPlan: ManifestCommand[] = [
+    MANIFEST[0]!,
+    { ...MANIFEST[1]!, flags: [{ flag: '--schedule', takesValue: false }, { flag: '--unschedule', takesValue: false }, { flag: '--dry-run', takesValue: false }] },
+  ]
+  const planned = (args: string[]) => {
+    const classified = classifyCall(CLI, { command: 'smoke', args }, withPlan, null)
+    // null is the read short-circuit: nothing to ask, so nothing to report.
+    if (classified === null) return READ
+    return MODES.map(mode => ladderDecision(mode, classified, { action: 'approve', reason: 'guard model absent' }).outcome)
+  }
+  expect(planned(['--dry-run', '--schedule'])).toEqual(READ)
+  expect(planned(['--schedule'])).toEqual(['ask', 'run', 'run', 'run'])
 })
 
 test('SS11: through the real hooks, ask-always asks once and nothing runs until the operator approves', async ($, on) => {

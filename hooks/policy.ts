@@ -326,6 +326,15 @@ function localWriteEntry(path: string): LocalWrite | null {
 //    the switch counts only while nothing consumed it.
 function isPlanCall(args: readonly string[], command: ManifestCommand | undefined): boolean {
   const shapes = flagShapes(command)
+  // The switch exists only where the command declares it. Measured on the
+  // installed binary: `smoke --dry-run --schedule` is 'unexpected argument
+  // '--dry-run' found', so a command that never lists the flag cannot plan, and
+  // a word the binary refuses must not talk the guard out of the ask. Cloning
+  // and sdk install do declare it (the pinned snapshot lists it for both), so
+  // their plan calls are unaffected.
+  if (command !== undefined && command.flags !== undefined && command.flags.length > 0) {
+    if (!shapes.has('--dry-run')) return false
+  }
   return args.some((raw, index) => {
     if (unquote(raw).trim().toLowerCase() !== '--dry-run') return false
     const previous = index === 0 ? '' : unquote(args[index - 1]!).trim().toLowerCase()
