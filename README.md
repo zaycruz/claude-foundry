@@ -453,8 +453,11 @@ node scripts/orthanc-tie.mjs check
 read plugin.json, so `orthanc-tie.ts` mirrors it). `validate` warns that
 `min_orthanc` and `orthanc_checked` are unknown fields; Claude Code ignores them.
 
-`hooks/*.test.ts` cover the ladder, parity, the context view and trace export. For an E2E run
-against your own stack, record real Orthanc output and replay it:
+`hooks/*.test.ts` cover the ladder, parity, the context view and trace export.
+`hooks/branch-surface.test.ts` sweeps every command of the pinned manifest
+against the branch rule and the Bash rule, so a command Orthanc adds or renames
+fails a test in the tie that moves it instead of waiting for someone to name it.
+For an E2E run against your own stack, record real Orthanc output and replay it:
 
 ```
 FOUNDRY_E2E_PROFILE=<profile> FOUNDRY_E2E_PROJECT=<project rid> \
