@@ -196,9 +196,9 @@ export function check() {
 // reads its flag from the call's argv, so nothing here pins the two flag names
 // orthanc ships for it, and a rename of `--schedule` would leave the guard
 // reading the install as a plain read (the old spelling then dies at pflag as an
-// undeclared flag; the new one would not be seen at all). hooks/
-// smoke-schedule.test.ts SS8 pins that the pin carries no `args` for `smoke`, so
-// joining the two lists is a deliberate act. It needs `refresh`, which rewrites
+// undeclared flag; the new one would not be seen at all). SS8 in
+// hooks/smoke-schedule.test.ts pins that the pin carries no `args` for `smoke`,
+// so joining the two lists is a deliberate act. It needs `refresh`, which rewrites
 // the pin for a whole orthanc release: that is the v0.7.13 tie in PR #41, and
 // this file is one of the five it moves.
 const LOCAL_WRITE_PIN = ['dev-console sdk install', 'repository clone']
