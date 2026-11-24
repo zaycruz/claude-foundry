@@ -95,11 +95,13 @@
 //   $ find <empty-home> -mindepth 1
 //   (nothing)
 //
-// So through orthanc_cli the install stops at that refusal, and it stops before
-// anything is written. `--unschedule` has no such check (`remove_schedule` takes
+// So when the session picked a stack, an approved install stops at that refusal,
+// and it stops before anything is written. With no stack picked, `profileArg`
+// returns undefined (hooks/register.tsx:469), nothing is added to argv, and the
+// call runs: that path, and Bash, are why the rule has to exist rather than lean
+// on Orthanc's refusal. `--unschedule` has no such check (`remove_schedule` takes
 // no profile: `mode: removed`, `plist_removed: true` above), so the way to take a
-// job down stays open. The rule still matters: `smoke --schedule` with no stack
-// in the session, and the same call in Bash, are the paths that would install.
+// job down stays open either way.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
