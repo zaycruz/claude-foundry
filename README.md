@@ -181,14 +181,21 @@ still refuses them in every mode, because their job is to hand you a value:
 (`password=…`), and `orthanc compute env get` writes one environment variable's
 value to a new file or to the clipboard. Run those in your own terminal.
 
-Two more are `read-only` because nothing on Foundry changes, and their flags say
-the call writes **this machine**: `repository clone <rid> <dir> --force` deletes
-a non-empty target folder before it clones, and `dev-console sdk install
+Three more are `read-only` because nothing on Foundry changes, and their flags
+say the call writes **this machine**: `repository clone <rid> <dir> --force`
+deletes a non-empty target folder before it clones; `dev-console sdk install
 --yes|--target <dir>` runs `npm` or `pip` install of the packages the
-application's SDK definition names. The mod judges those two calls as writes:
-they go through the approval ladder (the `--force` clone asks in every mode but
-yolo) and Bash runs neither. A plain clone, and either command with `--dry-run`,
-is still a read.
+application's SDK definition names; and `smoke --schedule` installs a launchd job
+that runs the smoke checks every day at 09:00 with the default profile (it
+survives the session; `--unschedule` takes it down). The mod judges those calls
+as writes: they go through the approval ladder (the `--force` clone asks in every
+mode but yolo) and Bash runs none of them. A plain clone, a plain `smoke`, and
+`smoke schedule` (which only shows the job's state) are still reads, and so is a
+clone or an sdk install with `--dry-run` standing on its own — that switch only
+counts where the command's own entry declares it. `smoke` declares no plan
+switch, so `smoke --dry-run --schedule` stays the write, and
+`sdk install <app> --target --dry-run` stays the write too: `--target` takes that
+word as its value.
 
 ### 2. The mod
 

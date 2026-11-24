@@ -224,7 +224,7 @@ export function operatorOnlyReason(path: string): string | null {
   const why = OPERATOR_ONLY_COMMANDS[path]
   return `'orthanc ${path}' is the operator's to run: ${why}. Run it in your own terminal.`
 }
-// Two commands whose own manifest entry says `kind: read-only`, because nothing
+// Three commands whose own manifest entry says `kind: read-only`, because nothing
 // on Foundry changes, and whose flags say the call writes the machine the agent
 // works on. Measured on the sha-256-verified orthanc v0.7.12 release binary
 // (archive 1983c18a179c54ef1b4f9b18c50acd3db9c364d61f3d5e7cbfa73eea06c0e424,
@@ -244,19 +244,34 @@ export function operatorOnlyReason(path: string): string | null {
 //    SDK definition response. A package the server named runs its install scripts
 //    as the agent's user: `npm` needs `--target`, and `pip` needs `--yes` to
 //    leave a virtualenv. `execute_step` is line 182, past both returns.
-// Both line numbers are read at commit 7b54958, the commit the v0.7.12 binary
-// reports, and both say the same thing about `--dry-run`: the command returns
-// before either the delete or the install (`run_clone` returns at line 30, four-
-// teen lines before the delete), which is what lets a plan stay a read.
+//  - `smoke --schedule | --unschedule` — src/smoke.rs `install_schedule` (line
+//    283) writes ~/Library/LaunchAgents/com.raava.orthanc.smoke.plist
+//    (`std::fs::write`, line 322) and loads it with `launchctl bootstrap` (line
+//    329): a job that runs `orthanc smoke` every day at 09:00 with the *default*
+//    profile (line 287 refuses `--profile`, so the schedule cannot be pointed at
+//    a scratch stack), from the binary path baked in at install time. It outlives
+//    the session. `remove_schedule` (line 353) boots it out and `remove_file`s
+//    the plist (line 363). Measured on the installed binary with $HOME at an
+//    empty folder: on Linux the call ends in `launchctl bootstrap failed: No such
+//    file or directory`, and the plist and ~/.orthanc-smoke are already written;
+//    on macOS it answers `{"mode":"installed",…}`. Orthanc labels the entry
+//    `read-only` in 0.7.11 and 0.7.13 alike. `smoke` with no flag runs the checks
+//    (reads), and `smoke schedule` shows the job's state — both stay reads.
+// The two `--dry-run` line numbers above are read at commit 7b54958, the commit
+// the v0.7.12 binary reports, and both entries behave the same way: the command
+// returns before either the delete or the install (`run_clone` returns at line
+// 30, fourteen lines before the delete), which is what lets a plan stay a read.
+// `smoke` declares no `--dry-run`, so `isPlanCall` never exempts it.
 // Each entry keeps its own words, the way OPERATOR_ONLY_COMMANDS does, so the
 // sentence an operator reads cannot fall behind the rule that asked them.
-// Neither command defines a short alias (measured on the v0.7.12 binary:
-// `-f` and `-y` are both 'unexpected argument'), so the long names are enough.
+// None of the three defines a short alias (measured: on the v0.7.12 binary `-f`
+// and `-y` are both 'unexpected argument'; on the installed binary `smoke -s`
+// and `smoke -u` are refused the same way), so the long names are enough.
 // This is not "a read with a file flag": `sql export --out f.csv` writes a data
 // file and stays a read (hooks/operator-handoff.test.ts Q6). Orthanc still labels
-// both entries `read-only` in the pinned snapshot, and
-// hooks/local-write.test.ts LW8 fails loudly when an orthanc-side mark makes this
-// table redundant.
+// all three `read-only` in the pinned snapshot: hooks/local-write.test.ts LW8
+// fails loudly for the two whose flags the pin keeps, and
+// hooks/smoke-schedule.test.ts SS8 fails for `smoke`.
 type LocalWrite = { flags: readonly string[]; reason: string; note: string }
 const LOCAL_WRITE_COMMANDS: Readonly<Record<string, LocalWrite>> = {
   'repository clone': {
@@ -268,6 +283,11 @@ const LOCAL_WRITE_COMMANDS: Readonly<Record<string, LocalWrite>> = {
     flags: ['--yes', '--target'],
     reason: "'dev-console sdk install' writes this machine, not Foundry: it runs npm or pip install of the packages this application's SDK definition names.",
     note: "Writes this machine, not Foundry: with --yes or --target it runs npm or pip install of the packages this application's SDK definition names, so that call goes through the approval ladder and is refused in Bash.",
+  },
+  'smoke': {
+    flags: ['--schedule', '--unschedule'],
+    reason: "'smoke' writes this machine, not Foundry: --schedule installs a daily launchd job (09:00, the default profile) that survives this session, and --unschedule takes that job down and deletes its file.",
+    note: 'Writes this machine, not Foundry: --schedule installs a launchd job that runs the smoke checks daily at 09:00 with the default profile, and --unschedule removes it, so those calls go through the approval ladder and are refused in Bash.',
   },
 }
 
@@ -306,6 +326,19 @@ function localWriteEntry(path: string): LocalWrite | null {
 //    the switch counts only while nothing consumed it.
 function isPlanCall(args: readonly string[], command: ManifestCommand | undefined): boolean {
   const shapes = flagShapes(command)
+  // The switch exists only where the command declares it. Measured on the
+  // installed binary: `smoke --dry-run --schedule` is 'unexpected argument
+  // '--dry-run' found', so a command that never lists the flag cannot plan, and
+  // a word the binary refuses must not talk the guard out of the ask. Cloning
+  // and sdk install do declare it (the pinned snapshot lists it for both, at
+  // hooks/orthanc-manifest.snapshot.ts:209 and :465), so their plan calls are
+  // unaffected. An entry that lists no flags at all declares no plan switch
+  // either: LW14 is this file's rule that an unreadable shape asks rather than
+  // plans, and an entry that stopped listing its flags would otherwise read as
+  // unreadable in the one direction that matters here. A command the manifest
+  // does not list at all keeps the old reading (a call with no entry is judged
+  // by the last word of its path, not by flags).
+  if (command !== undefined && !shapes.has('--dry-run')) return false
   return args.some((raw, index) => {
     if (unquote(raw).trim().toLowerCase() !== '--dry-run') return false
     const previous = index === 0 ? '' : unquote(args[index - 1]!).trim().toLowerCase()
@@ -426,14 +459,15 @@ const lastWord = (text: string) => text.split(/\s+/).at(-1) ?? ''
 export function classifyOrthancCommand(
   command: string,
   manifest: readonly ManifestCommand[],
-  /** Every word after the command name, required: two `read-only` entries are a
-   * write with the right flag and a plan without it. No default, because an
-   * omitted argv would read every one of those calls as a plan. */
+  /** Every word after the command name, required: three `read-only` entries are
+   * a write with the right flag and a plan without it (or, for `smoke`, with no
+   * plan to have). No default, because an omitted argv would read every one of
+   * those calls as a plan. */
   args: readonly string[],
 ): 'read' | 'mutation' {
   const normalized = command.trim().toLowerCase()
   const declared = manifest.find(entry => entry.path === normalized)
-  // Before the `read-only` short-circuit: two entries Orthanc calls a read write
+  // Before the `read-only` short-circuit: three entries Orthanc calls a read write
   // this machine, and a read short-circuits the ladder, the ask and the trace.
   if (localWriteReason(normalized, args, declared) !== null) return 'mutation'
   if (LOCAL_PULLS.has(normalized)) return 'read'
@@ -2675,7 +2709,7 @@ export function modeGuidance(mode: ApprovalMode): string {
     // Named in both sentences: the model reads this text to predict whether a
     // call will stop, and a rule it is not told reads as a hang
     // (hooks/destructive.test.ts D11).
-    ' Two commands Orthanc labels `read-only` write this machine instead of Foundry — `repository clone <rid> <dir> --force` deletes a non-empty target folder, and `dev-console sdk install --yes|--target <dir>` runs npm or pip install of the packages an application\'s SDK definition names — and the guard judges those two calls as writes.'
+    ' Three commands Orthanc labels `read-only` write this machine instead of Foundry — `repository clone <rid> <dir> --force` deletes a non-empty target folder, `dev-console sdk install --yes|--target <dir>` runs npm or pip install of the packages an application\'s SDK definition names, and `smoke --schedule|--unschedule` installs or removes a daily launchd job on this machine — and the guard judges those calls as writes.'
   )
 }
 
