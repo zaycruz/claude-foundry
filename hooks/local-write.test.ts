@@ -2,6 +2,9 @@
 // changes — and whose flags say the call writes the machine the agent works on.
 // The read short-circuit ran both in every approval mode and in Bash, with no
 // ladder, no ask and no trace as a write.
+// (`hooks/smoke-schedule.test.ts` holds the third entry of the same table,
+// `smoke --schedule|--unschedule`: the two here are the two whose flags
+// `scripts/orthanc-tie.mjs` keeps in the pin, so LW8 can read them.)
 //
 // Measured on the sha-256-verified orthanc v0.7.12 release binary (archive
 // 1983c18a179c54ef1b4f9b18c50acd3db9c364d61f3d5e7cbfa73eea06c0e424, built from

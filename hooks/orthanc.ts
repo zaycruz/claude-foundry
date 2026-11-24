@@ -446,8 +446,8 @@ export function renderCommand(command: ManifestCommand, help: string | null): st
   // out that the refusal was coming.
   const operatorOnly = operatorOnlyReason(command.path)
   if (operatorOnly !== null) lines.push(`Refused through orthanc_cli and Bash: ${operatorOnly}`)
-  // Same for the two reads that write this machine: the page says so before the
-  // agent adds --force or --target to a call it came here to plan.
+  // Same for the three reads that write this machine: the page says so before the
+  // agent adds --force, --target or --schedule to a call it came here to plan.
   const localWrite = localWriteNote(command.path)
   if (localWrite !== null) lines.push(localWrite)
   return lines.join('\n')

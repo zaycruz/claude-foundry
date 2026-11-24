@@ -257,19 +257,21 @@ export function operatorOnlyReason(path: string): string | null {
 //    on macOS it answers `{"mode":"installed",…}`. Orthanc labels the entry
 //    `read-only` in 0.7.11 and 0.7.13 alike. `smoke` with no flag runs the checks
 //    (reads), and `smoke schedule` shows the job's state — both stay reads.
-// Both line numbers are read at commit 7b54958, the commit the v0.7.12 binary
-// reports, and both say the same thing about `--dry-run`: the command returns
-// before either the delete or the install (`run_clone` returns at line 30, four-
-// teen lines before the delete), which is what lets a plan stay a read.
+// Both line numbers for the two below are read at commit 7b54958, the commit the
+// v0.7.12 binary reports, and both say the same thing about `--dry-run`: the
+// command returns before either the delete or the install (`run_clone` returns at
+// line 30, fourteen lines before the delete), which is what lets a plan stay a
+// read. `smoke` has no `--dry-run` at all, so nothing exempts it.
 // Each entry keeps its own words, the way OPERATOR_ONLY_COMMANDS does, so the
 // sentence an operator reads cannot fall behind the rule that asked them.
-// Neither command defines a short alias (measured on the v0.7.12 binary:
-// `-f` and `-y` are both 'unexpected argument'), so the long names are enough.
+// None of the three defines a short alias (measured: on the v0.7.12 binary `-f`
+// and `-y` are both 'unexpected argument'; on the installed binary `smoke -s`
+// and `smoke -u` are refused the same way), so the long names are enough.
 // This is not "a read with a file flag": `sql export --out f.csv` writes a data
 // file and stays a read (hooks/operator-handoff.test.ts Q6). Orthanc still labels
-// both entries `read-only` in the pinned snapshot, and
-// hooks/local-write.test.ts LW8 fails loudly when an orthanc-side mark makes this
-// table redundant.
+// all three `read-only` in the pinned snapshot: hooks/local-write.test.ts LW8
+// fails loudly for the two whose flags the pin keeps, and
+// hooks/smoke-schedule.test.ts SS8 fails for `smoke`.
 type LocalWrite = { flags: readonly string[]; reason: string; note: string }
 const LOCAL_WRITE_COMMANDS: Readonly<Record<string, LocalWrite>> = {
   'repository clone': {
@@ -451,7 +453,7 @@ export function classifyOrthancCommand(
 ): 'read' | 'mutation' {
   const normalized = command.trim().toLowerCase()
   const declared = manifest.find(entry => entry.path === normalized)
-  // Before the `read-only` short-circuit: two entries Orthanc calls a read write
+  // Before the `read-only` short-circuit: three entries Orthanc calls a read write
   // this machine, and a read short-circuits the ladder, the ask and the trace.
   if (localWriteReason(normalized, args, declared) !== null) return 'mutation'
   if (LOCAL_PULLS.has(normalized)) return 'read'
