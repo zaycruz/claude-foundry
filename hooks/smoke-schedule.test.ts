@@ -14,9 +14,20 @@
 // On macOS the same call returns `mode: installed`: `launchctl bootstrap gui/<uid>
 // ~/Library/LaunchAgents/com.raava.orthanc.smoke.plist`, which runs `orthanc smoke`
 // every day at 09:00 local through the default profile (orthanc refuses `--profile`
-// for the schedule, so it cannot be pointed at a scratch profile). It is not undone
+// for it, so it cannot be pointed at a scratch profile). It is not undone
 // by anything in the session: the agent that ran it leaves the machine with a
-// recurring job. `--unschedule` boots that job out and `remove_file`s the plist.
+// recurring job. `--unschedule` boots that job out and `remove_file`s the plist:
+//
+//   $ HOME=<empty> orthanc --agent --non-interactive smoke --unschedule
+//   {"data":{"label":"com.raava.orthanc.smoke","mode":"removed","plist_removed":true},…}   exit 0
+//
+// The two calls this rule must leave alone were measured the same way. Plain
+// `smoke` runs the checks, and src/smoke.rs:5 says of them: "It mutates nothing;
+// every check is a read or a rejected write" (not run here: it reads a live
+// stack). The status read answered with the job's state and asked for nothing:
+//
+//   $ HOME=<empty> orthanc --agent --non-interactive smoke schedule
+//   {"data":{"installed":false,"loaded":false,"plist_present":true,…},"errors":[],…}   exit 0
 //
 // Source (orthanc-source origin/main 42f9118, src/smoke.rs): `install_schedule`
 // create_dir_all → std::fs::write(plist_path) → Command::new("launchctl")
