@@ -2321,7 +2321,12 @@ function shellClassification(
           : `'orthanc ${call.path}' is marked '${BINARY_RISK}' in Orthanc's agent manifest: it replaces the orthanc binary this session reads its command list from. Installing a binary is the operator's call, in their own terminal; neither Bash nor orthanc_cli runs it.`,
       )
     }
-    if (call.help || call.path === '') continue
+    // helpVerb, not help: `help` also counts a word that spells `-V` or
+    // `--version`, and a call may carry those as its own option or as a value.
+    // Three commands declare `--version` and one requires it, so with `help`
+    // here an agent doing the right thing ran a write in Bash, unguarded, in
+    // every mode (hooks/shell-guard.test.ts K7).
+    if (call.helpVerb || call.path === '') continue
     if (!call.known) {
       return refuse(call.path, `Bash runs 'orthanc ${call.path}', which is not a command in Orthanc's agent manifest. Look it up with orthanc_help, then run it with orthanc_cli.`)
     }

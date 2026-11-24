@@ -466,9 +466,16 @@ for (const mode of MODES) {
     for (const line of ['orthanc update --help', 'orthanc update -h', 'orthanc help update']) {
       expect((await shell($, line)).deny).toBe(undefined)
     }
-    // A version print on another command is still a read.
+    // A version word on a read is still a read, and on a write is still a write.
+    // `orthanc dataset list --version` was here until the carve-out moved: that
+    // name is not in Orthanc's manifest, so the guard now refuses it as an
+    // unknown command, which is the answer FND-26 asks for. The read it meant to
+    // check is `ontology list`, which is in the manifest.
     expect((await shell($, 'orthanc --version')).deny).toBe(undefined)
-    expect((await shell($, 'orthanc dataset list --version')).deny).toBe(undefined)
+    expect((await shell($, 'orthanc ontology list --version')).deny).toBe(undefined)
+    expect((await shell($, 'orthanc ontology list -V')).deny).toBe(undefined)
+    expect(((await shell($, 'orthanc dataset create x --version v1')).deny ?? '').includes('dataset create')).toBe(true)
+    expect(((await shell($, 'orthanc dataset create x --version v1 --branch agent/x')).deny ?? '').includes('dataset create')).toBe(true)
   })
 }
 

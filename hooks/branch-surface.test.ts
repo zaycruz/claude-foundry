@@ -3,81 +3,94 @@
 // The other guard tests pick their commands by hand: Y4, Y13 and Y16 name the
 // branch writes they checked, Y12 checks Bash on a few, Y18 lists the seven
 // commands that name a branch as a positional. This file asks the same questions
-// of every command in hooks/orthanc-manifest.snapshot.ts, the surface the guard
+// of every command in hooks/orthanc-manifest.snapshot.ts, the manifest the guard
 // is tied to, so the commands nobody thought to name are covered by the tie that
 // moves them, not by the next person who thinks to look.
 //
-// What the pin holds decides how far each arm reaches. It keeps `path` and `kind`
-// for every command, and the option flags only on the entries that carry an
-// approval key or that the guard judges by a flag (`repository clone`,
-// `dev-console sdk install`). So:
-//  - BS1 and BS2 reach every command, because `--branch` is matched by name, not
-//    by the command's declaration (policy.ts `targetsProtected`).
-//  - BS3 reads a command's own declared branch flags, so it covers the entries
-//    whose flags the pin keeps: every write Orthanc marks `operator_approval`,
-//    which is where a branch write with a new spelling would show up.
-//  - No arm can read a *positional* branch: the pin drops positionals, so the
-//    seven names stay with Y18. Keeping each entry's branch-carrying args (flag
-//    and positional) in the pin would close that gap and BS3 with it; that moves
-//    the pin and the release job's file format, so it is not in this pull request.
+// How far each arm reaches depends on what the pin holds. It keeps `path`, `kind`
+// and `input` for every command, and option flags only on the entries that carry
+// an approval key or that the guard judges by a flag (`repository clone`,
+// `dev-console sdk install`); `credential_store` and positionals are dropped.
+//  - BS1 and BS2 reach every command: `--branch` is matched by name, not by the
+//    command's declaration.
+//  - BS3 reads a command's own declared branch flags, so it sees the marked
+//    entries only. That is where Orthanc would mark a new branch write, and where
+//    a renamed `--branch` would show up.
+//  - No arm reaches a positional branch. `main` was tried in a positional slot
+//    across the surface and reported 816 calls, every one a command taking `main`
+//    as a *name* (`admin group create main`): with no positionals in the pin, the
+//    sweep cannot tell the two apart. Y18 names the seven that take a branch
+//    positionally, and FND-21 asks the pin to keep each entry's arguments, which
+//    is the change that would let this arm exist.
 //
 // Decisions come from the two pure functions the ladder runs (`classifyCall` and
-// `ladderDecision`, read as yolo.test.ts reads them), with the auto guard answered
-// Approve: `run` means the call reaches Orthanc with no question, `ask` that the
-// operator is asked, `block` that the guard refuses it. Reading the ladder rather
-// than driving the tool is what keeps a sweep of this size (about 12,000 calls)
-// inside the test runner's time: the same sweep through `$.tool.call` took the
-// file's whole budget and more.
+// `ladderDecision`, read the way yolo.test.ts reads them), with the auto guard
+// answered Approve: `run` means the call reaches Orthanc with no question, `ask`
+// that the operator is asked, `block` that the guard refuses it. Reading the
+// ladder rather than driving the tool is what keeps 12,216 calls inside the
+// runner's budget: the same sweep through `$.tool.call` ran past the two minutes
+// a file gets, and the run died without a report.
 //
-// What no arm here reaches, so the next reader does not trust the sweep further
-// than it goes:
+// Two things no arm here reaches, so the next reader does not trust the sweep
+// further than it goes:
 //  - A write that another command runs for you. `watch -n1 orthanc automate mute
 //    <rid> --apply` runs the write, and BS4 passes while it does: the guard reads
 //    the command word (`watch`), so `orthanc …` is an argument, and WRAPPERS in
-//    policy.ts names `env`, `timeout`, `xargs` and friends but not the runners
-//    that exec their own arguments. Measured on this commit: `watch`, `entr`,
+//    policy.ts lists `env`, `timeout`, `xargs` and friends but not the runners
+//    that exec their own arguments. Measured at this commit: `watch`, `entr`,
 //    `at`, `systemd-run`, `steady`, `pueue`, `ts`, `unbuffer`, `retry`,
 //    `tmux new-session -d`, `screen -dm` and `expect -c` all run it; `parallel`,
 //    `ssh <host> …`, `nohup`, `bash -c` and a plain redirect do not.
-//  - A branch the pin shows only as a positional (FND-21 asks for the pin to keep
-//    arguments). Y18 names the seven commands that take one.
 //  - A branch that only looks like main. `--branch origin/main`,
 //    `--branch refs/remotes/origin/main` and a name with a zero-width space in it
-//    run in yolo, and that is right: each is a different branch, and Orthanc
+//    run in yolo, and that is right: each names a different branch, and Orthanc
 //    would not touch `main` for it. `refs/heads/main`, `./main`, `main.`,
 //    `:main`, `MAIN` and `Main` are `main`, and each of those asks or blocks.
 //
 // Ways this can fail, written before the code. Each arm was measured with the
-// rule it depends on taken out of hooks/policy.ts:
+// rule it depends on taken out of hooks/policy.ts, one mutation per run, each
+// reverted before the next. HEAD runs 846 pass, 0 fail; the totals name the other
+// files' tests too, which the same mutation breaks.
 //  BS1 In yolo, a write that names main, master or HEAD as its branch reaches
-//      Orthanc on some command of the surface.
+//      Orthanc on some command of the surface. With `BRANCH_FLAGS` minus
+//      `--branch`: 417 calls named, 65 tests fail. With the `--allow-default-branch`
+//      refusal out of `branchRuleReason`: 139 calls, 9 tests. With the branch
+//      *name* test out of both places that read it (`isBranchFlag`, which serves
+//      `targetsProtected`, and the `flagValues(args, BRANCH_FLAGS)` line beside
+//      it): 2178 calls, 24 tests. Taking only one of those two out changes
+//      nothing: the class is matched twice today, and that redundancy had no test
+//      before this file.
 //  BS2 The ladder loosens, and the same call runs unasked in ask-always,
-//      allow-edits or auto.
+//      allow-edits or auto. The same three mutations: 330, 110 and 1758 calls in
+//      allow-edits, and the same in auto. ask-always reports 0 under all of them,
+//      because the ladder asks there for any write, so it has no hole to show.
 //  BS3 A command whose own declared flags name a branch takes main on one of
-//      them with no ask in yolo — the arm that fires when Orthanc marks a new
-//      branch write, or renames `--branch` on one it already marks.
+//      them with no ask in yolo. The both-matchers mutation names 3.
 //  BS4 An Orthanc write in Bash runs instead of going to orthanc_cli, on any
-//      command of the surface.
+//      command of the surface. The Bash write refusal turned off: BS4 names 247
+//      writes (`orthanc admin group create …` is the first), BS6 names 1240
+//      lines, and 55 tests fail.
 //  BS5 The other direction: a plain read in Bash is blocked, so the agent loses
 //      the read lane zay asked for ("reads as plain `orthanc …`"). Only the two
 //      reads whose whole answer is a secret stay refused, named below.
-//
-// Measured, each time with hooks/policy.ts changed and reverted again:
-//  - BS1, BS2 and BS3 read the branch name from two places at once
-//    (`targetsProtected`'s name test over the argv, and
-//    `flagValues(args, BRANCH_FLAGS).some(isProtectedValue)` in the same
-//    classification). Turning one off leaves the other, and all three stayed
-//    green: the redundancy is real, and this is the file that shows it. With
-//    both off, BS1 named 2178 calls, BS2 1758 in allow-edits and the same in
-//    auto (ask-always asks for every write, so it has no hole to find), and BS3
-//    named its own set.
-//  - BS4 fires with the write refusal in shellClassification turned off: every
-//    write of the surface came back in its list.
-//  - BS5 fires with `admin group get` made operator-only: it named that read.
-//  - A sweep that reports hundreds of leaks at once must still report: the
-//    first version returned every leaking call in one array, and the runner
-//    killed the file's report instead of printing it. Hence the count plus the
-//    first eight calls.
+//      `admin group get` made operator-only: BS5 names it, 10 tests fail.
+//  BS6 A word that spells a version opens the Bash write lane. `help` in policy.ts
+//      counted any word spelling `-V` or `--version`, and read nothing else on the
+//      line. Not hypothetical: `ontology action-type-set-function-version`
+//      *requires* `--version`, and `functions query execute` takes it, so an agent
+//      that spelled its command the way Orthanc asks ran a write with no branch
+//      rule and no ladder, in every mode, while the same call through orthanc_cli
+//      was refused. The gate now reads `helpVerb`; the shell case is K7 in
+//      shell-guard.test.ts and the version-only line is U13 in self-update.test.ts.
+//      Gate changed back to `help`: BS6 names 1004 calls, and K7 and U13 fail
+//      with it, 8 tests. That is what origin/main ships today, so BS6 is the test
+//      that keeps the fix shipped.
+//  BS6b The same carve-out, the other way: `-h`, `--help` and `orthanc help …`
+//      stay reads. A guard that refuses a usage print sends the agent to
+//      orthanc_cli for text orthanc_cli answers the same way.
+//  A sweep that reports hundreds of leaks at once must still report. The first
+//      version returned every leaking call in one array, and the runner printed
+//      "its run ended without a report" instead. Hence a count, then eight.
 import { expect, test } from 'claude-code/testing'
 import { classifyCall, classifyOrthancCommand, ladderDecision, readApprovalCondition, type ApprovalMode, type ManifestCommand } from './policy'
 import { manifestFrom, type Envelope } from './orthanc'
@@ -161,17 +174,24 @@ const nothingRan = (leaks: { count: number; first: string[] }) => {
   expect(leaks.first).toEqual([])
 }
 
-const everySpellingOfMain = MAINS.flatMap(main => FLAG_FORMS(main))
+const everySpellingOfMain = (entry: ManifestCommand) => [
+  // The flag the branch rule reads, in each spelling Y16 walks.
+  ...MAINS.flatMap(main => FLAG_FORMS(main)),
+  // The default branch asked for by name rather than by value. The guard refuses
+  // this flag wherever it appears (policy.ts `branchRuleReason`), so trying it on
+  // a command that never declares it cannot report a call Orthanc would run.
+  ['--allow-default-branch'],
+]
 
 test('BS1: in yolo, no command of the tied surface runs a write that names its branch main', () => {
   // The pin is the whole surface, so a sweep this wide has writes in it.
   expect(WRITES.length > 200).toBe(true)
-  nothingRan(runsUnasked('yolo', () => everySpellingOfMain))
+  nothingRan(runsUnasked('yolo', everySpellingOfMain))
 })
 
 for (const mode of ['ask-always', 'allow-edits', 'auto'] as const) {
   test(`BS2: in ${mode}, a write naming its branch main never runs unasked, on any command of the surface`, () => {
-    nothingRan(runsUnasked(mode, () => everySpellingOfMain))
+    nothingRan(runsUnasked(mode, everySpellingOfMain))
   })
 }
 
@@ -199,6 +219,43 @@ test('BS4: Bash runs no Orthanc write of the tied surface', () => {
 // is a credential (FND-22). Named here so BS5 fails if one of them goes runnable,
 // and if a third read joins them with no decision written down.
 const SECRET_READS = ['compute env get', 'repository git-credential']
+
+// A word that spells a version is not a read of documentation, and it must not
+// open the Bash write lane: `help` in policy.ts counted `-V` and `--version`, and
+// three commands declare `--version` as their own option — one requires it — so an
+// agent that spelled its command correctly ran a write with no guard at all. The
+// spellings below go on every write, declared or not: the pin drops the
+// declarations of every command that is not marked, so it cannot say which
+// commands take these flags, and the guard must not run any of them either way.
+const BYPASS_WORDS = [['--version'], ['--version', 'v0.7.1'], ['--version=v0.7.1'], ['-V'], ['-V', 'v0.7.1']]
+
+test('BS6: no version spelling opens the Bash write lane, on any command of the surface', () => {
+  const escapes: string[] = []
+  for (const entry of WRITES) {
+    for (const extra of BYPASS_WORDS) {
+      const line = ['orthanc', entry.path, ...call(entry, extra)].join(' ')
+      if (classifyCall('Bash', { command: line }, SURFACE, null) === null) escapes.push(line)
+    }
+  }
+  expect(escapes.length).toBe(0)
+  expect(escapes.slice(0, 8)).toEqual([])
+})
+
+test('BS6b: `-h`, `--help` and `orthanc help …` stay reads, on any command of the surface', () => {
+  // The other half: the fix must not turn a usage print into a refusal.
+  const refused: string[] = []
+  for (const entry of WRITES) {
+    for (const line of [
+      ['orthanc', entry.path, '--help'].join(' '),
+      ['orthanc', entry.path, '-h'].join(' '),
+      ['orthanc', 'help', entry.path].join(' '),
+    ]) {
+      if (classifyCall('Bash', { command: line }, SURFACE, null) !== null) refused.push(line)
+    }
+  }
+  expect(refused.length).toBe(0)
+  expect(refused.slice(0, 8)).toEqual([])
+})
 
 test('BS5: Bash runs every read of the tied surface except the two that answer with a secret', () => {
   const blocked = SURFACE.filter(entry => entry.kind === 'read-only')
