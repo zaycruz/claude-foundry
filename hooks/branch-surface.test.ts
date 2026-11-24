@@ -74,6 +74,11 @@
 //      the read lane zay asked for ("reads as plain `orthanc …`"). Only the two
 //      reads whose whole answer is a secret stay refused, named below.
 //      `admin group get` made operator-only: BS5 names it, 10 tests fail.
+//  BS3c A branch named in a flag the write does not land on (a proposal's merge
+//      target, a pull request's base, the base a branch moves from, a build's
+//      fallback) flips from the answer the guard gives today. This test pins each
+//      answer, so the decision changes on purpose and not by accident. Read off
+//      the guard: four run in yolo as the promotion path, two are refused.
 //  BS6 A word that spells a version opens the Bash write lane. `help` in policy.ts
 //      counted any word spelling `-V` or `--version`, and read nothing else on the
 //      line. Not hypothetical: `ontology action-type-set-function-version`
@@ -134,24 +139,30 @@ const outcome = (mode: ApprovalMode, path: string, args: readonly string[]) => {
   return ladderDecision(mode, classified, { action: 'approve', reason: 'guard said ok' }).outcome
 }
 
-// Two commands name a branch they do not write, and run in yolo with it.
-//  - `repository pull-request create --base-branch main` opens a pull request
-//    *into* main; the merge is the write, and `repository pull-request merge` is
-//    a promotion Y19 covers.
-//  - `global-proposal create --branch-rid main` creates a proposal, and its
-//    `--branch-rid` takes a global branch RID (`ri.branch..branch.…`), which
-//    `main` is not. The write it proposes is `global-branch deploy`, whose own
-//    `operator_approval` (`--apply`, `--yes`) asks in every mode.
-// Both are the promotion path zay kept open (2026-11-20: "raise the proposal and
-// merge the proposal, just nothing direct against main or master"). Naming a
-// branch as `--branch` is not on this list: no command may run a `--branch main`
-// with no question, in yolo or anywhere else.
-const PROMOTION_TARGETS: ReadonlyArray<{ path: string; flags: readonly string[] }> = [
-  { path: 'repository pull-request create', flags: ['--base-branch'] },
-  { path: 'global-proposal create', flags: ['--branch-rid'] },
-]
-const allowedToNameMain = (path: string, flags: readonly string[]) =>
-  PROMOTION_TARGETS.some(target => target.path === path && flags.some(flag => target.flags.includes(flag)))
+// Flags that hold a branch and are not the branch the write lands on. The sweep
+// would otherwise report them, and BS3c below is where each one's real answer is
+// written down instead: a proposal's source branch (`--branch-rid`, which takes a
+// global branch RID, so `main` is not a value it can hold), a proposal's merge
+// target (`--merge-to`, whose declared default *is* `main`), a pull request's
+// target (`--base-branch`), the base a repo branch moves from (`--from`), and a
+// build's fallback (`--fallback-branch`). Naming a branch is not writing it: each
+// of these is the promotion path zay kept open on 2026-11-20 ("raise the proposal
+// and merge the proposal, just nothing direct against main or master"), except
+// `--fallback-branch`, which the guard refuses outright.
+//
+// `--branch` is not on this list, and no command may run a `--branch main` with
+// no question, in yolo or anywhere else.
+const NAMES_A_BRANCH_NOT_WRITTEN: Readonly<Record<string, readonly string[]>> = {
+  'global-proposal create': ['--branch-rid', '--merge-to'],
+  'repository pull-request create': ['--base-branch', '--head-commitish'],
+  'repository branch update-from-base': ['--from'],
+  'orchestration builds create': ['--fallback-branch'],
+}
+
+/** True when the only branch-naming flags in this call are ones the write does
+ * not land on. `--branch` never qualifies, in BS1, BS2 or BS3. */
+const allowedToNameMain = (path: string, args: readonly string[]) =>
+  (NAMES_A_BRANCH_NOT_WRITTEN[path] ?? []).some(flag => args.includes(flag))
 
 /** Every write of the surface, every form, one mode: what would reach Orthanc.
  * Reported as a count and the first few calls: with a rule out, hundreds of
@@ -202,6 +213,29 @@ test('BS3: a command whose declared flags name a branch refuses main on them, in
   expect([...new Set(WRITES.flatMap(entry => branchFlags(entry)))].sort()).toEqual(['--branch'])
   const forms = (entry: ManifestCommand) => branchFlags(entry).flatMap(flag => MAINS.map(main => [flag, main]))
   nothingRan(runsUnasked('yolo', forms))
+})
+
+// What the guard decides today about a branch named in a flag that is not the
+// branch a write lands on. Each row was read off the guard, not argued: run it
+// wrong and this test fails, so the decision has to be looked at and changed on
+// purpose. `run` here means yolo reaches Orthanc with no question, which is the
+// promotion path zay kept open: the write those calls propose is
+// `global-branch deploy` or `repository pull-request merge`, and both ask outside
+// yolo. `block` means the guard refuses the call in every mode.
+const BRANCH_NOT_THE_TARGET: ReadonlyArray<{ path: string; args: string[]; want: 'run' | 'block' | 'ask' }> = [
+  { path: 'global-proposal create', args: ['Ship it', '--branch-rid', 'ri.branch..branch.00000000-0000-4000-8000-000000000001', '--merge-to', 'main', '--apply'], want: 'run' },
+  { path: 'repository pull-request create', args: ['T', '--base-repository-rid', RID, '--head-commitish', 'agent/work', '--base-branch', 'refs/heads/master', '--apply'], want: 'run' },
+  { path: 'repository branch update-from-base', args: [RID, '--from', 'main', '--apply'], want: 'run' },
+  { path: 'repository pull-request merge', args: [RID, '--expect-head', 'abc123', '--apply', '--yes'], want: 'run' },
+  { path: 'orchestration builds create', args: ['plan', '--fallback-branch', 'main', '--apply'], want: 'block' },
+  { path: 'repository push', args: [RID, RID, 'refs/heads/agent/work', '--allow-default-branch'], want: 'block' },
+]
+
+test('BS3c: a branch named in a flag the write does not land on is decided on purpose', () => {
+  const seen = BRANCH_NOT_THE_TARGET.map(
+    row => `${row.want}  ${row.path} ${row.args.slice(1, 4).join(' ')}  ::  ${outcome('yolo', row.path, row.args)}`,
+  )
+  expect(seen).toEqual(BRANCH_NOT_THE_TARGET.map(row => `${row.want}  ${row.path} ${row.args.slice(1, 4).join(' ')}  ::  ${row.want}`))
 })
 
 test('BS4: Bash runs no Orthanc write of the tied surface', () => {
