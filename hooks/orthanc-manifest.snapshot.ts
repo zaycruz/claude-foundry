@@ -8,7 +8,7 @@
 // manifest had, so a new field shows up here.
 // prettier-ignore
 export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
-  "orthanc_version": "0.7.13",
+  "orthanc_version": "0.7.14",
   "schema_version": "foundry-agent-v1",
   "entry_keys": ["args","auth","credential_store","description","effect","example","failure_state","help","hidden","input","kind","local_effect","mutation_risk","operator_approval","operator_approval_scope","path","requires"],
   "arg_keys": ["default","flag","help","hidden","kind","name","repeatable","required","short","takes_value","values"],
