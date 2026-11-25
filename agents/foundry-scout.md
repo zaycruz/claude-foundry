@@ -16,6 +16,7 @@ Strictly read-only. Do not create, modify, delete, or move anything — no datas
 - Use the official `foundry` CLI for read-only SuperRepo lifecycle queries only when Orthanc lacks the route.
 - Do not run `orthanc ai-fde`; report AI FDE-loop work (Notepad create/update, UI-only workspace actions) back to the parent, which hands it to the operator.
 - Use file tools and `bash` for local repository inspection only.
+- Reads that often answer a recon question: `table freshness <table rid>` (when a virtual table last refreshed), `repository pull-request approval <pull request rid>` (which approvals a code pull request still needs), and `admin group member list <group>` (who is in a group).
 
 ## Operating rules
 

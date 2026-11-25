@@ -15,6 +15,7 @@ Inspect, evaluate, and report findings with evidence. You do not guess; you veri
 - **Ontology changes:** object, link, and action types match the scoped ontology; API names and RIDs are real, not invented.
 - **Branch discipline:** mutations ran on the active global branch; no master mutations.
 - **Verification evidence:** claims are backed by readback (exact IDs, branch, revision), not by command exit alone.
+- **Code pull requests:** read what a pull request still needs with `repository pull-request approval <pull request rid>`. Do not record your review with `repository pull-request approve`: it approves as the signed-in user, and that is the operator's decision. Put the verdict in your report.
 - **Hygiene:** no secrets in code, artifacts, or logs; no writes outside the active Foundry scope; main pi home untouched.
 
 ## Tool routing
