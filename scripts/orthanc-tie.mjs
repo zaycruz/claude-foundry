@@ -5,8 +5,10 @@
 //   node scripts/orthanc-tie.mjs check
 //       Fails (exit 1) when plugin.json, marketplace.json, hooks/orthanc-tie.ts,
 //       hooks/orthanc-manifest.snapshot.ts and hooks/orthanc-snapshot.json
-//       disagree, or when the snapshot
-//       holds a field or an approval shape the guard does not know.
+//       disagree, when the snapshot
+//       holds a field or an approval shape the guard does not know, or when
+//       the agents, skills, commands or README name a command the snapshot
+//       does not have (T11).
 //   node scripts/orthanc-tie.mjs refresh --manifest <file> --orthanc-version <v>
 //                                [--plugin-version <v>] [--min-orthanc <v>]
 //       Writes the trimmed snapshot from an `orthanc --agent agent-manifest`
@@ -43,7 +45,18 @@
 //      it follows (min_orthanc = orthanc_tag), plugin.json names the oldest
 //      orthanc the hooks support; check fails unless the job's equals its tag
 //      and is not older than plugin.json's.
-import { readFileSync, writeFileSync } from 'node:fs'
+//  T11 The agents, skills, slash commands or README name an Orthanc command
+//      the pinned orthanc does not have (renamed or removed in a release), so
+//      an agent is told to run a call that fails: check names the file and the
+//      words. Read in code spans and in fenced lines that start with
+//      `orthanc`. A span whose first word is a group of the snapshot must
+//      resolve to one command or stop at a group; `orthanc <word>` must name
+//      a group. Prose (`orthanc starts …` outside a code span) is not read,
+//      and neither is a group Orthanc hides behind an environment switch
+//      (ENV_GATED_GROUPS). False failures cost a doc edit, so the reading is
+//      narrow: only leading lowercase words, up to the first flag,
+//      placeholder or punctuation.
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -183,6 +196,84 @@ export function check() {
     const ours = markers(snap)
     for (const [path, shape] of jobMarkers) if (ours.get(path) !== shape) problems.push(`'${path}': ${FILES.releaseJob} has ${shape}, ${FILES.snapshot} has ${ours.get(path) ?? 'no marker'}`)
     for (const path of ours.keys()) if (!jobMarkers.has(path)) problems.push(`'${path}': marked in ${FILES.snapshot}, not in ${FILES.releaseJob}`)
+  }
+  if (snap) problems.push(...docNameProblems(snap))
+  return problems
+}
+
+// T11. `ai-fde` is listed only when ORTHANC_ENABLE_AI_FDE is set, so the
+// snapshot (dumped without it) has no ai-fde entry.
+const ENV_GATED_GROUPS = new Set(['ai-fde'])
+const DOC_ROOTS = ['agents', 'commands', 'skills']
+const COMMAND_WORD = /^[a-z][a-z0-9-]*$/
+
+function markdownFiles(dir) {
+  let entries
+  try {
+    entries = readdirSync(join(ROOT, dir), { withFileTypes: true })
+  } catch (error) {
+    if (error.code === 'ENOENT') return []
+    throw error
+  }
+  return entries.flatMap(entry =>
+    entry.isDirectory() ? markdownFiles(`${dir}/${entry.name}`) : entry.name.endsWith('.md') ? [`${dir}/${entry.name}`] : [],
+  )
+}
+
+/** The code spans of a markdown text and the fenced lines that run orthanc. */
+function codeMentions(text) {
+  const mentions = []
+  let fenced = false
+  const prose = []
+  for (const line of text.split('\n')) {
+    if (/^\s*```/.test(line)) {
+      fenced = !fenced
+      prose.push('')
+      continue
+    }
+    if (fenced) {
+      if (/^\s*orthanc\s/.test(line)) mentions.push(line.replace(/#.*$/, ''))
+      prose.push('')
+    } else prose.push(line)
+  }
+  // An inline span may wrap onto the next line of its paragraph.
+  for (const match of prose.join('\n').matchAll(/`([^`]+)`/g)) mentions.push(match[1])
+  return mentions
+}
+
+export function docNameProblems(snap) {
+  const paths = new Set(snap.commands.map(entry => entry.path))
+  const prefixes = new Set()
+  for (const path of paths) {
+    const words = path.split(' ')
+    for (let k = 1; k <= words.length; k += 1) prefixes.add(words.slice(0, k).join(' '))
+  }
+  const problems = []
+  for (const file of [...DOC_ROOTS.flatMap(markdownFiles), 'README.md']) {
+    const seen = new Set()
+    for (const mention of codeMentions(read(file))) {
+      const all = mention.trim().split(/\s+/)
+      const named = all[0] === 'orthanc'
+      const words = []
+      for (const word of named ? all.slice(1) : all) {
+        if (!COMMAND_WORD.test(word)) break
+        words.push(word)
+      }
+      if (words.length === 0 || ENV_GATED_GROUPS.has(words[0])) continue
+      let problem = null
+      if (!prefixes.has(words[0])) {
+        if (named) problem = `\`orthanc ${words[0]}\`: no such group`
+      } else {
+        let k = 1
+        while (k < words.length && prefixes.has(words.slice(0, k + 1).join(' '))) k += 1
+        const stem = words.slice(0, k).join(' ')
+        if (!paths.has(stem) && k < words.length) problem = `\`${words.slice(0, k + 1).join(' ')}\`: no such command`
+      }
+      if (problem !== null && !seen.has(problem)) {
+        seen.add(problem)
+        problems.push(`${file} names ${problem} in orthanc v${snap.orthanc_version ?? '?'} (T11)`)
+      }
+    }
   }
   return problems
 }
