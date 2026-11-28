@@ -98,6 +98,10 @@ const blockedEverywhere = (command: string) => {
 }
 
 const PASSES: [string, string][] = [
+  // K7: the read of documentation stays a read.
+  ['K7', 'orthanc proposal merge --help'],
+  ['K7', 'orthanc dataset create -h'],
+  ['K7', 'orthanc help proposal merge'],
   ['S1', "python3 - <<'EOF'\nimport pathlib\np = pathlib.Path('README.md'); s = p.read_text()\ns = s.replace('run `orthanc dataset create x`', 'run `orthanc dataset create y`')\np.write_text(s)\nEOF"],
   ['S1', "python3 -I - notes.md <<'EOF'\nimport sys\nt = open(sys.argv[1]).read().replace('orthanc 0.4', 'orthanc 0.5')\nopen(sys.argv[1], 'w').write(t)\nEOF"],
   ['S1', `orthanc --agent functions search lesson | python3 -c "import json,sys; d=json.load(sys.stdin)['data']; print('orthanc', len(d))"`],
@@ -184,6 +188,11 @@ const REFUSED: [string, string][] = [
   ['K6', 'echo orthanc; cat job.js | node --no-warnings'],
   ['K6', 'echo orthanc; cat job.py | python3 -v'],
   ['K6', "orthanc alias add mk 'dataset create x'"],
+  // K7: a version word is not a read of documentation.
+  ['K7', 'orthanc dataset create x --version 1.0 --yes'],
+  ['K7', 'orthanc proposal merge p --version 0.0.5'],
+  ['K7', 'orthanc proposal merge p -V'],
+  ['K7', 'orthanc dataset create x --version=1.0 --yes'],
 ]
 
 for (const [id, command] of PASSES) {
