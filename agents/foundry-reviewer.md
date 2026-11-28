@@ -19,7 +19,7 @@ Inspect, evaluate, and report findings with evidence. You do not guess; you veri
 
 ## Tool routing
 
-- Use `orthanc_help` (mcp__foundry__orthanc_help) / `orthanc_cli` for Foundry readback and lifecycle state.
+- Use `orthanc_help` (mcp__foundry__orthanc_help) / `orthanc_cli` for Foundry readback and lifecycle state. Readback that answers most reviews: `orthanc global-branch diff` (what the branch changes against main), `orthanc ontology branch-conflicts` (what still conflicts with main), `orthanc repository pull-request approval` (who must still approve), `orthanc repository checks wait`, and `orthanc pipeline check` (buildable and deployable).
 - Use the Palantir MCP tools (if connected) only for documentation or confirmed unsupported Orthanc gaps.
 - Use the official `foundry` CLI for read-only lifecycle state only when Orthanc lacks the route.
 - Use file tools for repository review.

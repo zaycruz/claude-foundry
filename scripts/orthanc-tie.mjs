@@ -43,7 +43,15 @@
 //      it follows (min_orthanc = orthanc_tag), plugin.json names the oldest
 //      orthanc the hooks support; check fails unless the job's equals its tag
 //      and is not older than plugin.json's.
-import { readFileSync, writeFileSync } from 'node:fs'
+//  T11 Orthanc renames or removes a command that an agent, a skill, a slash
+//      command or the README names as `orthanc <command>`, and the prose keeps
+//      sending agents to it: check fails and names the file and the words.
+//      A group named alone (`orthanc workshop`) counts when a command starts
+//      with it; words after the command are its positionals. A command that
+//      ships behind a feature flag is missing from the manifest by design and
+//      is listed in OFF_MANIFEST with its flag. The hooks tests cannot do this:
+//      a hooks module reads no file (hooks/destructive.test.ts says why).
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -183,6 +191,44 @@ export function check() {
     const ours = markers(snap)
     for (const [path, shape] of jobMarkers) if (ours.get(path) !== shape) problems.push(`'${path}': ${FILES.releaseJob} has ${shape}, ${FILES.snapshot} has ${ours.get(path) ?? 'no marker'}`)
     for (const path of ours.keys()) if (!jobMarkers.has(path)) problems.push(`'${path}': marked in ${FILES.snapshot}, not in ${FILES.releaseJob}`)
+  }
+  if (job) problems.push(...staleCommandNames(job.commands.map(entry => entry.path), job.orthanc_tag))
+  return problems
+}
+
+// T11. `orthanc ai-fde` is off unless ORTHANC_ENABLE_AI_FDE is set, so the
+// agent manifest leaves it out (measured on v0.7.13).
+const OFF_MANIFEST = ['ai-fde']
+const PROSE_DIRS = ['agents', 'skills', 'commands']
+const COMMAND_WORD = /^[a-z][a-z0-9-]*$/
+// Orthanc's global flags that can come before the command.
+const GLOBAL_FLAGS = new Map([['--agent', 0], ['--non-interactive', 0], ['--profile', 1]])
+
+function proseFiles(dir = '', found = []) {
+  for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    const path = dir === '' ? entry.name : `${dir}/${entry.name}`
+    if (entry.isDirectory()) proseFiles(path, found)
+    else if (path.endsWith('.md')) found.push(path)
+  }
+  return found
+}
+
+/** Each `orthanc <words>` code span in the prose whose words no command of `paths` starts or begins with. */
+export function staleCommandNames(paths, tag, files = ['README.md', ...PROSE_DIRS.flatMap(dir => proseFiles(dir))], readText = read) {
+  const commands = [...paths, ...OFF_MANIFEST].map(path => path.split(' '))
+  const startsWith = (words, prefix) => prefix.length <= words.length && prefix.every((word, i) => word === words[i])
+  const problems = []
+  for (const file of files) {
+    for (const [, span] of readText(file).matchAll(/`orthanc ([^`]+)`/g)) {
+      const tokens = span.trim().split(/\s+/)
+      let i = 0
+      while (i < tokens.length && GLOBAL_FLAGS.has(tokens[i])) i += 1 + GLOBAL_FLAGS.get(tokens[i])
+      const words = []
+      for (; i < tokens.length && COMMAND_WORD.test(tokens[i]); i++) words.push(tokens[i])
+      if (words.length === 0) continue
+      const known = commands.some(command => startsWith(words, command) || startsWith(command, words))
+      if (!known) problems.push(`${file} names \`orthanc ${words.join(' ')}\`, which is no command of orthanc ${tag} (T11)`)
+    }
   }
   return problems
 }

@@ -452,7 +452,9 @@ node scripts/orthanc-tie.mjs check
 
 `orthanc-tie.mjs check` fails when plugin.json, marketplace.json,
 `hooks/orthanc-tie.ts` and the manifest snapshot disagree (a hooks module cannot
-read plugin.json, so `orthanc-tie.ts` mirrors it). `validate` warns that
+read plugin.json, so `orthanc-tie.ts` mirrors it), and when an agent, skill,
+slash command or this README names an `orthanc …` command that the pinned
+manifest does not have. `validate` warns that
 `min_orthanc` and `orthanc_checked` are unknown fields; Claude Code ignores them.
 
 `hooks/*.test.ts` cover the ladder, parity, the context view and trace export. For an E2E run
