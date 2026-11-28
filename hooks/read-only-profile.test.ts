@@ -967,3 +967,308 @@ test('Q9: a command orthanc did not list is refused as a write, and says so', as
   expect(deny).not.toContain('--apply left off')
   expect(ran(h, 'dataset bulk delete')).toEqual([])
 })
+
+// FND-29: plugin v0.7.1 refused harmless Bash reads with the mark-store message,
+// although none of them touch the store (observed 2026-11-23 in one session).
+//
+// Ways this can fail, written before the code:
+//  R1 A jq filter (`--jq '"\(.number)"'`) or a sed expression (`s|/|_|g`,
+//     `s/\(a\)\/b/x/`) is read as a path: a backslash turned into `/`, or a
+//     lone `/` inside the word read as the root, which holds the store.
+//  R2 A redirect into a scratchpad held in a variable the line does not know
+//     (`S=$TMPDIR; … > $S/y.sh`, `S=$(mktemp -d)`) is read as `*/y.sh`, and from
+//     the home directory that `*` is taken to reach ~/.config/foundry.
+//  R3 A read of any file (`ls`, `sed -n`, `cat`, `head`) is refused because
+//     another part of the line was misread as the store.
+//  R4 The fix opens a door: a real write, move, delete or redirect into
+//     ~/.config/foundry/profile-settings.json (spelled plain, ~, $HOME, absolute,
+//     or relative after a cd; by >, >>, sed -i, tee, cp, mv, rm or python) runs.
+test('Q21: reads, jq filters, sed expressions and scratchpad paths run; writes into the mark store do not', async ($, on) => {
+  harness(on, 'yolo')
+  let cwd = '/home/tester'
+  on('session.cwd', () => ({ value: cwd }) as never)
+  const pad = '/home/tester/.cache/claude-tmp/claude-1000/-home-tester-projects-claude-foundry/0f3c/scratchpad'
+  const jq = `--jq '.[]|"\\(.number) \\(.headRefName) \\(.title)"'`
+  const prList = `gh pr list --repo zaycruz/claude-foundry --state open --json number,headRefName,title ${jq}`
+  const runs: string[] = []
+  for (const S of [pad, '$TMPDIR', '"$TMPDIR"', '$(mktemp -d)', '"$CLAUDE_SCRATCH/x"'])
+    runs.push(
+      // The three commands observed in the session that reported the bug.
+      ...(S === pad ? [prList] : []),
+      `${prList} | grep -i -E 'guard|profile' ; S=${S}; ls $S/plugin-tie*.sh; sed -n 1,40p $S/plugin-tie-hand.sh`,
+      `S=${S}; sed -e s/a/b/ $S/x.sh > $S/y.sh; bash $S/y.sh`,
+      // The same shapes, one failure mode each.
+      `S=${S}; echo hi > $S/out.txt`,
+      `S=${S}; printf '%s\\n' x >> "$S/log.txt"`,
+      `S=${S}; cp $S/a.json $S/b.json`,
+      `S=${S}; rm -f $S/*.tmp`,
+    )
+  runs.push(
+    'gh pr list --repo zaycruz/claude-foundry --state open',
+    `gh api repos/x/y/pulls --jq '.[] | "\\(.number)/\\(.head.ref)"'`,
+    `jq -r '.items[] | .path | split("/") | .[0]' data.json > paths.txt`,
+    `sed -i 's|/|_|g' notes.txt`,
+    `sed -e 's/\\(a\\)\\/b/\\1/' in.txt > out.txt`,
+    `awk -F/ '{print $1}' paths.txt > first.txt`,
+    `python3 -c "print('/'.join(['a', 'b']))"`,
+    `tr '\\\\' / < win.txt > unix.txt`,
+    'cp "$SRC/a" "$DEST/b"',
+    'rm -f "$BUILD_DIR/out"/*.o',
+    'cat ~/.config/foundry/profile-settings.json',
+    'head -5 ~/.config/foundry/profile-settings.json | jq .',
+    'ls -la ~/.config/foundry',
+    'echo hi',
+    // A temp file in a variable, and a pattern relative to where the session stands.
+    'OUT=$(mktemp); curl -s https://example.com -o "$OUT"',
+    'S=$(mktemp -d); cp a.txt "$S/a.txt"; ls $S',
+    'rm -f */x.bak',
+    `for f in */package.json; do sed -i 's/1.0/1.1/' "$f"; done`,
+  )
+  const refused: string[] = []
+  for (const where of ['/home/tester', '/home/tester/projects/app', '/'])
+    for (const command of runs) {
+      cwd = where
+      const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+      if (deny !== '') refused.push(`${where}: ${command}`)
+    }
+  // A backslash left in a word is a character of the name, not a `/`: read as one,
+  // `'\*'` was `/*`, every directory under the root.
+  cwd = '/home/tester/projects/app'
+  for (const command of [`grep -rl '\\*' src | xargs sed -i 's/a/b/'`, `rg -l '\\?' | xargs sed -i 's/x/y/'`])
+    if (((await fileTool($, 'Bash', { command })).deny ?? '') !== '') refused.push(`${cwd}: ${command}`)
+  expect(refused).toEqual([])
+
+  const mark = '/home/tester/.config/foundry/profile-settings.json'
+  const writes: string[] = []
+  for (const at of [mark, '~/.config/foundry/profile-settings.json', '$HOME/.config/foundry/profile-settings.json', '"${HOME}/.config/foundry/profile-settings.json"'])
+    writes.push(
+      `echo '{}' > ${at}`,
+      `echo '{}' >> ${at}`,
+      `sed -i 's/locked//' ${at}`,
+      `echo '{}' | tee ${at}`,
+      `cp /tmp/empty.json ${at}`,
+      `mv /tmp/empty.json ${at}`,
+      `mv ${at} /tmp/saved.json`,
+      `rm ${at}`,
+      `rm -f ${at}`,
+    )
+  writes.push(
+    `python3 -c "open('${mark}', 'w').write('{}')"`,
+    `python3 -c "import os; os.remove('$HOME/.config/foundry/profile-settings.json')"`,
+    `python3 -c "import os; os.remove(os.path.expanduser('~/.config/foundry/profile-settings.json'))"`,
+    'cd ~/.config/foundry && sed -i s/locked// profile-settings.json',
+    'cd ~/.config/foundry; > profile-settings.json',
+    'S=$TMPDIR; sed -e s/a/b/ $S/x.sh > ~/.config/foundry/profile-settings.json',
+    `jq '.read_only = []' ${mark} > /tmp/x && mv /tmp/x ${mark}`,
+    'rm -rf ~/.config/foundry',
+    // A pattern program reads `\/` as `/`; cd takes options before its directory; an
+    // unknown output inside a longer word can be any text.
+    "find ~ -path '*/.config\\/foundry/*' -delete",
+    'cd -- ~/.config/foundry && rm profile-settings.json',
+    'cd -P ~/.conf*/foundry && rm profile-settings.json',
+    'd=$(tr a y <<< a); rm -rf ~/.config/foundr$d',
+    'd="$(tr a y <<< a)"; rm -rf ~/.config/foundr$d',
+    'd="`tr a y <<< a`"; rm -rf ~/.config/foundr"$d"',
+  )
+  const ran: string[] = []
+  for (const where of ['/home/tester', '/home/tester/projects/app', '/'])
+    for (const command of writes) {
+      cwd = where
+      const deny = (await fileTool($, 'Bash', { command })).deny ?? ''
+      if (!deny.includes('profile-settings.json')) ran.push(`${where}: ${command}`)
+    }
+  // From inside the store, the bare file name is the mark.
+  cwd = '/home/tester/.config/foundry'
+  for (const command of ['sed -i s/locked// profile-settings.json', 'rm profile-settings.json', '> profile-settings.json', 'cp /tmp/e.json profile-settings.json'])
+    if (!((await fileTool($, 'Bash', { command })).deny ?? '').includes('profile-settings.json')) ran.push(`${cwd}: ${command}`)
+  expect(ran).toEqual([])
+})
+
+// FND-29, review round 1. Ways this can still fail, written before the code:
+//  R5 A redirect into a path held in a variable the line does not know
+//     (`> $TMPDIR/out.txt`, `> "$S/marks.json"`, `S=$(mktemp -d); … > $S/ro.json`)
+//     counts as a write, so a read of ~, ., ~/.config or the store on the same
+//     line is refused. Its file name is written out and is not a mark file, so
+//     whatever the variable holds, it cannot clear a mark.
+//  R6 Interpreter code after -c (`python3 -c "print('/')"`) is read with shell
+//     grammar, so `('/')` is a subshell whose word `/` is the root.
+//  R7 The fix opens a door: a redirect whose file name the line does not spell
+//     (`> "$f"`, `> $S/$name`), or that names a mark file (`> $S/profile-settings.json`),
+//     on a line that names the store, still runs; or shell code after `bash -c` or
+//     `sh -c` stops being read.
+test('Q22: a redirect into a variable path and a / in interpreter text do not meet the store', async ($, on) => {
+  harness(on, 'yolo')
+  let cwd = '/home/tester'
+  on('session.cwd', () => ({ value: cwd }) as never)
+  const mark = '~/.config/foundry/profile-settings.json'
+  const runs: [string, string][] = [
+    // The reviewer's cases4, from home.
+    ['/home/tester', 'ls . > $TMPDIR/out.txt'],
+    ['/home/tester', 'grep -r foo . > $TMPDIR/out.txt'],
+    ['/home/tester', 'grep -r foo . > "$TMPDIR/out.txt"'],
+    ['/home/tester', 'S=$TMPDIR; grep -r foo . > $S/out.txt'],
+    ['/home/tester', 'du -sh . > $TMPDIR/du.txt'],
+    ['/home/tester', 'ls ~ > $TMPDIR/out.txt'],
+    ['/home/tester', 'ls .config > $TMPDIR/o.txt'],
+    ['/home/tester', 'echo x > $TMPDIR/out.txt'],
+    ['/home/tester', "S=$(mktemp -d); find . -name '*.md' > $S/list.txt"],
+    ['/home/tester', 'ls projects > $TMPDIR/out.txt'],
+    ['/home/tester', 'cat ./notes.txt > $TMPDIR/out.txt'],
+    ['/home/tester', 'git -C projects/app status > $TMPDIR/s.txt'],
+    ['/', 'grep -r foo . > $TMPDIR/out.txt'],
+    // The reviewer's cases5, from a project.
+    ['/home/tester/projects/app', 'ls ~ > $TMPDIR/out.txt'],
+    ['/home/tester/projects/app', 'ls ~/.config > $TMPDIR/o.txt'],
+    ['/home/tester/projects/app', `cat ${mark} > $TMPDIR/copy.json`],
+    ['/home/tester/projects/app', `jq . ${mark} > "$S/marks.json"`],
+    ['/home/tester/projects/app', 'ls -la ~/.config/foundry > $TMPDIR/ls.txt'],
+    ['/home/tester/projects/app', `S=$(mktemp -d); jq .read_only ${mark} > $S/ro.json`],
+    ['/home/tester/projects/app', 'cat ~/.bashrc > $TMPDIR/b'],
+    ...['/home', '/home/tester', '/home/tester/.config', '/home/tester/projects/app', '/'].flatMap(where => [
+      'rm -rf $TMPDIR/build/*',
+      'rm -f $TMPDIR/foundry.log',
+      'rm -rf "$BUILD_DIR"/dist',
+      'cp notes.txt "$S/notes.txt"',
+      'echo x > $TMPDIR/out.txt',
+    ].map(command => [where, command] as [string, string])),
+    ['/home/tester/projects/app', `jq . ${mark} > "$(mktemp -d)/marks.json"`],
+    // The reviewer's cases3: a / in interpreter text.
+    ...[
+      `python3 -c "print('/')"`,
+      `python3 -c "f('/')"`,
+      `python3 -c "x.split('/')"`,
+      `python3 -c "x.split( '/' )"`,
+      `python3 -c "x.rstrip('/')"`,
+      `python3 -c "os.path.join(a, '/')"`,
+      `python3 -c "x.replace('/', '_')"`,
+      `python -c "print('/')"`,
+      `python3.12 -c "print('/')"`,
+      `sudo python3 -c "print('/')"`,
+      `uv run python -c "print('/'.join('ab'))"`,
+      `env PYTHONPATH=. python3 -c "print('/')"`,
+      `python3 -c "import os; print(os.listdir('src'))"`,
+      `python3 -c "print('a' + '/' + 'b')"`,
+      `timeout 5 python3 -c "print('/')"`,
+      `nice -n 5 python3 -c "x.split('/')"`,
+      `poetry run python -c "print('/')"`,
+      `/usr/bin/python3 -I -c "print('/')"`,
+      `uv run --python=3.12 python -c "print('/')"`,
+      `uv run -- python3 -c "print('/')"`,
+      `uv run python -c "import json; print(json.dumps({'a': '/'}))"`,
+      `python3 -I -u -c "print('/')"`,
+      `python3 -c 'print("//")'`,
+      `python3 -c "print('a\\\\b'.split('/'))"`,
+      `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b`,
+      `python3 -c "import sys; print(sys.argv[1].split('/'))" a/b > o.txt`,
+      `node -e "x.split('/')"`,
+      `ruby -e "puts 'a/b'.split('/')"`,
+      `perl -e "print join('/', @x)"`,
+      `jq 'split("/")' f`,
+      `awk -F'/' '{print $2}' f`,
+    ].map(command => ['/home/tester/projects/app', command] as [string, string]),
+  ]
+  const refused: string[] = []
+  for (const [where, command] of runs) {
+    cwd = where
+    if (((await fileTool($, 'Bash', { command })).deny ?? '') !== '') refused.push(`${where}: ${command}`)
+  }
+  expect(refused).toEqual([])
+
+  const writes: [string, string][] = []
+  for (const where of ['/home/tester', '/home/tester/projects/app'])
+    writes.push(
+      ...[
+        `for f in ~/.config/foundry/*; do cat "$f" > "$f"; done`,
+        `cat ${mark} > "$f"`,
+        `ls ~/.config/foundry > $S/$name`,
+        `jq '.read_only = []' ${mark} > $S/profile-settings.json`,
+        `jq '.read_only = []' ${mark} > $S/profile-settings.*`,
+        `jq '.read_only = []' ${mark} > $S/*`,
+        `jq '.read_only = []' ${mark} > $S/p*`,
+        `jq '.read_only = []' ${mark} > "$S"/profile-settings.json`,
+        `jq '.read_only = []' ${mark} > $S/../foundry/profile-settings.json`,
+        'ls ~/.config/foundry > ~/.config/foundry/profile-settings.json',
+        `bash -c 'rm -rf ~/.config/foundry'`,
+        `sh -c "echo {} > ${mark}"`,
+        `sudo bash -c 'rm -rf ~/.config/foundry'`,
+        `python3 -c "import os; os.remove('/home/tester/.config/foundry/profile-settings.json')"`,
+        `python3 -c "import shutil; shutil.rmtree('/home/tester/.config/foundry')"`,
+        `python3 -c "import os; os.system('rm -rf ~/.config/foundry')"`,
+        // A directory the line does not know, followed by a path that ends at the store
+        // or in it, from any working directory. ($X: home; $P: its parent; $C:
+        // ~/.config; $D: the store.)
+        'rm -rf $X/.config/foundry',
+        'rm -rf "$X"/.config/foundry',
+        'rm -f ${X}/.config/foundry/profile-settings.json',
+        'echo {} > $X/.config/foundry/profile-settings.json',
+        'rm -rf "$X"/../tester/.config/foundry',
+        'rm -rf $P/tester/.config/foundry',
+        'rm -rf $C/foundry',
+        'rm -f $D/profile-settings.json',
+        'rm -rf "$(printenv X)"/.config/foundry',
+        'cd -P ~/.confi? && rm -rf foundry',
+        'cd -P -- ~/.c*g && rm -rf foundry',
+        'cd -L ~/.config && rm -rf foundry',
+        'cd -e -P ~/.config/foundry && rm -f profile-settings.json',
+        'pushd -n ~/.config >/dev/null; cd ~/.config && rm -rf foundry',
+      ].map(command => [where, command] as [string, string]),
+    )
+  // Review 2: shell code run by su -c, npx -c, flock -c, script -c and env -S is
+  // still read (R7), and an unknown directory followed by `x/..` can be the store.
+  for (const where of ['/home/tester', '/home/tester/.config', '/home/tester/projects/app', '/'])
+    writes.push(
+      ...[
+        'su tester -c "rm -rf ~/.config/foundry"',
+        'su tester -c "cd ~; rm -rf .config/foundry"',
+        'su - tester -c "cd; rm -rf .config/foundry"',
+        'cd ~/.config/foundry/.. && npx -c "rm -rf foundry"',
+        'cd ~/.config && su tester -c "rm -rf foundry"',
+        'cd ~/.config && flock /tmp/l -c "rm -rf foundry"',
+        'cd ~/.config && bash -c "rm -rf foundry"',
+        "su tester -c 'cd; cd .config; rm -rf foundry'",
+        "npx -c 'cd; cd .config; rm -rf foundry'",
+        `env -S 'sh -c "cd; cd .config; rm -rf foundry"'`,
+        "script -qc 'cd; cd .config; rm -rf foundry' /dev/null",
+        "flock /tmp/l -c 'cd; cd .config; rm -rf foundry'",
+        'echo {} > $TMPDIR/x/../profile-settings.json',
+        // A relative name in Python code after a cd: main read it as shell code.
+        `cd ~/.config && python3 -c 'import shutil; shutil.rmtree("foundry")'`,
+        `cd ~/.config/foundry && python3 -c "import os; os.remove('profile-settings.json')"`,
+        `cd ~ && python3 -c "import shutil; shutil.rmtree('.config/foundry')"`,
+        `cd ~/.config && python3 -c "open('foundry/profile-settings.json', 'w').write('{}')"`,
+        // Review 3: only the program that runs the -c code decides whether it is Python;
+        // a word of the code, a lock file or an argument named python3 does not.
+        'cd ~/.config && bash -c "rm -rf foundry; /usr/bin/python3"',
+        'cd ~/.config && sh -c "rm -rf foundry && ./venv/bin/python3"',
+        'cd ~/.config && sh -c "rm -rf foundry" python3',
+        'cd ~/.config && su tester -c "rm -rf foundry; /usr/bin/python3"',
+        'cd ~/.config && flock /tmp/python3 -c "rm -rf foundry"',
+        'cd ~/.config && npx -c "rm -rf foundry; /usr/bin/python3"',
+        'cd ~/.config && su tester -c "rm -rf foundry" -s /usr/bin/python3',
+        // Review 4: the code is Python only when the word that owns its -c is the program
+        // and a Python word; a positional argument or a flag value named python is neither.
+        'cd ~/.config && npx -c "rm -rf foundry" python3',
+        'cd ~/.config && npx -c "rm -rf foundry" python',
+        'cd ~/.config && uv run --python python3 sh -c "rm -rf foundry"',
+        'cd ~/.config && uv run -p python3 sh -c "rm -rf foundry"',
+        'cd ~/.config && hatch run -e python3 sh -c "rm -rf foundry"',
+        'cd ~/.config && poetry run --directory python3 sh -c "rm -rf foundry"',
+        'cd ~/.config && pdm run -p python3 bash -c "rm -rf foundry"',
+        'cd ~/.config && uv run --python python3 -- sh -c "rm -rf foundry" python3',
+        'cd ~/.config && npx -p python3 -c "rm -rf foundry"',
+        'cd ~/.config && uv run flock python3 -c "rm -rf foundry"',
+        'cd ~/.config && uv run -q flock python3 -c "rm -rf foundry"',
+        // An unknown directory followed by ./ can be the store itself.
+        'echo {} > $D/./profile-settings.json',
+        'rm -f $D/./profile-settings.json',
+        'rm -f "$D"/./profile-settings.json',
+      ].map(command => [where, command] as [string, string]),
+    )
+  writes.push(['/home/tester/.config/foundry', 'npx -c "cd .. && rm -rf foundry"'])
+  const ran: string[] = []
+  for (const [where, command] of writes) {
+    cwd = where
+    if (!((await fileTool($, 'Bash', { command })).deny ?? '').includes('profile-settings.json')) ran.push(`${where}: ${command}`)
+  }
+  expect(ran).toEqual([])
+})

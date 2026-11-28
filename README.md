@@ -300,13 +300,50 @@ a positional parameter, a command substitution, and an operator the guard does n
 compute exactly (a substring, a replacement, a case change, a pattern trim). So
 `foundr${NOPE}y`, `foundr$1y`, `foundr$(:)y`, `foundr$(tr a y <<< a)` and
 `foundr${HOME:0:0}y` all name the store. A
-substitution that runs `echo`, `printf` or `pwd` counts as what it prints. It resolves relative names after a `cd`, and reads the
-path inside `bash -c '…'`. A `find ... -delete` whose name pattern cannot match the
+substitution that runs `echo`, `printf` or `pwd` counts as what it prints. One
+whose output is unknown and that is a variable's whole value (`OUT=$(mktemp)`)
+makes that variable unknown, not empty, so `curl -o "$OUT"` is not a write to `/`
+or `~/*`. An unknown variable or substitution that starts a word and is followed
+by `/name` (`$TMPDIR/out.txt`, `"$S/marks.json"`, `"$(mktemp -d)/x"`) reads as an
+unknown directory. It can be the empty text (`/name`), any directory above the
+store, or the store itself when `name` can be a mark file (also after `./`) or the
+rest of the path climbs back with `..`. So `rm -rf $X/.config/foundry`,
+`rm -rf "$X"/../tester/.config/foundry`, `rm -f $D/profile-settings.json` and
+`echo {} > $TMPDIR/x/../profile-settings.json` are refused from any working directory. The guard does not read such a word as `*`, which
+would resolve against every directory the line names. A redirect
+into such a path writes a file whose name the line spells. When that name cannot be
+a mark file or the store, the redirect clears no mark wherever the variable points,
+so `ls ~/.config > $TMPDIR/o.txt` and `jq . <mark> > "$S/marks.json"` run. A
+redirect into `"$f"`, `$S/profile-settings.json` or `$S/p*` is still refused on a
+line that names the store. `mktemp` counts as a reader: it only makes a new file and
+never replaces or removes one. It resolves relative names after a `cd`. It reads the
+code after `-c` and `env -S` as shell code (`bash -c`, `sudo sh -c`, `su -c`,
+`npx -c`, `flock -c`, `script -c`), except when it is Python code. The code is Python
+only when the word that owns its `-c` (the nearest word before it that is not a flag)
+is a Python word and is the program. The program is the command word past wrappers
+(`python3`, `sudo python3`, `timeout 5 python3`), or the first word after `uv run`
+(and `poetry`, `hatch`, `pdm`, `pipenv`, `rye`) past only `--` and `--flag=value`. A
+word of the code, a positional argument, a lock file or a flag's value named `python3`
+is not the program, so `sh -c "rm -rf foundry; /usr/bin/python3"`,
+`npx -c "rm -rf foundry" python3`, `flock /tmp/python3 -c "…"` and
+`uv run -p python3 sh -c "…"` are read as shell. When in doubt, the guard reads the
+code as shell, so `uv run --python 3.12 python -c "print('/')"` is refused and
+`uv run --python=3.12 python -c "print('/')"` runs. The code in
+`python3 -c "print('/')"` is Python, so `('/')` is not a subshell whose word `/` is
+the root. Its string literals count as names the command uses, so
+`cd ~/.config && python3 -c 'shutil.rmtree("foundry")'` is still refused. A literal
+that is only slashes is not the root. A pattern (`*/x.bak`) is not a directory
+the command works in, so `rm -f */x.bak` from home does not read as `~/*/*/x.bak`. A
+backslash that quoting keeps (`--jq '"\(.number)"'`, `sed 's/\(a\)/x/'`) is a
+character of the name, not a `/`. A lone `/` inside a program's text (`split("/")`,
+`s|/|_|`, `'/'.join(…)`) is not the root. A program that reads `\/` as `/` in a
+pattern (`find -path '*/.config\/foundry'`) is read that way too. A `find ... -delete` whose name pattern cannot match the
 mark (`find ~ -name "profile-*.png" -delete`) still runs. The guard reads the
 command line, not a running shell, so it has these limits. It does not catch a path
 built at run time inside a script
 (`python3 -c "os.remove(os.path.join(os.environ['HOME'], ...))"`). It does not catch
-a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`)
+a whole word that is a variable set outside the line (`rm -rf "$f"`, `rm -rf $STORE`),
+or an unknown directory that one command takes from another (`ls -d $X/.config | xargs rm -rf`),
 or a command substitution whose output only the run shows (`rm -rf $(cat list)`).
 It also does not catch a path that a file the line reads supplies
 (`xargs rm -rf < list`, `source script.sh`). The rule also refuses more than it must: a command that is not a reader
