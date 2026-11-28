@@ -2,7 +2,7 @@
 // Pure: the envelope, the manifest and the help text. Running orthanc stays
 // in register.tsx, where `$` lives.
 
-import { BINARY_RISK, CREDENTIAL_HINT, localWriteNote, type ManifestCommand, type ManifestFlag, isCredentialCommand, operatorOnlyReason, replacesBinary } from './policy'
+import { BINARY_RISK, CREDENTIAL_HINT, localWriteNote, type ManifestCommand, type ManifestFlag, type ManifestPositional, isCredentialCommand, operatorOnlyReason, replacesBinary } from './policy'
 
 export type Envelope = {
   schema_version: string
@@ -62,6 +62,7 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
           input: credentialMarker(entry.input),
           credentialStore: credentialMarker(entry.credential_store),
           flags: flagsFrom(entry.args),
+          ...(Array.isArray(entry.args) ? { positionals: positionalsFrom(entry.args) } : {}),
           // Kept raw, null included: policy reads it and fails closed on what it cannot read.
           ...('operator_approval' in entry ? { operatorApproval: entry.operator_approval } : {}),
           ...('operator_approval_scope' in entry ? { operatorApprovalScope: entry.operator_approval_scope } : {}),
@@ -71,6 +72,22 @@ export function manifestFrom(envelope: Envelope): ManifestCommand[] {
         }]
       : [],
   )
+}
+
+// The positionals in the order Orthanc reads them: approvalOnWorkBranch finds
+// the code-repository branch a write lands on by its place. An arg that is
+// neither an option with a flag nor a named positional makes the count
+// unknowable, so the list is null and the guard asks. A positional is
+// repeatable unless the entry says it is not.
+function positionalsFrom(args: readonly unknown[]): ManifestPositional[] | null {
+  const positionals: ManifestPositional[] = []
+  for (const arg of args) {
+    if (!isRecord(arg)) return null
+    if (typeof arg.flag === 'string') continue
+    if (arg.kind !== 'positional' || typeof arg.name !== 'string') return null
+    positionals.push({ name: arg.name, repeatable: arg.repeatable !== false })
+  }
+  return positionals
 }
 
 function flagsFrom(args: unknown): ManifestFlag[] {

@@ -4,6 +4,8 @@
 
 /** One option of a manifest command, as Orthanc's agent-manifest lists it. */
 export type ManifestFlag = { flag: string; takesValue: boolean; default?: string; values?: string[] }
+/** One positional of a manifest command, in the order Orthanc reads them. */
+export type ManifestPositional = { name: string; repeatable: boolean }
 export type ManifestCommand = {
   path: string
   kind?: string
@@ -12,6 +14,9 @@ export type ManifestCommand = {
   /** Set when the command writes the operator's own credential store (orthanc names it `credential_store`). */
   credentialStore?: string
   flags?: ManifestFlag[]
+  /** The positionals, in order; null when an arg of the entry is neither an
+   * option with a flag nor a named positional, so the guard cannot count them. */
+  positionals?: ManifestPositional[] | null
   /** The entry's raw `operator_approval`, unread: operatorApprovalQuestion reads it, failing closed. */
   operatorApproval?: unknown
   /** The entry's raw `operator_approval_scope` (orthanc #118), unread: approvalOnWorkBranch reads it, failing closed. */
@@ -404,7 +409,7 @@ export type GateClassification = {
   releaseOnWorkBranch?: true
   /** The question to put to the operator for a write the manifest marks operator_approval. */
   operatorApproval?: string
-  /** True when operator_approval_scope proves the write lands on one global work branch: yolo skips the ask. */
+  /** True when operator_approval_scope proves the write lands on one work branch, never main: yolo skips the ask. */
   operatorApprovalOnWorkBranch?: true
   /** Set when the manifest calls the command a read and it is not one: what the
    * call does to this machine, in the sentence the operator and the agent read. */
@@ -865,28 +870,108 @@ export function readApprovalScope(scope: unknown): ApprovalScope | null {
   return { kind: 'flag', flags: [flag, ...(aliases as string[])] }
 }
 
+/** The call read against the options its manifest entry declares: every word
+ * that may name a branch (`mentions`), the positionals in order, and whether
+ * every flag of the call is one the entry declares (`known`), so the place of
+ * each word is certain. `--flag v` and `--flag=v` read the same.
+ *
+ * The value of an option is not a mention when the entry lists it among that
+ * option's `values`, spelled exactly: it is one of the option's fixed choices
+ * (`--take main` of `ontology branch-conflict-resolve` picks main's side of a
+ * conflict on the branch), never a branch the caller named. Only an enumerated
+ * value is exempt, not the value of every option whose name does not look like
+ * a branch: the name does not say what the value is (`--from` of `repository
+ * branch update-from-base` names a branch), and Orthanc's `values` do.
+ *
+ * A flag the entry does not declare is read as taking no value, so the word
+ * after it stays a mention (`--yes main`), and the places are then unknown.
+ * After `--` every word is a positional to Orthanc; the guard reads each as a
+ * mention and the places as unknown. */
+type CallReading = { mentions: string[]; positionals: string[]; known: boolean }
+
+function readCall(args: readonly string[], entry: ManifestCommand): CallReading {
+  const shapes = new Map((entry.flags ?? []).map(flag => [flag.flag, flag] as [string, ManifestFlag]))
+  const reading: CallReading = { mentions: [], positionals: [], known: true }
+  for (let index = 0; index < args.length; index += 1) {
+    const raw = args[index] ?? ''
+    const word = unquote(raw)
+    if (word === '--') {
+      reading.mentions.push(...args.slice(index + 1))
+      reading.known = false
+      break
+    }
+    if (!word.startsWith('-')) {
+      reading.mentions.push(raw)
+      reading.positionals.push(raw)
+      continue
+    }
+    const equals = word.indexOf('=')
+    const shape = shapes.get(equals > 0 ? word.slice(0, equals) : word)
+    if (shape === undefined) reading.known = false
+    let value: string | null = null
+    if (equals > 0) value = word.slice(equals + 1)
+    else if (shape?.takesValue === true) {
+      value = args[index + 1] ?? ''
+      index += 1
+    }
+    if (value === null) continue
+    if (shape?.takesValue === true && (shape.values ?? []).includes(value)) continue
+    reading.mentions.push(value)
+  }
+  return reading
+}
+
+/** Where a "work-branch" write of a code repository lands: the index of the one
+ * positional the entry names `branch` (`repository branch update-from-base
+ * <repository> <branch>`, "never the repository's default branch"). Global
+ * branch positionals are named `branch_rid` and take a RID. Null when the
+ * entry names no such positional, names it twice, cannot be counted, or also
+ * declares `--branch` or `-b`, which would leave the landing branch unclear. */
+function repositoryBranchSlot(entry: ManifestCommand): number | null {
+  const positionals = entry.positionals
+  if (positionals == null) return null
+  const slots = positionals.flatMap((positional, index) => (positional.name === 'branch' ? [index] : []))
+  if (slots.length !== 1) return null
+  if ((entry.flags ?? []).some(flag => BRANCH_FLAGS.includes(flag.flag.toLowerCase()))) return null
+  return slots[0]!
+}
+
 /** True only when the entry's operator_approval_scope (orthanc #118) shows
- * that this call lands on one global work branch, never on main:
- * `"work-branch"` with a global branch RID among the positionals and nothing
- * naming main, or `{work_branch_flag, flag_aliases?}` with that flag (or an
- * alias) holding one global branch RID. `"always"`, a missing or unreadable
- * scope, or an unreadable operator_approval, is false: yolo then asks. */
+ * that this call lands on one work branch, never on main:
+ *  - `"work-branch"` on a command whose entry names a positional `branch` (a
+ *    code-repository branch, repositoryBranchSlot): every flag of the call is
+ *    one the entry declares, the positionals are the ones it declares, none
+ *    repeatable and none naming main, and the `branch` positional is a branch
+ *    name that is not main, master or HEAD. The write lands there; a base it
+ *    reads from (`--from main`) lands nowhere.
+ *  - `"work-branch"` on any other command: a global branch RID among the
+ *    words that may name a branch (readCall), and none of them naming main.
+ *  - `{work_branch_flag, flag_aliases?}`: that flag (or an alias) holds one
+ *    global branch RID.
+ * `"always"`, a missing or unreadable scope, or an unreadable
+ * operator_approval, is false: yolo then asks. So is a `"work-branch"` call
+ * whose `--branch` or `-b` names main, in any spelling. */
 export function approvalOnWorkBranch(path: string, args: readonly string[], manifest: readonly ManifestCommand[]): boolean {
   const entry = manifest.find(found => found.path === path)
   if (entry === undefined || readApprovalCondition(entry.operatorApproval) === null) return false
   const scope = readApprovalScope(entry.operatorApprovalScope)
   if (scope === null || scope.kind === 'always') return false
-  if (scope.kind === 'work-branch') {
-    // Every word that is not a flag counts, whatever flag comes before it: the
-    // guard does not know which flags take a value (`--yes main`).
-    const words = args.filter(arg => !unquote(arg).startsWith('-'))
+  if (scope.kind === 'flag') return oneWorkBranchFlag(args, scope.flags)
+  if (flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue)) return false
+  const reading = readCall(args, entry)
+  const slot = repositoryBranchSlot(entry)
+  if (slot !== null) {
+    // The `branch` positional is among those checked for main.
+    const declared = entry.positionals ?? []
     return (
-      words.some(arg => WORK_BRANCH_RID.test(arg)) &&
-      !words.some(arg => isProtectedValue(unquote(arg))) &&
-      !flagValues(args.map(arg => arg.toLowerCase()), BRANCH_FLAGS).some(isProtectedValue)
+      reading.known &&
+      !declared.some(positional => positional.repeatable) &&
+      reading.positionals.length === declared.length &&
+      !reading.positionals.some(positional => isProtectedValue(unquote(positional))) &&
+      BRANCH_VALUE.test(reading.positionals[slot] ?? '')
     )
   }
-  return oneWorkBranchFlag(args, scope.flags)
+  return reading.mentions.some(word => WORK_BRANCH_RID.test(word)) && !reading.mentions.some(word => isProtectedValue(unquote(word)))
 }
 
 /** What `configure list` says about the stack a call would run on (v0.7.8). */
@@ -2659,7 +2744,7 @@ export function modeGuidance(mode: ApprovalMode): string {
       ? `Foundry approval mode: yolo. Nothing asks the operator except a write on main: a destructive write (one that leaves something ${destructiveWords()} by its name, a flag, or a flag value, or one given --force) runs at once, ` +
         'and the loop guard is off. A promotion runs with no ask, and so does an AI FDE run (ai-fde run --apply). A write that names main or master as its branch asks the operator; ' +
         'so does a release tag (repository tag create --apply) with no --branch <global branch RID>, and a write the agent manifest ' +
-        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on one global work branch, ' +
+        'marks operator_approval (such as turning branch protection off) unless its operator_approval_scope shows it lands on a work branch (a global branch RID, or a code-repository branch that is not main), ' +
         'and so does an ontology scenario based on main (`ontology scenario create --apply` with no --base-branch <global branch RID>). ' +
         'If the operator declines or no one can be asked, it is blocked. Pass a work branch instead.'
       : 'Promotions follow the ladder like any other write. ' +

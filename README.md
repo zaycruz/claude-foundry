@@ -116,9 +116,13 @@ Function hooks must be enabled (`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`).
   asks in `yolo` too. A write that Orthanc's agent manifest marks
   `operator_approval` (turning branch protection off, removing a required
   check) asks in every mode; in `yolo` it runs with no ask only when the
-  entry's `operator_approval_scope` shows it lands on one global work branch
+  entry's `operator_approval_scope` shows it lands on one work branch
   (`global-branch roles set`, `remove-resources`, `remove-repo` with a branch
-  RID). A missing or unreadable scope asks. A write naming `main`, `master` or `HEAD` as its branch (any
+  RID; `ontology branch-conflict-resolve --branch <RID>`, whose `--take main`
+  is one of the two sides the manifest lists, not a branch; `repository branch
+  update-from-base <repo> <branch>` with a branch that is not main, master or
+  HEAD and only flags the manifest declares, whatever `--from` it merges in).
+  A missing or unreadable scope asks. A write naming `main`, `master` or `HEAD` as its branch (any
   spelling: `--branch=main`, `-b master`, `-bmain`, or as a positional, as in
   `dataset branches delete <dataset> master` or `branch-protection repo
   unprotect <repo> main`), and `workshop module publish`, which works on main
