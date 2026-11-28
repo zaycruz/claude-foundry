@@ -36,15 +36,17 @@
 //  Q9 The table is an object literal, so an inherited key (`command:
 //     'constructor'`) reads as a match and the refusal prints an inherited
 //     Object.prototype member. `command` is free-form text in the tool schema.
-//  Q10 would pin both names and their `read-only` kind against
-//     hooks/orthanc-snapshot.json, the manifest copy the plugin ships, so a
-//     rename reopens the leak loudly. It cannot be written: a hooks module may
-//     import only relative paths and 'claude-code', so no test in this plugin
-//     can read a .json (the runner says so: 'cannot import "node:fs"'). The pin
-//     belongs in the hooks runtime, where file reads go through `$`.
+//  Q10 Orthanc renames one of the two commands, or re-kinds it, and the name
+//     table stops matching in silence: the lookup returns null, the call takes
+//     the read short-circuit, and the leak is back with no test failing. The
+//     pin is the manifest copy the plugin ships,
+//     hooks/orthanc-manifest.snapshot.ts (FND-11's tie). An attempt at this test
+//     before that file existed failed to load: a hooks module may import only
+//     relative paths and 'claude-code', so no test can read a .json.
 import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
+import { SNAPSHOT } from './orthanc-manifest.snapshot'
 import { renderCommand } from './orthanc'
 import { classifyCall, ladderDecision, type ManifestCommand, operatorOnlyReason } from './policy'
 
@@ -274,4 +276,25 @@ test('Q9: an inherited object key is not a match, and an unknown command is not 
     expect({ key, deny: denied.deny }).toEqual({ key, deny: undefined })
   }
   expect(h.asked).toEqual([])
+})
+
+type SnapshotEntry = { path: string; kind: string; input?: string; credential_store?: string }
+
+// Both names, and their `kind: read-only`, come from Orthanc. A release that
+// renames one of the two commands, or re-kinds it, makes this table stop
+// matching, and the call goes back through the read short-circuit as it did
+// before the rule existed. hooks/orthanc-manifest.snapshot.ts is the manifest
+// copy the plugin ships, written by `node scripts/orthanc-tie.mjs refresh`.
+test('Q10: the shipped agent-manifest copy still names both commands, and as reads', () => {
+  const commands = (SNAPSHOT as unknown as { commands: SnapshotEntry[] }).commands
+  expect(commands.length > 0).toBe(true)
+  for (const path of Object.keys(REASON_MARKS)) {
+    const entry = commands.find(candidate => candidate.path === path)
+    expect({ path, found: entry !== undefined }).toEqual({ path, found: true })
+    expect({ path, kind: entry?.kind }).toEqual({ path, kind: 'read-only' })
+    // A command that names an `input` or a `credential_store` is refused by the
+    // credential rule. Should Orthanc ever mark these two that way, that rule
+    // covers them and this table becomes the second belt: said here, not assumed.
+    expect({ path, input: entry?.input, store: entry?.credential_store }).toEqual({ path, input: undefined, store: undefined })
+  }
 })
