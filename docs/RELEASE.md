@@ -57,7 +57,7 @@ warning.
 | F7 | Two orthanc releases come close together | One branch and one pull request per tag, `orthanc-v<tag>`. A branch that already exists is never pushed over. Each open pull request proposes its own plugin version (the job's P12). The operator finishes and merges them oldest first, or merges the newest and closes the older ones. |
 | F8 | The plugin repository cannot be reached | The orthanc release still publishes. The job reports that it opened no pull request (its P1). |
 | F9 | The token is broader than one repository | The job refuses to run (its P4). |
-| F10 | The release job's pull request is merged as the job opened it | `check` fails on it (T8) and names the `refresh` to run. Run `check` before every merge. |
+| F10 | The release job's pull request is merged as the job opened it | `check` fails on it (T8) and names the `refresh` to run. Run `check` before every merge; CI runs it on every pull request and every push to main (`.github/workflows/ci.yml`, job `orthanc-tie`), so the pull request is red until it is finished. |
 
 ## The orthanc release job (orthanc-source, SRC-178)
 
