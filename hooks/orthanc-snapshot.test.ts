@@ -59,7 +59,7 @@ const withEntry = (path: string, change: Partial<Entry> & Record<string, unknown
 
 test('S1 S3: every approval shape in the release snapshot is one the guard reads, and the snapshot is of ORTHANC_CHECKED', () => {
   expect(snapshotProblems(snapshot)).toEqual([])
-  // The release snapshot has markers (58 in 0.7.12); a refresh that loses them is drift.
+  // The release snapshot has markers (58 in 0.7.12, 61 in 0.7.13); a refresh that loses them is drift.
   expect(markers().length > 0).toBe(true)
   expect(snapshot.commands.length > 100).toBe(true)
 })
