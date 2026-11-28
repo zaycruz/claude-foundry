@@ -8,7 +8,7 @@
 // manifest had, so a new field shows up here.
 // prettier-ignore
 export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
-  "orthanc_version": "0.7.12",
+  "orthanc_version": "0.7.13",
   "schema_version": "foundry-agent-v1",
   "entry_keys": ["args","auth","credential_store","description","effect","example","failure_state","help","hidden","input","kind","local_effect","mutation_risk","operator_approval","operator_approval_scope","path","requires"],
   "arg_keys": ["default","flag","help","hidden","kind","name","repeatable","required","short","takes_value","values"],
@@ -56,6 +56,7 @@ export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
     {"auth":"bearer-token","kind":"read-only","path":"audit list"},
     {"auth":"bearer-token","kind":"read-only","path":"audit read"},
     {"kind":"local","path":"auth delete"},
+    {"kind":"local","path":"auth mint"},
     {"input":"token-on-stdin","kind":"local","path":"auth store"},
     {"auth":"bearer-token","kind":"mutation","path":"automate create"},
     {"auth":"bearer-token","kind":"mutation","path":"automate delete"},
@@ -276,7 +277,7 @@ export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
     {"auth":"bearer-token","kind":"read-only","path":"global-branch resources"},
     {"auth":"bearer-token","kind":"read-only","path":"global-branch roles get"},
     {"args":[{"flag":"--principal-type","takes_value":true},{"flag":"--principal","takes_value":true},{"flag":"--role","takes_value":true},{"flag":"--remove","takes_value":false},{"flag":"--apply","takes_value":false},{"flag":"--yes","takes_value":false}],"auth":"bearer-token","kind":"mutation","operator_approval":{"when_all_flags":["--apply"]},"operator_approval_scope":"work-branch","path":"global-branch roles set"},
-    {"auth":"bearer-token","kind":"mutation","path":"global-branch update"},
+    {"args":[{"flag":"--apply","takes_value":false},{"flag":"--description","takes_value":true},{"flag":"--expect-version","takes_value":true}],"auth":"bearer-token","kind":"mutation","operator_approval":{"when_all_flags":["--apply"]},"operator_approval_scope":"work-branch","path":"global-branch update"},
     {"auth":"bearer-token","kind":"read-only","path":"global-branch versions"},
     {"auth":"bearer-token","kind":"mutation","path":"global-proposal close"},
     {"auth":"bearer-token","kind":"mutation","path":"global-proposal create"},
@@ -344,6 +345,8 @@ export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
     {"auth":"bearer-token","kind":"mutation","path":"ontology action-type-update"},
     {"auth":"bearer-token","kind":"mutation","path":"ontology action-type-upsert"},
     {"auth":"bearer-token","kind":"read-only","path":"ontology action-validate"},
+    {"args":[{"flag":"--branch","takes_value":true},{"flag":"--entity","takes_value":true},{"flag":"--take","takes_value":true},{"flag":"--apply","takes_value":false},{"flag":"--yes","takes_value":false}],"auth":"bearer-token","kind":"mutation","operator_approval":{"when_all_flags":["--apply","--yes"]},"operator_approval_scope":"work-branch","path":"ontology branch-conflict-resolve"},
+    {"auth":"bearer-token","kind":"read-only","path":"ontology branch-conflicts"},
     {"auth":"bearer-token","kind":"mutation","path":"ontology branch-index"},
     {"auth":"bearer-token","kind":"read-only","path":"ontology branch-index-status"},
     {"auth":"bearer-token","kind":"read-only","path":"ontology bulk-get"},
@@ -452,6 +455,7 @@ export const SNAPSHOT = /* BEGIN SNAPSHOT */ {
     {"auth":"bearer-token","kind":"mutation","path":"repository branch create"},
     {"auth":"bearer-token","kind":"mutation","path":"repository branch delete"},
     {"auth":"bearer-token","kind":"read-only","path":"repository branch list"},
+    {"args":[{"flag":"--from","takes_value":true},{"flag":"--expect-head","takes_value":true},{"flag":"--fast-forward-only","takes_value":false},{"flag":"--apply","takes_value":false}],"auth":"bearer-token","kind":"mutation","operator_approval":{"when_all_flags":["--apply"]},"operator_approval_scope":"work-branch","path":"repository branch update-from-base"},
     {"auth":"bearer-token","kind":"read-only","path":"repository branch-status"},
     {"auth":"bearer-token","kind":"read-only","path":"repository build-logs"},
     {"auth":"bearer-token","kind":"read-only","path":"repository build-status"},
